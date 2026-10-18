@@ -35,7 +35,7 @@ dashboardRoutes.get("/", async (c) => {
     db.select({ v: sql<number>`coalesce(sum(${orders.total}), 0)` }).from(orders).where(and(eq(orders.archived, false), isNull(orders.cancelledAt), gte(orders.shopCreatedAt, today))).get(),
     count(and(live, eq(orders.courierStage, "unbooked"))),
     count(and(eq(orders.archived, false), eq(orders.courierStage, "booked"))),
-    count(and(eq(orders.archived, false), inArray(orders.courierStage, ["in_transit", "on_hold"]))),
+    count(and(eq(orders.archived, false), inArray(orders.courierStage, ["in_transit", "on_hold", "awaiting_confirmation"]))),
     count(and(eq(orders.archived, false), inArray(orders.courierStage, ["delivered", "partial_delivered"]), gte(orders.shopCreatedAt, since))),
     count(and(eq(orders.archived, false), eq(orders.courierStage, "returned"), gte(orders.shopCreatedAt, since))),
     count(
@@ -134,6 +134,7 @@ dashboardRoutes.get("/", async (c) => {
     days,
     today: { orders: todayOrders, revenue: todayRevenue?.v ?? 0 },
     pipeline: { toCall, readyToBook, unbooked, booked, inTransit, delivered, returned, attention, stuck: (await stuckParcels(db, await getSettings(db))).parcels.length },
+    steadfastPause: await steadfast.steadfastPause(c.env),
     oldestUnbookedAt: oldestUnbooked?.at ?? null,
     cod: {
       booked: cod?.booked ?? 0,

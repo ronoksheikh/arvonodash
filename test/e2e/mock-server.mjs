@@ -3,7 +3,14 @@
 import http from "node:http";
 
 const PORT = Number(process.env.MOCK_PORT ?? 8790);
-const state = { fulfillments: [], tags: [], consignments: [], tokenRequests: 0, webhooks: [], returnRequests: [], progressReports: [], reopened: [], cancelled: [], deleteAttempts: [], closed: [] };
+const state = {
+  fulfillments: [], tags: [], consignments: [], tokenRequests: 0, webhooks: [], returnRequests: [], progressReports: [], reopened: [], cancelled: [], deleteAttempts: [], closed: [],
+  markedPaid: [], fraudCalls: {}, historyCalls: 0,
+};
+// Steadfast fraud profiles by phone (set by the test); default is a good customer.
+const fraudProfiles = {};
+// Extra tracking-history steps by invoice (set by the test).
+const histories = {};
 const restOrders = {}; // shopify id -> REST payload registered by the test (mirrors webhook data)
 
 function displayStatus(orderId) {
@@ -118,6 +125,10 @@ function graphql(query, variables) {
     state.closed.push(variables.input.id);
     return { data: { orderClose: { order: { id: variables.input.id, closedAt: new Date().toISOString() }, userErrors: [] } } };
   }
+  if (query.includes("orderMarkAsPaid")) {
+    state.markedPaid.push(variables.input.id.split("/").pop());
+    return { data: { orderMarkAsPaid: { order: { id: variables.input.id, displayFinancialStatus: "PAID" }, userErrors: [] } } };
+  }
   if (query.includes("tagsAdd")) {
     state.tags.push(variables);
     return { data: { tagsAdd: { userErrors: [] } } };
@@ -155,6 +166,16 @@ const server = http.createServer(async (req, res) => {
   if (p === "/__orders" && req.method === "POST") {
     const o = JSON.parse(body);
     restOrders[String(o.id)] = o;
+    return json(res, 200, { ok: true });
+  }
+  if (p === "/__fraud" && req.method === "POST") {
+    const { phone, profile } = JSON.parse(body);
+    fraudProfiles[phone] = profile;
+    return json(res, 200, { ok: true });
+  }
+  if (p === "/__history" && req.method === "POST") {
+    const { invoice, steps } = JSON.parse(body);
+    histories[invoice] = steps;
     return json(res, 200, { ok: true });
   }
   if (p === "/__fo_status" && req.method === "POST") {
@@ -206,6 +227,29 @@ const server = http.createServer(async (req, res) => {
       return c ? json(res, 200, { status: 200, delivery_status: c.status }) : json(res, 404, { status: 404, message: "Consignment not found" });
     }
     if (route === "/get_balance") return json(res, 200, { status: 200, current_balance: 15230.5 });
+    if ((m = route.match(/^\/fraud_check\/score\/(.+)$/))) {
+      const phone = decodeURIComponent(m[1]);
+      state.fraudCalls[phone] = (state.fraudCalls[phone] ?? 0) + 1;
+      const profile = fraudProfiles[phone];
+      if (profile === "429") {
+        res.setHeader("Retry-After", "2");
+        return json(res, 429, { message: "Too Many Attempts." });
+      }
+      return json(res, 200, {
+        phone, delivery_ratio: 95, cancellation_ratio: 5, volume_band: "high", total_reports: 0, fraud_categories: [],
+        score: null, level: null, reasons: [], scoring_disabled: true, doubtful_reports: false, ...(profile ?? {}),
+      });
+    }
+    if ((m = route.match(/^\/trackings_by_invoice\/(.+)$/))) {
+      state.historyCalls++;
+      const invoice = decodeURIComponent(m[1]);
+      const c = state.consignments.find((x) => x.invoice === invoice);
+      if (!c) return json(res, 404, { status: 404, message: "Consignment not found" });
+      return json(res, 200, [
+        { consignment_id: c.consignment_id, tracking_type: 1, text: "Consignment created by Sender(API).", created_at: "2026-10-18 10:00:00" },
+        ...(histories[invoice] ?? []).map((t) => ({ consignment_id: c.consignment_id, tracking_type: 2, ...t })),
+      ]);
+    }
     if (route === "/create_return_request") {
       const input = JSON.parse(body);
       const rr = { id: state.returnRequests.length + 1, user_id: 1, consignment_id: input.consignment_id, reason: input.reason ?? null, status: "pending", created_at: new Date().toISOString(), updated_at: new Date().toISOString() };

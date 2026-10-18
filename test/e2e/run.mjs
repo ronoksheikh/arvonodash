@@ -826,6 +826,177 @@ await step("owner report: orders, calls, courier, COD and returns by district/pr
   assert.equal(bad.status, 400);
 });
 
+// New live order for a specific customer phone (Shopify webhook → ARVONO).
+const newOrder = async (id, phone, extra = {}) => {
+  await shopifyWebhook(
+    "orders/create",
+    restOrder(id, { customer: { id: 7000 + id, first_name: "Rafiq", last_name: "Hasan" }, shipping_address: { name: "Rafiq Hasan", address1: "House 9, Road 2, Mirpur", city: "Dhaka", zip: "1216", country: "Bangladesh", phone }, ...extra }),
+  );
+  return (await call("GET", `/api/orders?search=%23${id}`)).body.rows[0];
+};
+const runCron = async () => {
+  const r = await fetch(`${BASE}/cdn-cgi/handler/scheduled?cron=*+*+*+*+*`);
+  assert.equal(r.status, 200);
+  await sleep(1500);
+};
+
+await step("Steadfast fraud check: risky customers wait in Call first and are never auto-booked", async () => {
+  const phone = "01733333333";
+  await fetch(`${MOCK}/__fraud`, { method: "POST", body: JSON.stringify({ phone, profile: { delivery_ratio: 40, cancellation_ratio: 60, volume_band: "medium", total_reports: 2, fraud_categories: ["fake order"] } }) });
+  const o = await newOrder(5201, "+880 1733-333333");
+  await sleep(1500); // the lookup runs from the job queue right after the webhook
+  const d = await orderDetail(o.id);
+  assert.equal(d.fraud?.verdict, "risky", JSON.stringify(d.fraud));
+  assert.equal(d.fraud.totalReports, 2);
+  assert.deepEqual(d.fraud.categories, ["fake order"]);
+  assert.ok(d.order.riskFlags.includes("courier_fraud"));
+  const cf = await call("GET", "/api/orders?tab=call_first");
+  assert.ok(cf.body.rows.some((r) => r.id === o.id), "listed in Call first");
+  assert.equal(cf.body.rows.find((r) => r.id === o.id).fraud.verdict, "risky");
+  const calls = (await mockState()).fraudCalls[phone];
+  await call("POST", `/api/orders/${o.id}/fraud-check`);
+  assert.equal((await mockState()).fraudCalls[phone], calls, "a re-check within a minute reuses the cached result");
+
+  await call("PUT", "/api/settings", { autoBookDelayMinutes: 0 });
+  await call("POST", `/api/orders/${o.id}/calling`, { status: "confirmed" });
+  await sleep(1100);
+  await runCron();
+  const held = await orderDetail(o.id);
+  assert.equal(held.order.courierStage, "unbooked", "risky customer is not auto-booked");
+  assert.match(held.order.autoBookNote, /Held for a call/);
+  await call("PUT", "/api/settings", { autoBookDelayMinutes: 10 });
+  const r = await call("POST", "/api/orders/book", { ids: [o.id] });
+  assert.equal(r.body.results[0].ok, true, "staff can still send it after calling");
+});
+
+await step("same customer's orders go out as one parcel; both follow it, and are marked paid only once Steadfast confirms", async () => {
+  const phone = "+880 1755-555555";
+  const a = await newOrder(5301, phone);
+  const b = await newOrder(5302, phone, {
+    line_items: [{ id: 9101, title: "Tupi", variant_title: null, sku: "TP", quantity: 1, price: "300.00", variant_id: 79 }],
+    total_price: "420.00", subtotal_price: "300.00", total_outstanding: "420.00",
+  });
+  for (const o of [a, b]) await call("POST", `/api/orders/${o.id}/calling`, { status: "confirmed" });
+  const list = await call("GET", "/api/orders?search=%235301");
+  assert.match(list.body.rows[0].combinableWith, /#5302/);
+  assert.deepEqual((await orderDetail(a.id)).combineCandidates.map((x) => x.name), ["#5302"]);
+
+  const r = await call("POST", "/api/orders/book", { ids: [a.id, b.id], combine: true });
+  assert.ok(r.body.results.every((x) => x.ok), JSON.stringify(r.body));
+  const parcels = (await mockState()).consignments.filter((c) => c.invoice.startsWith("5301"));
+  assert.equal(parcels.length, 1, "one Steadfast parcel");
+  assert.equal(parcels[0].invoice, "5301_5302");
+  assert.equal(parcels[0].cod_amount, 1250 + 420, "parcel COD covers both orders");
+  const second = await orderDetail(b.id);
+  assert.equal(second.order.courierStage, "booked");
+  assert.equal(second.order.combinedIntoOrderId, a.id);
+  assert.equal(second.order.labelStatus, "not_ready", "one label: the parcel's");
+  assert.equal(second.parcelOrders.length, 2);
+  const printable = await v1("GET", `/printable?date=${today}&status=all`);
+  assert.ok(printable.body.orders.some((o) => o.orderId === a.id) && !printable.body.orders.some((o) => o.orderId === b.id));
+
+  const cid = Number(parcels[0].consignment_id);
+  const update = (status, extra = {}) => steadfastWebhook({ notification_type: "delivery_status", consignment_id: cid, invoice: "5301_5302", status, updated_at: new Date().toISOString(), ...extra });
+  await update("pending");
+  await sleep(800);
+  for (const o of [a, b]) assert.equal((await orderDetail(o.id)).order.fulfillmentState, "fulfilled", "each order is fulfilled in Shopify");
+  await update("delivered_approval_pending", { cod_amount: 1670 });
+  await sleep(500);
+  assert.equal((await orderDetail(b.id)).order.courierStage, "awaiting_confirmation");
+  assert.ok(!(await mockState()).markedPaid.includes("5301"), "not paid on the rider's word alone");
+  await update("delivered", { cod_amount: 1670 });
+  await sleep(1200);
+  const paid = (await mockState()).markedPaid;
+  assert.ok(paid.includes("5301") && paid.includes("5302"), JSON.stringify(paid));
+  assert.equal((await orderDetail(b.id)).order.courierStage, "delivered");
+  const t = await call("GET", `/api/public/track/${second.trackingPageUrl.split("/t/")[1]}`, undefined, { auth: false, jar: false });
+  assert.equal(t.body.status.key, "delivered");
+  assert.deepEqual(t.body.order.shipsWith, ["#5301"]);
+});
+
+await step("auto-booking sends a customer's confirmed orders together as one parcel", async () => {
+  const phone = "+880 1777-777777";
+  const a = await newOrder(5601, phone);
+  const b = await newOrder(5602, phone, { line_items: [{ id: 9601, title: "Cap", variant_title: null, sku: "CP", quantity: 1, price: "350.00", variant_id: 91 }], total_price: "470.00", subtotal_price: "350.00", total_outstanding: "470.00" });
+  await sleep(1000);
+  await call("PUT", "/api/settings", { autoBookDelayMinutes: 0 });
+  for (const o of [a, b]) await call("POST", `/api/orders/${o.id}/calling`, { status: "confirmed" });
+  await call("PUT", "/api/settings", { autoBookDelayMinutes: 10 });
+  await sleep(1100);
+  await runCron();
+  const parcels = (await mockState()).consignments.filter((c) => c.invoice.startsWith("5601"));
+  assert.equal(parcels.length, 1, JSON.stringify((await orderDetail(a.id)).order.autoBookNote));
+  assert.equal(parcels[0].invoice, "5601_5602");
+  assert.equal((await orderDetail(b.id)).order.combinedIntoOrderId, a.id);
+});
+
+await step("Steadfast portal events (signed) are applied; delivery-charge-only partial is a return", async () => {
+  const o = await newOrder(5401, "+880 1766-666666");
+  await call("POST", `/api/orders/${o.id}/calling`, { status: "confirmed" });
+  const booked = await call("POST", "/api/orders/book", { ids: [o.id] });
+  const cid = Number(booked.body.results[0].consignmentId);
+  const invoice = "5401";
+
+  const raw = JSON.stringify({ notification_type: "consignment_update", consignment_id: cid, invoice, changed: ["cod_amount", "cus_address"], values: { cod_amount: 900, cus_address: "House 1, Road 1, Mirpur" }, updated_at: "2026-10-18 12:00:00" });
+  const signature = crypto.createHmac("sha256", SF_TOKEN).update(raw).digest("hex");
+  const forged = await call("POST", "/webhooks/steadfast", raw, { auth: false, headers: { Authorization: `Bearer ${SF_TOKEN}`, "X-Signature": "deadbeef" } });
+  assert.equal(forged.status, 401, "wrong signature rejected");
+  const signed = await call("POST", "/webhooks/steadfast", raw, { auth: false, headers: { Authorization: `Bearer ${SF_TOKEN}`, "X-Signature": signature } });
+  assert.equal(signed.status, 200);
+  let d = await orderDetail(o.id);
+  assert.equal(d.consignments[0].codAmount, 900);
+  assert.equal(d.consignments[0].codChangedFrom, 1250);
+  assert.equal(d.consignments[0].recipientAddress, "House 1, Road 1, Mirpur");
+  assert.ok(d.order.riskFlags.includes("cod_mismatch"), "COD no longer matches Shopify");
+  assert.ok(d.events.some((e) => /Changed in the Steadfast portal/.test(e.message ?? "")));
+
+  await steadfastWebhook({ notification_type: "cancel_request", consignment_id: cid, invoice, cancel_request_id: 77, reason_id: 3, note: "Customer asked to cancel", verify_status: "pending" });
+  d = await orderDetail(o.id);
+  assert.ok(d.notes.some((n) => /Customer asked to cancel/.test(n.body)), "who asked and why is on the order");
+
+  await steadfastWebhook({ notification_type: "delivery_status", consignment_id: cid, invoice, status: "pending", updated_at: new Date().toISOString() });
+  await steadfastWebhook({ notification_type: "delivery_status", consignment_id: cid, invoice, status: "partial_delivered", cod_amount: 120, updated_at: new Date().toISOString() });
+  d = await orderDetail(o.id);
+  assert.equal(d.consignments[0].partialOutcome, "charge_only");
+  assert.ok(d.returns.some((x) => /only the delivery charge/.test(x.reason)), "return expected for the product");
+  const t = await call("GET", `/api/public/track/${d.trackingPageUrl.split("/t/")[1]}`, undefined, { auth: false, jar: false });
+  assert.match(t.body.status.title, /delivery charge paid/);
+
+  await steadfastWebhook({ notification_type: "return_list_accepted", return_list_id: 9, status: "accepted", item_count: 1, consignments: [{ consignment_id: cid, invoice }] });
+  d = await orderDetail(o.id);
+  assert.equal(d.returns[0].status, "received", "return list marks the parcel received");
+  const pay = await steadfastWebhook({ notification_type: "payment_request", payment_request_id: 12, amount: 5000, method: "bank", status: "pending" });
+  assert.equal(pay.status, 200, "account events without a parcel are accepted");
+});
+
+await step("missed webhooks: Steadfast's full history fills the timeline, without duplicates", async () => {
+  const o = (await call("GET", "/api/orders?search=%235201")).body.rows[0];
+  const c = (await orderDetail(o.id)).consignments[0];
+  await fetch(`${MOCK}/__history`, { method: "POST", body: JSON.stringify({ invoice: c.invoice, steps: [{ text: "Reached Mirpur hub", created_at: "2026-10-18 15:30:00" }] }) });
+  await setCourierStatus(Number(c.consignmentId), "pending");
+  await call("POST", "/api/consignments/refresh", { ids: [c.id] });
+  await call("POST", "/api/consignments/refresh", { ids: [c.id] });
+  const hub = (await orderDetail(o.id)).events.filter((e) => e.message === "Reached Mirpur hub");
+  assert.equal(hub.length, 1, "added once");
+  assert.equal(hub[0].source, "history");
+  assert.equal(hub[0].occurredAt, "2026-10-18T09:30:00.000Z", "Steadfast times are Bangladesh time");
+});
+
+await step("a Steadfast 429 pauses all Steadfast calls instead of retrying (no account lockout)", async () => {
+  const phone = "01788888888";
+  await fetch(`${MOCK}/__fraud`, { method: "POST", body: JSON.stringify({ phone, profile: "429" }) });
+  const o = await newOrder(5501, "+880 1788-888888");
+  await sleep(1500);
+  assert.equal((await mockState()).fraudCalls[phone], 1, "one call, no retry storm");
+  const dash = await call("GET", "/api/dashboard?days=7");
+  assert.equal(dash.body.steadfastPause?.reason, "rate_limited");
+  const r = await call("POST", `/api/orders/${o.id}/fraud-check`);
+  assert.equal(r.body.deferred, true);
+  assert.equal((await mockState()).fraudCalls[phone], 1, "paused: Steadfast is not called");
+  await sleep(2300);
+  assert.equal((await call("GET", "/api/dashboard?days=7")).body.steadfastPause, null, "resumes after Retry-After");
+});
+
 await step("activity log records actions", async () => {
   const a = await call("GET", "/api/logs/activity");
   const actions = new Set(a.body.rows.map((r) => r.action));

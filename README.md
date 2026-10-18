@@ -74,6 +74,28 @@ dispatch. Shopify fulfillment and courier delivery are tracked on top of these.
   courier updates, delivered, returned or cancelled. It also shows the items, totals, COD due and
   delivery address. The phone number is masked and no staff names or internal notes are shown.
   The label API returns the link as `trackingUrl` for printing as a QR code. SMS is not sent yet.
+- **Steadfast fraud check** on every new order: the customer's delivery record across all
+  Steadfast merchants (delivered %, cancelled %, volume, merchant fraud reports), shown as a badge
+  in the order list and a card on the order.
+  - Risky customers (below 70% delivered, or any merchant report; adjustable) go to **Call first**
+    and are never auto-booked; staff can still send them after calling.
+  - Each phone is looked up at most once per 24 h, capped per minute. Any 429 pauses all Steadfast
+    calls, so the account is never locked out.
+- **One parcel per customer**: when the same phone has several confirmed orders, they can go out
+  as one Steadfast parcel, from the order, from bulk "Send to Steadfast", or automatically
+  (auto-booking waits for the last timer).
+  - The parcel's COD is the sum of the orders, there is one label and one scan, and every order
+    follows the parcel's status.
+  - Each order is fulfilled and marked paid in Shopify on its own.
+- **Money only when Steadfast confirms**: "delivered (approval pending)" is shown as *Awaiting
+  Steadfast confirmation*.
+  - On confirmed delivery the COD order is **marked paid in Shopify**, so Shopify's sales reports
+    are right.
+  - A partial delivery where only the delivery charge was collected is shown as *Delivery charge
+    paid · product returned*, and a return is expected.
+- **Steadfast webhooks**: the signature is verified. Portal edits (address or COD), cancel and
+  return requests, return lists and payouts are applied instantly. Missed steps are filled from
+  Steadfast's full tracking history.
 - **Pickup today** (`/pickup`): orders confirmed before the daily cut-off (default 4:00 PM, set
   in Settings) ship the same day.
   - Live countdowns to the cut-off and to the usual courier pickup time.

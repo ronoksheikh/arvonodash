@@ -8,7 +8,7 @@ import { EmptyState, ErrorState, LoadingState, PageHeader, SteadfastStatusBadge 
 import { OrderDrawer } from "../components/OrderDrawer";
 import { ago, dateShort, money } from "../format";
 
-type Reason = "not_received" | "waiting_pickup" | "on_hold" | "no_update" | "slow_transit";
+type Reason = "exceptional" | "not_received" | "waiting_pickup" | "on_hold" | "unconfirmed" | "no_update" | "slow_transit";
 type StuckParcel = {
   rowId: number;
   orderId: number;
@@ -38,6 +38,8 @@ type StuckParcel = {
 };
 
 const REASONS: Record<Reason, { label: string; color: string }> = {
+  exceptional: { label: "Lost / damaged", color: "red" },
+  unconfirmed: { label: "Not confirmed", color: "cyan" },
   not_received: { label: "Rider didn't confirm", color: "red" },
   on_hold: { label: "On hold", color: "orange" },
   no_update: { label: "No update", color: "orange" },

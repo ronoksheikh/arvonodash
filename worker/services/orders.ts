@@ -6,6 +6,7 @@ import type { AppSettings } from "./settings";
 import { cleanPhone, normalizeBdPhone, nowIso } from "../lib/util";
 import { applyShopifySideChanges } from "./calling";
 import { newTrackingToken } from "./tracking";
+import { getFraudCheck, judgeFraud, queueFraudCheck } from "./fraud";
 
 /** Insert or update an order from Shopify. Internal workflow fields are never overwritten. */
 export async function upsertOrder(db: DB, input: NormalizedOrder, appSettings: AppSettings) {
@@ -101,6 +102,10 @@ export async function upsertOrder(db: DB, input: NormalizedOrder, appSettings: A
   if (o.shipments.length || after?.shopifyFulfillmentStatus === "fulfilled") {
     const { linkFromShopifyFulfillment } = await import("./legacy");
     await linkFromShopifyFulfillment(db, id, o.shipments);
+  }
+  // New live order (not a historical import): look the customer up in Steadfast's fraud check.
+  if (!existing && after && !after.cancelledAt && after.courierStage === "unbooked" && Date.now() - Date.parse(after.shopCreatedAt) < 3 * 86_400_000) {
+    await queueFraudCheck(db, after.phone);
   }
   return { id, created: !existing, stale: false };
 }
@@ -206,6 +211,22 @@ export async function refreshRiskFlags(db: DB, orderId: number, appSettings: App
     if (finished >= 2 && h.returned / finished >= 0.5) flags.push("high_return_rate");
   }
 
+  // Steadfast fraud check (cached per phone; looked up by the job queue when the order arrives).
+  if (order.phone && order.courierStage === "unbooked") {
+    const fraud = await getFraudCheck(db, order.phone);
+    if (fraud?.status === "ok" && judgeFraud({ ...fraud, volumeBand: fraud.volumeBand ?? "none" }, appSettings).verdict === "risky") flags.push("courier_fraud");
+  }
+
+  // Parcel problems after booking (only the order that owns the parcel carries them).
+  if (order.activeConsignmentId && !order.combinedIntoOrderId) {
+    const c = await db.select().from(consignments).where(eq(consignments.id, order.activeConsignmentId)).get();
+    if (c && !c.isFinal) {
+      const group = await db.select({ outstanding: orders.outstanding, cancelledAt: orders.cancelledAt, combinedInto: orders.combinedIntoOrderId }).from(orders).where(eq(orders.activeConsignmentId, c.id)).all();
+      if (c.codChangedFrom !== null && Math.abs(c.codAmount - group.reduce((s, o) => s + o.outstanding, 0)) > 1) flags.push("cod_mismatch");
+      if (group.some((o) => o.combinedInto && o.cancelledAt)) flags.push("combined_order_cancelled");
+    }
+  }
+
   // Shopify edits (admin or mobile app) after booking: the courier still has the old details.
   if (order.bookedSource && !["delivered", "partial_delivered", "returned", "cancelled"].includes(order.courierStage) && order.bookedSource !== shopifyContactKey(order)) {
     flags.push("changed_after_booking");
@@ -228,9 +249,9 @@ export function shopifyContactKey(o: { rawPhone: string | null; address1: string
 /** Orders that need a human: unreviewed flags, courier issues, failed syncs, cancellations after booking. */
 export const ATTENTION_SQL = sql`(
   (json_array_length(coalesce(${orders.riskFlags}, '[]')) > 0 and ${orders.riskDismissed} = 0 and ${orders.courierStage} = 'unbooked' and ${orders.cancelledAt} is null)
-  or exists (select 1 from json_each(coalesce(${orders.riskFlags}, '[]')) where value = 'changed_after_booking')
+  or exists (select 1 from json_each(coalesce(${orders.riskFlags}, '[]')) where value in ('changed_after_booking', 'cod_mismatch', 'combined_order_cancelled'))
   or ${orders.courierStage} in ('issue', 'on_hold')
   or ${orders.fulfillmentState} = 'failed'
   or ${orders.shopifySyncStatus} = 'failed'
-  or (${orders.cancelledAt} is not null and ${orders.courierStage} in ('booked', 'in_transit', 'on_hold'))
+  or (${orders.cancelledAt} is not null and ${orders.courierStage} in ('booked', 'in_transit', 'on_hold', 'awaiting_confirmation'))
 )`;

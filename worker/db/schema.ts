@@ -163,6 +163,10 @@ export const orders = sqliteTable(
     // Auto-booking: set when an order is confirmed; the cron books it once this time passes.
     autoBookAt: text("auto_book_at"),
     autoBookNote: text("auto_book_note"), // why auto-booking was skipped/cancelled
+    // Combined booking: this order travels in the parcel of another order (same customer)
+    combinedIntoOrderId: integer("combined_into_order_id"),
+    // When the order was marked paid in Shopify after Steadfast confirmed the COD delivery
+    shopifyPaidAt: text("shopify_paid_at"),
     // Secret token for the customer-facing tracking page (/t/<token>)
     trackingToken: text("tracking_token"),
     // Courier & fulfillment (kept separate)
@@ -188,6 +192,7 @@ export const orders = sqliteTable(
     index("orders_print_job_idx").on(t.printJobId),
     index("orders_dispatch_idx").on(t.dispatchStatus, t.bookedAt),
     index("orders_pickup_idx").on(t.pickupId),
+    index("orders_combined_idx").on(t.combinedIntoOrderId),
     uniqueIndex("orders_tracking_token_idx").on(t.trackingToken),
   ],
 );
@@ -219,6 +224,8 @@ export const consignments = sqliteTable(
     lastMessage: text("last_message"),
     isFinal: integer("is_final", { mode: "boolean" }).notNull().default(false),
     superseded: integer("superseded", { mode: "boolean" }).notNull().default(false), // replaced by a rebooking
+    // COD before someone changed it in the Steadfast portal (consignment_update webhook)
+    codChangedFrom: real("cod_changed_from"),
     // Stuck-parcel follow-up (calls to rider / customer)
     followUpNote: text("follow_up_note"),
     followUpAt: text("follow_up_at"),
@@ -491,3 +498,26 @@ export const pickups = sqliteTable(
   },
   (t) => [index("pickups_date_idx").on(t.businessDate)],
 );
+
+/**
+ * Steadfast fraud check (delivery record across all merchants) per phone number. Cached so each
+ * customer is looked up at most once per cache window, within Steadfast's rate limits.
+ */
+export const fraudChecks = sqliteTable("fraud_checks", {
+  phone: text("phone").primaryKey(), // normalized 01XXXXXXXXX
+  status: text("status").notNull(), // ok | error
+  deliveryRatio: real("delivery_ratio"), // % delivered of finished parcels; null when none finished
+  cancellationRatio: real("cancellation_ratio"),
+  volumeBand: text("volume_band"), // none | low | medium | high | very_high
+  totalParcels: integer("total_parcels"), // only when Steadfast reports counts
+  totalReports: integer("total_reports").notNull().default(0),
+  categories: text("categories", { mode: "json" }).$type<string[]>(),
+  doubtfulReports: integer("doubtful_reports", { mode: "boolean" }).notNull().default(false),
+  score: real("score"),
+  level: text("level"),
+  verdict: text("verdict").notNull().default("unknown"), // good | new | watch | risky | unknown (our reading)
+  error: text("error"),
+  raw: text("raw", { mode: "json" }),
+  checkedAt: text("checked_at").notNull(),
+});
+

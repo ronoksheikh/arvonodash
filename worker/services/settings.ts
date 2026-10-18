@@ -30,6 +30,24 @@ export type AppSettings = {
   transitDaysOutside: number;
   /** Handed to the rider but Steadfast still shows in_review after this many hours. */
   handoverConfirmHours: number;
+  /** Mark COD orders paid in Shopify once Steadfast confirms the delivery. */
+  markPaidOnDelivery: boolean;
+  /** Steadfast fraud check (delivery record across merchants) for every new order. */
+  fraudCheckEnabled: boolean;
+  /** Below this delivery % the customer is risky (only when Steadfast has finished parcels). */
+  fraudMinDeliveryRatio: number;
+  /** Any merchant fraud report makes the customer risky. */
+  fraudHoldOnReports: boolean;
+  /** Customers with no Steadfast history count as risky too. */
+  fraudHoldNewCustomers: boolean;
+  /** Risky customers are never auto-booked: they wait in "Call first". */
+  fraudHoldAutoBook: boolean;
+  /** Re-use a phone's result for this long before asking Steadfast again. */
+  fraudCacheHours: number;
+  /** Self-imposed ceiling on fraud lookups per minute (Steadfast rate-limits them per merchant). */
+  fraudMaxPerMinute: number;
+  /** Auto-booking sends a customer's confirmed orders as one parcel. */
+  autoCombine: boolean;
   businessName: string;
   businessPhone: string;
   businessAddress: string;
@@ -55,6 +73,15 @@ export const DEFAULT_SETTINGS: AppSettings = {
   transitDaysDhaka: 3,
   transitDaysOutside: 5,
   handoverConfirmHours: 12,
+  markPaidOnDelivery: true,
+  fraudCheckEnabled: true,
+  fraudMinDeliveryRatio: 70,
+  fraudHoldOnReports: true,
+  fraudHoldNewCustomers: false,
+  fraudHoldAutoBook: true,
+  fraudCacheHours: 24,
+  fraudMaxPerMinute: 30,
+  autoCombine: true,
   businessName: "ARVONO",
   businessPhone: "",
   businessAddress: "",

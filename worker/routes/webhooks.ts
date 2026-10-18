@@ -3,9 +3,9 @@ import { eq } from "drizzle-orm";
 import type { AppEnv } from "../env";
 import { getDb } from "../db";
 import { webhookEvents } from "../db/schema";
-import { hmacSha256Base64, sha256Hex, timingSafeEqual } from "../lib/crypto";
+import { hmacSha256Base64, hmacSha256Hex, sha256Hex, timingSafeEqual } from "../lib/crypto";
 import { nowIso } from "../lib/util";
-import { processShopifyEvent, processSteadfastEvent, type SteadfastWebhook } from "../services/sync";
+import { processShopifyEvent, processSteadfastEvent, STEADFAST_PARCEL_EVENTS, syncPayments, type SteadfastWebhook } from "../services/sync";
 import { processJobs } from "../services/jobs";
 
 export const webhookRoutes = new Hono<AppEnv>();
@@ -68,6 +68,7 @@ webhookRoutes.post("/shopify", async (c) => {
 });
 
 // Steadfast: "Auth Token (Bearer)" configured in the Steadfast panel, sent as Authorization: Bearer <token>.
+// Newer deliveries also sign the raw body: X-Signature = hex HMAC-SHA256 keyed with the same token.
 webhookRoutes.post("/steadfast", async (c) => {
   const token = c.env.STEADFAST_WEBHOOK_TOKEN;
   if (!token) return c.json({ status: "error", message: "Webhook token not configured" }, 503);
@@ -75,21 +76,29 @@ webhookRoutes.post("/steadfast", async (c) => {
   if (!timingSafeEqual(auth, `Bearer ${token}`)) return c.json({ status: "error", message: "Unauthorized" }, 401);
 
   const raw = await c.req.text();
+  const signature = c.req.header("X-Signature");
+  if (signature !== undefined && !timingSafeEqual(signature.trim().toLowerCase(), await hmacSha256Hex(token, raw))) {
+    return c.json({ status: "error", message: "Invalid signature" }, 401);
+  }
   let payload: SteadfastWebhook;
   try {
     payload = JSON.parse(raw);
   } catch {
     return c.json({ status: "error", message: "Invalid JSON" }, 400);
   }
-  if (!payload || typeof payload !== "object" || (!payload.consignment_id && !payload.invoice && !payload.tracking_code)) {
+  if (!payload || typeof payload !== "object") return c.json({ status: "error", message: "Invalid payload" }, 400);
+  const type = payload.notification_type ?? "delivery_status";
+  // Parcel events must name the parcel; account events (payouts, return lists, pickups) don't.
+  if (STEADFAST_PARCEL_EVENTS.has(type) && !payload.consignment_id && !payload.invoice && !payload.tracking_code) {
     return c.json({ status: "error", message: "Missing consignment reference" }, 400);
   }
-  const type = payload.notification_type ?? "delivery_status";
   const externalId =
     c.req.header("Idempotency-Key") ??
-    (await sha256Hex([type, payload.consignment_id, payload.invoice, payload.status, payload.tracking_message, payload.updated_at].join("|")));
+    (await sha256Hex(raw));
   const result = await ingest(c.env, "steadfast", externalId, type, raw, () => processSteadfastEvent(getDb(c.env.DB), payload));
   // Run any fulfillment this update queued without making Steadfast wait for Shopify.
   if (result === "processed") c.executionCtx.waitUntil(processJobs(c.env, getDb(c.env.DB), { limit: 5 }));
+  // A payout was made: pull it now instead of waiting for the 3-hourly sync.
+  if (result === "processed" && type === "payment_request") c.executionCtx.waitUntil(syncPayments(c.env, getDb(c.env.DB), 1).catch(() => {}));
   return c.json({ status: "success", message: "Webhook received successfully." });
 });

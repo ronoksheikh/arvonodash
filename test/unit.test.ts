@@ -1,7 +1,10 @@
 import { describe, expect, it } from "vitest";
 import { normalizeBdPhone, startOfDayIso, csvEscape, gidToId } from "../worker/lib/util";
-import { hashPassword, verifyPassword, hmacSha256Base64, timingSafeEqual } from "../worker/lib/crypto";
-import { stageForStatus, isPickedUpStatus, isFinalStatus } from "../worker/services/steadfast";
+import { hashPassword, verifyPassword, hmacSha256Base64, hmacSha256Hex, timingSafeEqual } from "../worker/lib/crypto";
+import { stageForStatus, isPickedUpStatus, isFinalStatus, normalizeFraudScore, parseSteadfastTime } from "../worker/services/steadfast";
+import { judgeFraud } from "../worker/services/fraud";
+import { DEFAULT_SETTINGS } from "../worker/services/settings";
+import { partialOutcome } from "../shared/delivery";
 import { normalizeRestOrder } from "../worker/services/shopify";
 import { buildAddress } from "../worker/services/orders";
 import { validateBooking } from "../worker/services/courier";
@@ -27,7 +30,7 @@ describe("steadfast status mapping", () => {
     expect(stageForStatus("in_review", false)).toBe("booked");
     expect(stageForStatus("pending", true)).toBe("in_transit");
     expect(stageForStatus("hold", true)).toBe("on_hold");
-    expect(stageForStatus("delivered_approval_pending", true)).toBe("delivered");
+    expect(stageForStatus("delivered_approval_pending", true)).toBe("awaiting_confirmation");
     expect(stageForStatus("partial_delivered", true)).toBe("partial_delivered");
     expect(stageForStatus("cancelled", true)).toBe("returned");
     expect(stageForStatus("cancelled", false)).toBe("cancelled");
@@ -107,5 +110,62 @@ describe("normalizeRestOrder", () => {
     expect(o.shopifyTags).toEqual(["vip", "repeat"]);
     expect(o.shopifyFulfillmentStatus).toBe("unfulfilled");
     expect(o.lineItems[0]).toMatchObject({ id: "9", quantity: 2, price: 565, variantId: "77" });
+  });
+});
+
+describe("Steadfast statuses", () => {
+  it("treats the rider's word as unconfirmed until Steadfast confirms", () => {
+    for (const s of ["delivered_approval_pending", "partial_delivered_approval_pending", "cancelled_approval_pending", "unknown_approval_pending"]) {
+      expect(stageForStatus(s, true)).toBe("awaiting_confirmation");
+    }
+    expect(stageForStatus("delivered", true)).toBe("delivered");
+    expect(stageForStatus("exceptional", true)).toBe("issue");
+  });
+
+  it("reads zone-less Steadfast times as Bangladesh time", () => {
+    expect(parseSteadfastTime("2025-03-02 12:45:30")).toBe("2025-03-02T06:45:30.000Z");
+    expect(parseSteadfastTime("2025-03-02T12:45:30Z")).toBe("2025-03-02T12:45:30.000Z");
+    expect(parseSteadfastTime("not a date")).toBeNull();
+    expect(parseSteadfastTime(undefined)).toBeNull();
+  });
+});
+
+describe("partial delivery outcome", () => {
+  const items = [{ price: 450, quantity: 2 }, { price: 230, quantity: 1 }];
+  it("only the delivery charge collected → product returned", () => expect(partialOutcome(120, items)).toBe("charge_only"));
+  it("enough for an item → some items kept", () => expect(partialOutcome(570, items)).toBe("some_items"));
+});
+
+describe("fraud check", () => {
+  it("normalizes the documented score shape (with or without a data wrapper)", () => {
+    const doc = { phone: "01712345678", delivery_ratio: 92, cancellation_ratio: 7, volume_band: "high", total_reports: 1, fraud_categories: ["fake order"], score: null, level: null, doubtful_reports: false };
+    expect(normalizeFraudScore(doc)).toMatchObject({ deliveryRatio: 92, cancellationRatio: 7, volumeBand: "high", totalReports: 1, categories: ["fake order"] });
+    expect(normalizeFraudScore({ data: doc }).deliveryRatio).toBe(92);
+  });
+
+  it("derives ratios from older count-based responses and keeps null when nothing finished", () => {
+    expect(normalizeFraudScore({ total_parcels: 10, total_delivered: 8, total_cancelled: 2, total_fraud_reports: [] })).toMatchObject({ deliveryRatio: 80, cancellationRatio: 20, totalReports: 0 });
+    expect(normalizeFraudScore({ delivery_ratio: null, volume_band: "none", total_reports: 0 }).deliveryRatio).toBeNull();
+  });
+
+  const s = { ...DEFAULT_SETTINGS };
+  it.each([
+    [{ deliveryRatio: 95, totalReports: 0, doubtfulReports: false, volumeBand: "high" }, "good"],
+    [{ deliveryRatio: 78, totalReports: 0, doubtfulReports: false, volumeBand: "medium" }, "watch"],
+    [{ deliveryRatio: 60, totalReports: 0, doubtfulReports: false, volumeBand: "medium" }, "risky"],
+    [{ deliveryRatio: 95, totalReports: 2, doubtfulReports: false, volumeBand: "high" }, "risky"],
+    [{ deliveryRatio: 95, totalReports: 2, doubtfulReports: true, volumeBand: "high" }, "watch"],
+    [{ deliveryRatio: null, totalReports: 0, doubtfulReports: false, volumeBand: "none" }, "new"],
+  ])("judges %j as %s", (score, verdict) => expect(judgeFraud(score, s).verdict).toBe(verdict));
+
+  it("can treat customers with no history as risky", () => {
+    expect(judgeFraud({ deliveryRatio: null, totalReports: 0, doubtfulReports: false, volumeBand: "none" }, { ...s, fraudHoldNewCustomers: true }).verdict).toBe("risky");
+  });
+});
+
+describe("hmacSha256Hex", () => {
+  it("produces the standard hex HMAC (Steadfast X-Signature)", async () => {
+    // RFC 4231-style known vector
+    expect(await hmacSha256Hex("key", "The quick brown fox jumps over the lazy dog")).toBe("f7bc83f430538424b13298e6aa6fb143ef4d59a14946175997479dbc2d1a3cd8");
   });
 });

@@ -5,18 +5,20 @@ import { DatePickerInput } from "@mantine/dates";
 import { useDebouncedValue } from "@mantine/hooks";
 import { keepPreviousData, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useSearchParams } from "react-router";
-import { PhoneCall, ArrowDownUp, Download, Filter, MoreHorizontal, Printer, Search, Send, Tag, X, CheckCircle2, XCircle, Archive, ShieldOff, ListChecks } from "lucide-react";
+import { Package, PhoneCall, ArrowDownUp, Download, Filter, MoreHorizontal, Printer, Search, Send, Tag, X, CheckCircle2, XCircle, Archive, ShieldOff, ListChecks } from "lucide-react";
 import { api, post, qs, notifyError, notifySuccess } from "../api";
 import { useCan } from "../auth";
 import { AutoBookChip, CustomerHistoryBadge, CustomStatusBadge, DispatchBadge, EmptyState, ErrorState, FulfillmentBadge, LabelBadge, LoadingState, PageHeader, Panel, RiskBadge, ShopifySyncBadge, StageBadge, TableFooter, useStatuses } from "../components/ui";
 import { CallingMenu } from "../components/Calling";
 import { OrderDrawer } from "../components/OrderDrawer";
+import { FraudBadge } from "../components/Fraud";
 import { dateShort, money } from "../format";
 import { CALLING_STATUSES } from "../../shared/constants";
 import type { OrderListRow } from "../types";
 
 const TABS = [
   { value: "all", label: "All" },
+  { value: "call_first", label: "Call first" },
   { value: "to_call", label: "To call" },
   { value: "ready", label: "Ready to book" },
   { value: "booked", label: "Booked" },
@@ -28,7 +30,8 @@ const TABS = [
 ];
 
 type ListResponse = { rows: OrderListRow[]; total: number; page: number; pageSize: number; tabCounts: Record<string, number> };
-type BookResult = { orderId: number; name?: string; ok: boolean; error?: string; trackingCode?: string };
+type BookResult = { orderId: number; name?: string; ok: boolean; error?: string; trackingCode?: string; combinedWith?: string[] };
+type BookRequest = { ids: number[]; allowRisky: boolean; combine: boolean };
 
 export default function Orders() {
   const [params, setParams] = useSearchParams();
@@ -135,10 +138,21 @@ export default function Orders() {
   });
 
   const book = useMutation({
-    mutationFn: async ({ ids, allowRisky }: { ids: number[]; allowRisky: boolean }) => {
+    mutationFn: async ({ ids, allowRisky, combine }: BookRequest) => {
+      // Send in batches of ~50, never splitting one customer's orders (they may share a parcel).
+      const byPhone = new Map<string, number[]>();
+      for (const id of ids) {
+        const key = rows.find((r) => r.id === id)?.phone ?? `id:${id}`;
+        byPhone.set(key, [...(byPhone.get(key) ?? []), id]);
+      }
+      const batches: number[][] = [[]];
+      for (const group of byPhone.values()) {
+        if (batches.at(-1)!.length + group.length > 50) batches.push([]);
+        batches.at(-1)!.push(...group);
+      }
       const all: BookResult[] = [];
-      for (let i = 0; i < ids.length; i += 50) {
-        const r = await post<{ results: BookResult[] }>("/orders/book", { ids: ids.slice(i, i + 50), allowRisky });
+      for (const batch of batches.filter((b) => b.length)) {
+        const r = await post<{ results: BookResult[] }>("/orders/book", { ids: batch, allowRisky, combine });
         all.push(...r.results);
       }
       return all;
@@ -194,7 +208,7 @@ export default function Orders() {
                 value={t.value}
                 rightSection={
                   query.data?.tabCounts[t.value] !== undefined ? (
-                    <Badge size="xs" variant={tab === t.value ? "filled" : "light"} color={t.value === "attention" && query.data.tabCounts[t.value] ? "orange" : tab === t.value ? "brand" : "gray"}>
+                    <Badge size="xs" variant={tab === t.value ? "filled" : "light"} color={t.value === "attention" && query.data.tabCounts[t.value] ? "orange" : t.value === "call_first" && query.data.tabCounts[t.value] ? "red" : tab === t.value ? "brand" : "gray"}>
                       {query.data.tabCounts[t.value]}
                     </Badge>
                   ) : null
@@ -296,6 +310,7 @@ export default function Orders() {
                             <Text size="xs" c="red" className="mono">{o.rawPhone ?? "No phone"}</Text>
                           )}
                           {o.city && <Text size="xs" c="dimmed">· {o.city}</Text>}
+                          <FraudBadge fraud={o.fraud} />
                         </Group>
                       </Table.Td>
                       <Table.Td ta="right">
@@ -323,6 +338,12 @@ export default function Orders() {
                         {o.trackingCode && <Text size="xs" c="dimmed" className="mono" mt={2}>{o.trackingCode}</Text>}
                         {o.autoBookAt && o.courierStage === "unbooked" && <div style={{ marginTop: 4 }}><AutoBookChip at={o.autoBookAt} /></div>}
                         {!o.autoBookAt && o.autoBookNote && o.courierStage === "unbooked" && <Text size="xs" c="orange" lineClamp={2} maw={180}>{o.autoBookNote}</Text>}
+                        {o.combinableWith && o.courierStage === "unbooked" && o.callingStatus === "confirmed" && !o.cancelledAt && (
+                          <Tooltip label="Same customer has other confirmed orders. Book them together to send one parcel (one delivery charge).">
+                            <Badge size="xs" variant="light" color="grape" mt={4} leftSection={<Package size={10} />}>One parcel with {o.combinableWith}</Badge>
+                          </Tooltip>
+                        )}
+                        {o.combinedIntoOrderId && <Badge size="xs" variant="outline" color="grape" mt={4}>Combined parcel</Badge>}
                       </Table.Td>
                       <Table.Td>
                         {o.labelStatus === "not_ready" ? <Text size="xs" c="dimmed">—</Text> : (
@@ -378,7 +399,7 @@ export default function Orders() {
                   )}
                   {can("courier.book") && (
                     <Button size="xs" leftSection={<Send size={14} />} disabled={!bookable.length} onClick={() => setBookOpen(true)}>
-                      Book with Steadfast{bookable.length !== selected.size && bookable.length ? ` (${bookable.length})` : ""}
+                      Send to Steadfast{bookable.length !== selected.size && bookable.length ? ` (${bookable.length})` : ""}
                     </Button>
                   )}
                   {can("orders.edit") && (
@@ -421,7 +442,7 @@ export default function Orders() {
         </Transition>
       </Affix>
 
-      <BookModal opened={bookOpen} onClose={() => setBookOpen(false)} rows={bookable} skipped={selected.size - bookable.length} loading={book.isPending} onConfirm={(allowRisky) => book.mutate({ ids: bookable.map((r) => r.id), allowRisky })} />
+      <BookModal opened={bookOpen} onClose={() => setBookOpen(false)} rows={bookable} skipped={selected.size - bookable.length} loading={book.isPending} onConfirm={(req) => book.mutate(req)} />
 
       <Modal opened={results !== null} onClose={() => setResults(null)} title="Booking results" size="lg">
         {results && (
@@ -436,7 +457,10 @@ export default function Orders() {
                   {results.map((r) => (
                     <Table.Tr key={r.orderId} onClick={() => { setResults(null); set({ open: String(r.orderId) }); }}>
                       <Table.Td><Text size="sm" fw={600}>{r.name ?? r.orderId}</Text></Table.Td>
-                      <Table.Td>{r.ok ? <Text size="sm" className="mono" c="teal">{r.trackingCode}</Text> : <Text size="sm" c="red">{r.error}</Text>}</Table.Td>
+                      <Table.Td>
+                        {r.ok ? <Text size="sm" className="mono" c="teal">{r.trackingCode}</Text> : <Text size="sm" c="red">{r.error}</Text>}
+                        {r.ok && r.combinedWith?.length ? <Text size="xs" c="dimmed">One parcel with {r.combinedWith.join(", ")}</Text> : null}
+                      </Table.Td>
                     </Table.Tr>
                   ))}
                 </Table.Tbody>
@@ -456,18 +480,53 @@ export default function Orders() {
   );
 }
 
-function BookModal({ opened, onClose, rows, skipped, loading, onConfirm }: { opened: boolean; onClose: () => void; rows: OrderListRow[]; skipped: number; loading: boolean; onConfirm: (allowRisky: boolean) => void }) {
+function BookModal({ opened, onClose, rows, skipped, loading, onConfirm }: { opened: boolean; onClose: () => void; rows: OrderListRow[]; skipped: number; loading: boolean; onConfirm: (req: BookRequest) => void }) {
   const [allowRisky, setAllowRisky] = useState(false);
-  const flagged = rows.filter((r) => r.riskFlags?.length && !r.riskDismissed);
-  const noPhone = rows.filter((r) => !r.phone);
-  const cod = rows.reduce((s, r) => s + Math.max(0, r.outstanding), 0);
+  const [combine, setCombine] = useState(true);
+  const [skipFraud, setSkipFraud] = useState(true);
+  const risky = rows.filter((r) => r.fraud?.verdict === "risky");
+  const toBook = skipFraud ? rows.filter((r) => r.fraud?.verdict !== "risky") : rows;
+  // Same customer (phone) → one parcel when combining.
+  const groups = useMemo(() => {
+    const byPhone = new Map<string, OrderListRow[]>();
+    for (const r of toBook) byPhone.set(r.phone ?? `id:${r.id}`, [...(byPhone.get(r.phone ?? `id:${r.id}`) ?? []), r]);
+    return [...byPhone.values()];
+  }, [toBook]);
+  const combined = groups.filter((g) => g.length > 1);
+  const parcels = combine ? groups.length : toBook.length;
+  // "Same customer ordered again" is answered by sending the orders as one parcel.
+  const combinedIds = new Set(combine ? combined.flat().map((r) => r.id) : []);
+  const ignored = (r: OrderListRow, f: string) => f === "courier_fraud" || (combinedIds.has(r.id) && f.startsWith("duplicate_"));
+  const flagged = toBook.filter((r) => r.riskFlags?.some((f) => !ignored(r, f)) && !r.riskDismissed);
+  const noPhone = toBook.filter((r) => !r.phone);
+  const cod = toBook.reduce((s, r) => s + Math.max(0, r.outstanding), 0);
   return (
-    <Modal opened={opened} onClose={onClose} title={<Text fw={600}>Book {rows.length} order{rows.length === 1 ? "" : "s"} with Steadfast</Text>} size="md">
+    <Modal opened={opened} onClose={onClose} title={<Text fw={600}>Send to Steadfast</Text>} size="lg">
       <Stack>
-        <Text size="sm">
-          This creates Steadfast consignments using each order's booking details (edited values where saved). Total COD: <b>{money(cod)}</b>.
-        </Text>
+        <Group grow>
+          <Paper withBorder p="sm" radius="md"><Text size="xs" c="dimmed">Orders</Text><Text fw={700} fz="xl">{toBook.length}</Text></Paper>
+          <Paper withBorder p="sm" radius="md"><Text size="xs" c="dimmed">Parcels</Text><Text fw={700} fz="xl">{parcels}</Text></Paper>
+          <Paper withBorder p="sm" radius="md"><Text size="xs" c="dimmed">Total COD</Text><Text fw={700} fz="xl">{money(cod)}</Text></Paper>
+        </Group>
         {skipped > 0 && <Alert color="gray" variant="light">{skipped} selected order(s) are not confirmed, already booked or cancelled and will be skipped.</Alert>}
+        {combined.length > 0 && (
+          <Alert color="grape" variant="light" icon={<Package size={18} />} title={`${combined.length} customer(s) have more than one order`}>
+            <Switch mt={4} label="Send each customer's orders as one parcel (one delivery charge, one return risk)" checked={combine} onChange={(e) => setCombine(e.currentTarget.checked)} />
+            {combine && (
+              <List size="sm" mt="xs">
+                {combined.slice(0, 6).map((g) => (
+                  <List.Item key={g[0].id}>{g.map((r) => r.name).join(" + ")} — {g[0].customerName} · COD {money(g.reduce((s, r) => s + Math.max(0, r.outstanding), 0))}</List.Item>
+                ))}
+              </List>
+            )}
+          </Alert>
+        )}
+        {risky.length > 0 && (
+          <Alert color="red" variant="light" title={`${risky.length} customer(s) have a poor Steadfast record`}>
+            <List size="sm">{risky.slice(0, 6).map((r) => <List.Item key={r.id}>{r.name} — {r.customerName} ({r.fraud?.reasons.join(", ")})</List.Item>)}</List>
+            <Checkbox mt="xs" label="Leave them out — call them first" checked={skipFraud} onChange={(e) => setSkipFraud(e.currentTarget.checked)} />
+          </Alert>
+        )}
         {flagged.length > 0 && (
           <Alert color="orange" variant="light" title={`${flagged.length} flagged order(s)`}>
             <List size="sm">{flagged.slice(0, 6).map((r) => <List.Item key={r.id}>{r.name} — {r.customerName}</List.Item>)}</List>
@@ -478,7 +537,9 @@ function BookModal({ opened, onClose, rows, skipped, loading, onConfirm }: { ope
         <Checkbox label="Also book orders from blocked customers" checked={allowRisky} onChange={(e) => setAllowRisky(e.currentTarget.checked)} />
         <Group justify="flex-end">
           <Button variant="default" onClick={onClose}>Cancel</Button>
-          <Button leftSection={<Send size={15} />} loading={loading} onClick={() => onConfirm(allowRisky)}>Book {rows.length} order{rows.length === 1 ? "" : "s"}</Button>
+          <Button leftSection={<Send size={15} />} loading={loading} disabled={!toBook.length} onClick={() => onConfirm({ ids: toBook.map((r) => r.id), allowRisky, combine })}>
+            Send {parcels} parcel{parcels === 1 ? "" : "s"}
+          </Button>
         </Group>
       </Stack>
     </Modal>

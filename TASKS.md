@@ -119,6 +119,19 @@ Status legend: [x] done · [~] partial / limited by API · [ ] not started
 - [x] New permission `reports.view` (owner, admin, viewer)
 - [x] e2e: 51 checks
 
+## Fraud check, combined parcels, confirmed money
+- [x] Steadfast fraud check (`/fraud_check/score`) per new order: cached per phone, per-minute budget, job queue; verdict good/watch/risky/new
+- [x] Risky → `courier_fraud` flag, "Call first" tab, never auto-booked; fraud badge in list, fraud card in order drawer, re-check button
+- [x] Steadfast lockout guard: 429 pauses all calls for Retry-After; 401 pauses until keys change; dashboard banner
+- [x] `_approval_pending` → "Awaiting Steadfast confirmation"; money/returns/mark-paid only on confirmed status; `exceptional` in Stuck parcels
+- [x] Partial delivery with only the delivery charge collected → "Delivery charge paid · product returned" + expected return
+- [x] Mark COD orders paid in Shopify (`orderMarkAsPaid`) on confirmed delivery (skipped if collected < balance)
+- [x] Combine same-customer orders into one parcel: order drawer, bulk "Send to Steadfast", auto-booking (waits for siblings); status/fulfillment/mark-paid per order; scanner STOP if a combined order is cancelled
+- [x] Full tracking history (`/trackings_by_invoice`) fills gaps after missed webhooks, de-duplicated
+- [x] Webhook: X-Signature verification; consignment_update, cancel_request, return_request, return_list_accepted, payment_request
+- [x] Redesigned customer tracking page
+- [x] e2e: 57 checks · unit: 36 tests
+
 ## Ideas / next
 - [ ] Email the owner report daily (needs an email service — Cloudflare Email Routing could send to verified addresses)
 - [ ] SMS confirmation to customers (needs a BD SMS gateway — out of scope, no external services)

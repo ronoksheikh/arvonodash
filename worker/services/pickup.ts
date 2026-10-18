@@ -59,7 +59,7 @@ export async function dayPlan(db: DB, settings: AppSettings, offset: string, now
     .from(orders)
     .leftJoin(consignments, eq(consignments.id, orders.activeConsignmentId))
     .where(
-      sql`${orders.archived} = 0 and (
+      sql`${orders.archived} = 0 and ${orders.combinedIntoOrderId} is null and (
         (${orders.cancelledAt} is null and ${orders.callingStatus} = 'confirmed' and ${orders.courierStage} in ('unbooked', 'booked')
           and coalesce(${orders.shopifyFulfillmentStatus}, '') not in ('fulfilled', 'partially_fulfilled', 'partial'))
         or (${orders.dispatchStatus} = 'sorted' and ${orders.handedOverAt} is null)
