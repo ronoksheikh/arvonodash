@@ -10,6 +10,7 @@ import { webhookRoutes } from "./routes/webhooks";
 import { dispatchRoutes } from "./routes/dispatch";
 import { expireReservations } from "./services/dispatch";
 import { orderRoutes } from "./routes/orders";
+import { opsRoutes } from "./routes/ops";
 import { consignmentRoutes } from "./routes/consignments";
 import { codRoutes, customerRoutes, dashboardRoutes, returnRoutes } from "./routes/misc";
 import { logRoutes, pruneOldData, settingsRoutes, syncRoutes, userRoutes } from "./routes/admin";
@@ -68,6 +69,7 @@ api.route("/settings", settingsRoutes);
 api.route("/users", userRoutes);
 api.route("/logs", logRoutes);
 api.route("/sync", syncRoutes);
+api.route("/ops", opsRoutes);
 app.route("/api", api);
 
 app.all("/api/*", (c) => c.json({ error: "Not found" }, 404));

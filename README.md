@@ -74,6 +74,35 @@ dispatch. Shopify fulfillment and courier delivery are tracked on top of these.
   courier updates, delivered, returned or cancelled. It also shows the items, totals, COD due and
   delivery address. The phone number is masked and no staff names or internal notes are shown.
   The label API returns the link as `trackingUrl` for printing as a QR code. SMS is not sent yet.
+- **Pickup today** (`/pickup`): orders confirmed before the daily cut-off (default 4:00 PM, set
+  in Settings) ship the same day.
+  - Live countdowns to the cut-off and to the usual courier pickup time.
+  - Each parcel shows where it is: not booked → label not printed → not scanned → ready
+    (scanned) → handed to rider → picked up by Steadfast. Parcels carried over from earlier days
+    are marked.
+  - **Courier arrived → hand over**: record the rider's name and phone and tick the scanned
+    parcels they take. Unscanned parcels are listed as *left behind*, and scanned parcels that
+    were cancelled in Shopify get a "do NOT give" warning.
+  - Each handover shows how many parcels Steadfast has confirmed picking up.
+  - Handing over never marks a parcel dispatched; only Steadfast's own status does that.
+- **Stuck parcels** (`/stuck`, with a badge in the menu) lists parcels that need a call:
+  - handed to the rider, but Steadfast hasn't confirmed pickup after 12 h
+  - on hold
+  - no Steadfast update for 3+ days
+  - slower than normal for the district (learned from your own deliveries, with defaults until
+    there is enough history)
+  - scanned more than a day ago but never collected
+
+  Each card has buttons to call the customer, the pickup rider (from the handover) and the
+  delivery rider (when Steadfast's updates include their number). You can also log the call with
+  quick notes, which are added to the order notes, and snooze the parcel for 1–3 days.
+- **Owner report** (`/report`): today, yesterday, last 7 or 30 days, or a custom range.
+  - Orders received, confirm rate, rejected, cancelled, still to call, new customers.
+  - Sent to Steadfast, picked up, delivered, returned, delivery success rate.
+  - Same-day dispatch rate against the cut-off.
+  - COD collected, delivery charges, paid out by Steadfast, awaiting payout, COD with the courier.
+  - The worst districts and products for returns, and calls per team member.
+  - Printable. It is an on-screen report only; there is no email (that needs an email service).
 - **Dispatch**: to sort, sorted (awaiting pickup), dispatched, and exceptions
   (held, failed, returned, cancelled after booking, dispatched more than 24 h ago without a
   pickup). Includes bulk *Mark dispatched* and *Undo* with a reason.

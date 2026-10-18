@@ -29,6 +29,12 @@ type AppSettings = {
   businessName: string;
   businessPhone: string;
   businessAddress: string;
+  cutoffTime: string;
+  pickupTime: string;
+  stuckNoUpdateDays: number;
+  transitDaysDhaka: number;
+  transitDaysOutside: number;
+  handoverConfirmHours: number;
 };
 type SettingsData = {
   settings: AppSettings;
@@ -301,6 +307,24 @@ function Workflow({ d }: { d: SettingsData }) {
         <SimpleGrid cols={{ base: 1, sm: 2 }} mt="sm">
           <NumberInput label="Delay (minutes)" min={0} max={1440} value={s.autoBookDelayMinutes} onChange={(v) => setS({ ...s, autoBookDelayMinutes: Number(v) || 0 })} disabled={disabled || !s.autoBookEnabled} />
           <Switch mt={30} label="Skip orders with risk flags (book them manually)" checked={s.autoBookSkipFlagged} onChange={(e) => setS({ ...s, autoBookSkipFlagged: e.currentTarget.checked })} disabled={disabled || !s.autoBookEnabled} />
+        </SimpleGrid>
+      </Card>
+      <Card>
+        <Text fw={600} mb={4}>Same-day dispatch</Text>
+        <Text size="sm" c="dimmed" mb="md">Orders confirmed before the cut-off ship the same day. The Pickup today page counts down to both times (Asia/Dhaka).</Text>
+        <SimpleGrid cols={{ base: 1, sm: 2 }}>
+          <TextInput type="time" label="Daily cut-off" value={s.cutoffTime} onChange={(e) => setS({ ...s, cutoffTime: e.currentTarget.value })} disabled={disabled} />
+          <TextInput type="time" label="Usual courier pickup time" value={s.pickupTime} onChange={(e) => setS({ ...s, pickupTime: e.currentTarget.value })} disabled={disabled} />
+        </SimpleGrid>
+      </Card>
+      <Card>
+        <Text fw={600} mb={4}>Stuck parcel alerts</Text>
+        <Text size="sm" c="dimmed" mb="md">Usual delivery time is learned per district from your own deliveries (5+ deliveries). These defaults apply until then.</Text>
+        <SimpleGrid cols={{ base: 1, sm: 2 }}>
+          <NumberInput label="No Steadfast update for (days)" min={1} max={30} value={s.stuckNoUpdateDays} onChange={(v) => setS({ ...s, stuckNoUpdateDays: Number(v) || 3 })} disabled={disabled} />
+          <NumberInput label="Handed to rider, not confirmed after (hours)" min={1} max={72} value={s.handoverConfirmHours} onChange={(v) => setS({ ...s, handoverConfirmHours: Number(v) || 12 })} disabled={disabled} />
+          <NumberInput label="Usual delivery days — Dhaka" min={1} max={30} value={s.transitDaysDhaka} onChange={(v) => setS({ ...s, transitDaysDhaka: Number(v) || 3 })} disabled={disabled} />
+          <NumberInput label="Usual delivery days — outside Dhaka" min={1} max={30} value={s.transitDaysOutside} onChange={(v) => setS({ ...s, transitDaysOutside: Number(v) || 5 })} disabled={disabled} />
         </SimpleGrid>
       </Card>
       <Card>

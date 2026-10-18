@@ -110,7 +110,17 @@ Status legend: [x] done · [~] partial / limited by API · [ ] not started
 - [x] Tracking token per order (backfilled by migration 0004), copy link in order drawer, `trackingUrl` in label API
 - [x] e2e: 47 checks
 
+## Same-day pickup, stuck parcels, owner report
+- [x] Daily cut-off + pickup time settings; Pickup today page with countdowns and per-stage view of today's parcels (booking → label → scan → handed over → picked up)
+- [x] Courier handover checklist: rider name/phone, scanned parcels only, left-behind and cancelled warnings, atomic (no double handover); Steadfast confirmation per handover
+- [x] Stuck parcels: not confirmed after handover, on hold, no update N days, slower than district norm (learned p80, defaults for Dhaka/outside), not collected
+- [x] Call customer / pickup rider / delivery rider (phone parsed from Steadfast updates); log call + snooze; note copied to the order
+- [x] Owner report: orders & calls, courier flow, same-day rate, COD, worst districts/products for returns, calls per team member; printable
+- [x] New permission `reports.view` (owner, admin, viewer)
+- [x] e2e: 51 checks
+
 ## Ideas / next
+- [ ] Email the owner report daily (needs an email service — Cloudflare Email Routing could send to verified addresses)
 - [ ] SMS confirmation to customers (needs a BD SMS gateway — out of scope, no external services)
 - [ ] Shopify return creation (`returnCreate`) once the team wants returns mirrored in Shopify
 - [ ] Per-zone delivery-charge estimates once Steadfast publishes a pricing endpoint

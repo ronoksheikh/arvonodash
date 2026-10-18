@@ -21,7 +21,7 @@ export type Actor = { name: string; id?: number | null };
 // ---------------------------------------------------------------------------
 // Business-day helpers (Asia/Dhaka by default)
 
-function offsetMinutes(offset: string): number {
+export function offsetMinutes(offset: string): number {
   const sign = offset.startsWith("-") ? -1 : 1;
   const [h, m] = offset.replace(/^[+-]/, "").split(":").map(Number);
   return sign * ((h || 0) * 60 + (m || 0));
@@ -49,7 +49,7 @@ export function businessDate(iso: string | Date, offset: string): string {
 const printableBase = sql`${orders.courierStage} = 'booked' and ${orders.cancelledAt} is null and ${orders.archived} = 0
   and ${orders.activeConsignmentId} is not null`;
 
-async function addEvents(db: DB, rows: { orderId: number; event: string; jobId?: string | null; note?: string | null; consignmentRowId?: number | null }[], actor: Actor) {
+export async function addEvents(db: DB, rows: { orderId: number; event: string; jobId?: string | null; note?: string | null; consignmentRowId?: number | null }[], actor: Actor) {
   const now = nowIso();
   // D1 limits bound parameters per statement, so insert in small batches.
   for (let i = 0; i < rows.length; i += 10) {
@@ -74,7 +74,7 @@ async function addEvents(db: DB, rows: { orderId: number; event: string; jobId?:
 export async function onBooked(db: DB, orderId: number, consignmentRowId: number, actor: Actor) {
   await db
     .update(orders)
-    .set({ labelStatus: "unprinted", bookedAt: nowIso(), printJobId: null, reservedUntil: null, dispatchStatus: "pending", sortedAt: null, sortedBy: null, sortBatchId: null, dispatchedAt: null, dispatchedBy: null, courierReceivedAt: null })
+    .set({ labelStatus: "unprinted", bookedAt: nowIso(), printJobId: null, reservedUntil: null, dispatchStatus: "pending", sortedAt: null, sortedBy: null, sortBatchId: null, pickupId: null, handedOverAt: null, dispatchedAt: null, dispatchedBy: null, courierReceivedAt: null })
     .where(eq(orders.id, orderId));
   await addEvents(db, [{ orderId, event: "label_ready", consignmentRowId }], actor);
 }
@@ -447,7 +447,7 @@ export async function markSorted(db: DB, actor: Actor, orderIds: number[]) {
 export async function unsort(db: DB, actor: Actor, orderIds: number[], reason: string) {
   const rows = await db
     .update(orders)
-    .set({ dispatchStatus: "pending", sortedAt: null, sortedBy: null, sortBatchId: null })
+    .set({ dispatchStatus: "pending", sortedAt: null, sortedBy: null, sortBatchId: null, pickupId: null, handedOverAt: null })
     .where(and(inList(orders.id, orderIds), eq(orders.dispatchStatus, "sorted")))
     .returning({ id: orders.id })
     .all();
