@@ -7,6 +7,7 @@ import { requirePerm } from "../lib/auth";
 import { HttpError, nowIso } from "../lib/util";
 import { logActivity } from "../services/activity";
 import { applyCourierUpdate, pollActiveConsignments } from "../services/courier";
+import { onNotPrintable } from "../services/dispatch";
 import * as steadfast from "../services/steadfast";
 
 export const consignmentRoutes = new Hono<AppEnv>();
@@ -173,6 +174,7 @@ consignmentRoutes.post("/:id{[0-9]+}/discard", requirePerm("courier.manage"), as
   if (status) return c.json({ error: `Steadfast has this invoice (status: ${status}). Check the Steadfast panel instead.` }, 409);
   await db.update(consignments).set({ superseded: true, stage: "cancelled", status: "discarded", isFinal: true }).where(eq(consignments.id, row.id));
   await db.update(orders).set({ courierStage: "unbooked", activeConsignmentId: null }).where(and(eq(orders.id, row.orderId), eq(orders.activeConsignmentId, row.id)));
+  await onNotPrintable(db, row.orderId, "Unconfirmed booking discarded", c.get("user"));
   await logActivity(db, c.get("user"), "courier.reservation_discarded", { entityType: "consignment", entityId: row.invoice, orderId: row.orderId });
   return c.json({ ok: true });
 });
@@ -185,6 +187,8 @@ consignmentRoutes.post("/:id{[0-9]+}/release", requirePerm("courier.manage"), as
   if (!["returned", "cancelled"].includes(row.stage)) return c.json({ error: "Only returned or cancelled consignments can be released for rebooking" }, 400);
   await db.update(consignments).set({ superseded: true, updatedAt: nowIso() }).where(eq(consignments.id, row.id));
   await db.update(orders).set({ courierStage: "unbooked", activeConsignmentId: null, updatedAt: nowIso() }).where(eq(orders.id, row.orderId));
+  await onNotPrintable(db, row.orderId, "Released for rebooking", c.get("user"));
+  await db.update(orders).set({ dispatchStatus: "pending", dispatchedAt: null, dispatchedBy: null, courierReceivedAt: null }).where(eq(orders.id, row.orderId));
   await logActivity(db, c.get("user"), "courier.released_for_rebooking", { entityType: "consignment", entityId: row.consignmentId ?? row.invoice, orderId: row.orderId });
   return c.json({ ok: true });
 });

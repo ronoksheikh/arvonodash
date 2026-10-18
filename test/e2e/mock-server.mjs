@@ -3,7 +3,33 @@
 import http from "node:http";
 
 const PORT = Number(process.env.MOCK_PORT ?? 8790);
-const state = { fulfillments: [], tags: [], consignments: [], tokenRequests: 0, webhooks: [], returnRequests: [] };
+const state = { fulfillments: [], tags: [], consignments: [], tokenRequests: 0, webhooks: [], returnRequests: [], progressReports: [], reopened: [], cancelled: [], deleteAttempts: [], closed: [] };
+const restOrders = {}; // shopify id -> REST payload registered by the test (mirrors webhook data)
+
+function displayStatus(orderId) {
+  const fos = fulfillmentOrders[orderId];
+  if (!fos) return "UNFULFILLED";
+  if (fos.every((f) => f.status === "CLOSED")) return "FULFILLED";
+  if (fos.some((f) => f.status === "IN_PROGRESS")) return "IN_PROGRESS";
+  return "UNFULFILLED";
+}
+
+function restToGql(o) {
+  const m = (v) => ({ shopMoney: { amount: String(v ?? "0") } });
+  const sa = o.shipping_address ?? {};
+  return {
+    id: `gid://shopify/Order/${o.id}`, name: o.name, number: o.order_number, createdAt: o.created_at, updatedAt: o.updated_at,
+    cancelledAt: state.cancelled.find((c) => c.id === String(o.id))?.at ?? o.cancelled_at ?? null, cancelReason: null, closedAt: null,
+    email: o.email ?? null, phone: o.phone ?? null, note: o.note ?? null, tags: [], sourceName: "web", currencyCode: "BDT",
+    displayFinancialStatus: "PENDING", displayFulfillmentStatus: displayStatus(String(o.id)), paymentGatewayNames: o.payment_gateway_names ?? [],
+    subtotalPriceSet: m(o.subtotal_price), totalShippingPriceSet: m(120), totalDiscountsSet: m(0), totalPriceSet: m(o.total_price), totalOutstandingSet: m(o.total_outstanding),
+    customAttributes: [], shippingLine: { title: "Inside Dhaka" },
+    customer: { id: `gid://shopify/Customer/${o.customer?.id ?? 1}`, displayName: "x", firstName: null, lastName: null, defaultPhoneNumber: null, defaultEmailAddress: null },
+    shippingAddress: { name: sa.name, firstName: null, lastName: null, address1: sa.address1, address2: sa.address2 ?? null, city: sa.city, province: null, zip: sa.zip, country: sa.country, phone: sa.phone },
+    billingAddress: null,
+    lineItems: { nodes: o.line_items.map((li) => ({ id: `gid://shopify/LineItem/${li.id}`, title: li.title, variantTitle: li.variant_title, sku: li.sku, quantity: li.quantity, currentQuantity: li.quantity, unfulfilledQuantity: li.quantity, originalUnitPriceSet: m(li.price), product: null, variant: { id: `gid://shopify/ProductVariant/${li.variant_id}` } })) },
+  };
+}
 let nextCid = 1424100;
 
 const shopifyOrders = [1, 2, 3].map((n) => ({
@@ -50,7 +76,7 @@ function json(res, status, body) {
 function graphql(query, variables) {
   if (query.includes("FulfillmentOrders")) {
     const id = variables.id.split("/").pop();
-    return { data: { order: { id: variables.id, displayFulfillmentStatus: "UNFULFILLED", cancelledAt: null, fulfillmentOrders: { nodes: foFor(id) } } } };
+    return { data: { order: { id: variables.id, displayFulfillmentStatus: displayStatus(id), cancelledAt: state.cancelled.find((c) => c.id === id)?.at ?? null, fulfillmentOrders: { nodes: foFor(id) } } } };
   }
   if (query.includes("fulfillmentCreate")) {
     const input = variables.fulfillment;
@@ -68,6 +94,30 @@ function graphql(query, variables) {
     }
     return { data: { fulfillmentCreate: { fulfillment: { id: `gid://shopify/Fulfillment/${state.fulfillments.length}`, status: "SUCCESS" }, userErrors: [] } } };
   }
+  if (query.includes("fulfillmentOrderReportProgress")) {
+    for (const fos of Object.values(fulfillmentOrders)) for (const fo of fos) if (fo.id === variables.id) fo.status = "IN_PROGRESS";
+    state.progressReports.push(variables);
+    return { data: { fulfillmentOrderReportProgress: { fulfillmentOrder: { id: variables.id, status: "IN_PROGRESS" }, userErrors: [] } } };
+  }
+  if (query.includes("fulfillmentOrderOpen")) {
+    for (const fos of Object.values(fulfillmentOrders)) for (const fo of fos) if (fo.id === variables.id) fo.status = "OPEN";
+    state.reopened.push(variables.id);
+    return { data: { fulfillmentOrderOpen: { fulfillmentOrder: { id: variables.id, status: "OPEN" }, userErrors: [] } } };
+  }
+  if (query.includes("orderCancel")) {
+    const id = variables.orderId.split("/").pop();
+    state.cancelled.push({ id, at: new Date().toISOString(), reason: variables.reason, restock: variables.restock, refundMethod: variables.refundMethod });
+    if (restOrders[id]) restOrders[id].updated_at = new Date().toISOString();
+    return { data: { orderCancel: { job: { id: "gid://shopify/Job/1", done: false }, orderCancelUserErrors: [] } } };
+  }
+  if (query.includes("orderDelete")) {
+    state.deleteAttempts.push(variables.orderId);
+    return { data: { orderDelete: { deletedId: null, userErrors: [{ message: "Order can't be deleted because it isn't archived or cancelled" }] } } };
+  }
+  if (query.includes("orderClose")) {
+    state.closed.push(variables.input.id);
+    return { data: { orderClose: { order: { id: variables.input.id, closedAt: new Date().toISOString() }, userErrors: [] } } };
+  }
   if (query.includes("tagsAdd")) {
     state.tags.push(variables);
     return { data: { tagsAdd: { userErrors: [] } } };
@@ -77,7 +127,11 @@ function graphql(query, variables) {
     const page = shopifyOrders.slice(after, after + 2);
     return { data: { orders: { nodes: page, pageInfo: { hasNextPage: after + 2 < shopifyOrders.length, endCursor: String(after + 2) } } }, extensions: { cost: { requestedQueryCost: 50, throttleStatus: { currentlyAvailable: 1900, restoreRate: 100, maximumAvailable: 2000 } } } };
   }
-  if (query.includes("query Order(")) return { data: { order: shopifyOrders.find((o) => o.id === variables.id) ?? null } };
+  if (query.includes("query Order(")) {
+    const id = variables.id.split("/").pop();
+    if (restOrders[id]) return { data: { order: restToGql(restOrders[id]) } };
+    return { data: { order: shopifyOrders.find((o) => o.id === variables.id) ?? null } };
+  }
   if (query.includes("shop {")) return { data: { shop: { name: "ARVONO Test", myshopifyDomain: "arvono-test.myshopify.com", currencyCode: "BDT", ianaTimezone: "Asia/Dhaka" } } };
   if (query.includes("webhookSubscriptions")) return { data: { webhookSubscriptions: { nodes: state.webhooks } } };
   if (query.includes("webhookSubscriptionCreate")) {
@@ -94,6 +148,18 @@ const server = http.createServer(async (req, res) => {
   const p = url.pathname;
 
   if (p === "/__state") return json(res, 200, state);
+  if (p === "/__orders" && req.method === "POST") {
+    const o = JSON.parse(body);
+    restOrders[String(o.id)] = o;
+    return json(res, 200, { ok: true });
+  }
+  if (p === "/__fo_status" && req.method === "POST") {
+    // Simulates staff changing fulfillment status in Shopify admin / mobile app.
+    const { orderId, status } = JSON.parse(body);
+    for (const fo of foFor(String(orderId))) fo.status = status;
+    if (restOrders[orderId]) restOrders[orderId].updated_at = new Date().toISOString();
+    return json(res, 200, { ok: true });
+  }
 
   // Shopify
   if (p === "/admin/oauth/access_token") {

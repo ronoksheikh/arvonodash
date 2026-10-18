@@ -3,12 +3,16 @@
 export const PERMISSIONS = {
   "orders.view": "View orders and customers",
   "orders.edit": "Edit order notes, tags, statuses, booking details",
+  "orders.call": "Record calls and confirm orders",
+  "orders.cancel": "Cancel / delete orders in Shopify",
   "courier.book": "Send orders to Steadfast",
   "courier.manage": "Return requests, rebooking, status refresh",
   "fulfillment.manage": "Retry / trigger Shopify fulfillment",
   "returns.manage": "Manage returns",
   "cod.view": "View COD and settlements",
-  "export": "Export CSV, print labels",
+  "export": "Export CSV, print packing slips",
+  "dispatch.manage": "Release print reservations, mark parcels dispatched",
+  "labels.reprint": "Request label reprints",
   "sync.manage": "Run imports and manual syncs",
   "settings.manage": "Connection and workflow settings",
   "users.manage": "Staff accounts and permissions",
@@ -18,7 +22,7 @@ export const PERMISSIONS = {
 export type Permission = keyof typeof PERMISSIONS;
 export const ALL_PERMISSIONS = Object.keys(PERMISSIONS) as Permission[];
 
-export const ROLES = ["owner", "admin", "operator", "packer", "viewer"] as const;
+export const ROLES = ["owner", "admin", "operator", "caller", "packer", "viewer"] as const;
 export type Role = (typeof ROLES)[number];
 
 export const ROLE_PERMISSIONS: Record<Role, Permission[]> = {
@@ -27,6 +31,8 @@ export const ROLE_PERMISSIONS: Record<Role, Permission[]> = {
   operator: [
     "orders.view",
     "orders.edit",
+    "orders.call",
+    "dispatch.manage",
     "courier.book",
     "courier.manage",
     "fulfillment.manage",
@@ -34,7 +40,8 @@ export const ROLE_PERMISSIONS: Record<Role, Permission[]> = {
     "export",
     "logs.view",
   ],
-  packer: ["orders.view", "export"],
+  caller: ["orders.view", "orders.call"],
+  packer: ["orders.view", "export", "dispatch.manage"],
   viewer: ["orders.view", "cod.view", "logs.view"],
 };
 
@@ -122,4 +129,52 @@ export const RISK_FLAGS: Record<string, string> = {
   high_value: "Unusually high COD value",
   test_order: "Looks like a test order",
   large_quantity: "Unusually large quantity",
+  changed_after_booking: "Phone or address changed in Shopify after booking — update Steadfast",
+};
+
+export const CALLING_STATUSES = {
+  not_called: { label: "Not called", color: "gray" },
+  no_answer: { label: "No answer", color: "yellow" },
+  call_again: { label: "Call again", color: "orange" },
+  confirmed: { label: "Confirmed", color: "teal" },
+  rejected: { label: "Rejected", color: "red" },
+} as const;
+export type CallingStatus = keyof typeof CALLING_STATUSES;
+
+export const PROCESSING_STATUSES = {
+  new: { label: "New", color: "gray" },
+  in_progress: { label: "In progress", color: "blue" },
+  cancelled: { label: "Cancelled", color: "dark" },
+} as const;
+
+export const LABEL_STATUSES = {
+  not_ready: { label: "Not ready", color: "gray" },
+  unprinted: { label: "Unprinted", color: "blue" },
+  reserved: { label: "Reserved", color: "yellow" },
+  printed: { label: "Printed", color: "teal" },
+} as const;
+
+export const DISPATCH_STATUSES = {
+  pending: { label: "Not dispatched", color: "gray" },
+  dispatched: { label: "Dispatched", color: "indigo" },
+  courier_received: { label: "Courier received", color: "teal" },
+} as const;
+
+export const SHOPIFY_SYNC_STATUSES = {
+  none: { label: "—", color: "gray" },
+  pending: { label: "Syncing", color: "blue" },
+  synced: { label: "In progress in Shopify", color: "teal" },
+  failed: { label: "Shopify sync failed", color: "red" },
+} as const;
+
+export const DISPATCH_EVENTS: Record<string, string> = {
+  label_ready: "Ready to print",
+  reserved: "Reserved for printing",
+  printed: "Label printed",
+  released: "Reservation released",
+  expired: "Reservation expired",
+  reprint_requested: "Reprint requested",
+  dispatched: "Dispatched",
+  dispatch_undone: "Dispatch undone",
+  courier_received: "Received by courier",
 };

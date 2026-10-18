@@ -129,6 +129,30 @@ export const orders = sqliteTable(
     riskDismissed: integer("risk_dismissed", { mode: "boolean" }).notNull().default(false),
     duplicateOfOrderId: integer("duplicate_of_order_id"),
     booking: text("booking", { mode: "json" }).$type<Partial<BookingDetails>>(), // saved edits before submission
+    // Calling / verification
+    callingStatus: text("calling_status").notNull().default("not_called"), // not_called | no_answer | confirmed | rejected | call_again
+    callAttempts: integer("call_attempts").notNull().default(0),
+    lastCallAt: text("last_call_at"),
+    callbackAt: text("callback_at"),
+    confirmedAt: text("confirmed_at"),
+    confirmedBy: integer("confirmed_by"),
+    processingStatus: text("processing_status").notNull().default("new"), // new | in_progress | cancelled
+    shopifySyncStatus: text("shopify_sync_status").notNull().default("none"), // none | pending | synced | failed
+    shopifySyncError: text("shopify_sync_error"),
+    shopifySyncedAt: text("shopify_synced_at"),
+    cancelRequestedAt: text("cancel_requested_at"),
+    // Label printing (external label service) and physical dispatch
+    bookedAt: text("booked_at"),
+    bookedSource: text("booked_source"), // Shopify phone|address at booking time
+    labelStatus: text("label_status").notNull().default("not_ready"), // not_ready | unprinted | reserved | printed
+    printJobId: text("print_job_id"),
+    reservedUntil: text("reserved_until"),
+    printedAt: text("printed_at"),
+    printCount: integer("print_count").notNull().default(0),
+    dispatchStatus: text("dispatch_status").notNull().default("pending"), // pending | dispatched | courier_received
+    dispatchedAt: text("dispatched_at"),
+    dispatchedBy: text("dispatched_by"),
+    courierReceivedAt: text("courier_received_at"),
     // Courier & fulfillment (kept separate)
     courierStage: text("courier_stage").notNull().default("unbooked"), // unbooked|booked|in_transit|on_hold|delivered|partial_delivered|returned|cancelled|issue
     activeConsignmentId: integer("active_consignment_id"),
@@ -147,6 +171,10 @@ export const orders = sqliteTable(
     index("orders_stage_idx").on(t.courierStage),
     index("orders_status_idx").on(t.statusId),
     index("orders_name_idx").on(t.name),
+    index("orders_calling_idx").on(t.callingStatus),
+    index("orders_label_idx").on(t.labelStatus, t.bookedAt),
+    index("orders_print_job_idx").on(t.printJobId),
+    index("orders_dispatch_idx").on(t.dispatchStatus, t.bookedAt),
   ],
 );
 
@@ -336,4 +364,79 @@ export const syncRuns = sqliteTable(
     finishedAt: text("finished_at"),
   },
   (t) => [index("sync_runs_started_idx").on(t.startedAt)],
+);
+
+export const callLogs = sqliteTable(
+  "call_logs",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    orderId: integer("order_id").notNull(),
+    outcome: text("outcome").notNull(), // calling status recorded by this call
+    note: text("note"),
+    callbackAt: text("callback_at"),
+    userId: integer("user_id"),
+    userName: text("user_name"),
+    createdAt: text("created_at").notNull(),
+  },
+  (t) => [index("call_logs_order_idx").on(t.orderId)],
+);
+
+/** Keys for external services (e.g. the label printing service). Only a SHA-256 hash is stored. */
+export const apiKeys = sqliteTable("api_keys", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  name: text("name").notNull(),
+  prefix: text("prefix").notNull(),
+  keyHash: text("key_hash").notNull().unique(),
+  scopes: text("scopes", { mode: "json" }).$type<string[]>().notNull(),
+  createdBy: integer("created_by"),
+  lastUsedAt: text("last_used_at"),
+  revokedAt: text("revoked_at"),
+  createdAt: text("created_at").notNull(),
+});
+
+export const idempotencyKeys = sqliteTable(
+  "idempotency_keys",
+  {
+    scope: text("scope").notNull(), // api key id or user id
+    key: text("key").notNull(),
+    endpoint: text("endpoint").notNull(),
+    requestHash: text("request_hash").notNull(),
+    status: text("status").notNull().default("processing"), // processing | done
+    responseStatus: integer("response_status"),
+    responseBody: text("response_body"),
+    createdAt: text("created_at").notNull(),
+  },
+  (t) => [uniqueIndex("idempotency_scope_key_idx").on(t.scope, t.key), index("idempotency_created_idx").on(t.createdAt)],
+);
+
+export const printJobs = sqliteTable(
+  "print_jobs",
+  {
+    id: text("id").primaryKey(),
+    source: text("source").notNull(), // api key name or user name
+    status: text("status").notNull().default("reserved"), // reserved | completed | partial | released | expired
+    orderCount: integer("order_count").notNull().default(0),
+    printedCount: integer("printed_count").notNull().default(0),
+    filters: text("filters", { mode: "json" }),
+    expiresAt: text("expires_at").notNull(),
+    createdAt: text("created_at").notNull(),
+    completedAt: text("completed_at"),
+  },
+  (t) => [index("print_jobs_created_idx").on(t.createdAt)],
+);
+
+/** Full label printing and dispatch history per order. */
+export const dispatchEvents = sqliteTable(
+  "dispatch_events",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    orderId: integer("order_id").notNull(),
+    consignmentRowId: integer("consignment_row_id"),
+    event: text("event").notNull(), // label_ready | reserved | printed | released | expired | reprint_requested | dispatched | dispatch_undone | courier_received
+    jobId: text("job_id"),
+    actor: text("actor").notNull(),
+    note: text("note"),
+    createdAt: text("created_at").notNull(),
+  },
+  (t) => [index("dispatch_events_order_idx").on(t.orderId), index("dispatch_events_job_idx").on(t.jobId), index("dispatch_events_created_idx").on(t.createdAt)],
 );

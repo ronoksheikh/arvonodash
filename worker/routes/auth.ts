@@ -10,13 +10,11 @@ import { logActivity } from "../services/activity";
 
 export const authRoutes = new Hono<AppEnv>();
 
+// Optional internal labels. Phone verification uses the dedicated calling status instead.
 const DEFAULT_STATUSES = [
-  { name: "New", color: "blue", isDefault: true, blocksBooking: false },
-  { name: "Confirmed", color: "teal", isDefault: false, blocksBooking: false },
-  { name: "No answer", color: "yellow", isDefault: false, blocksBooking: false },
-  { name: "Call back later", color: "orange", isDefault: false, blocksBooking: false },
   { name: "Hold", color: "gray", isDefault: false, blocksBooking: true },
-  { name: "Fake / Spam", color: "red", isDefault: false, blocksBooking: true },
+  { name: "Priority", color: "grape", isDefault: false, blocksBooking: false },
+  { name: "Exchange", color: "cyan", isDefault: false, blocksBooking: false },
 ];
 
 authRoutes.get("/setup-status", async (c) => {

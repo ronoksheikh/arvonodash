@@ -33,11 +33,30 @@ access for those fields in the Dev Dashboard. Without it, the API returns `null`
 | Refresh one order | `order(id)` |
 | Fulfill | `order.fulfillmentOrders` (status, `supportedActions`, line items with `remainingQuantity`) → `fulfillmentCreate(fulfillment: FulfillmentInput!)` with `lineItemsByFulfillmentOrder`, `trackingInfo {company, number, url}`, `notifyCustomer` |
 | Tag booked orders | `tagsAdd(id, tags)` |
+| Mark order "In progress" after phone confirmation | `fulfillmentOrderReportProgress(id, progressReport: {reasonNotes})` on each OPEN fulfillment order. Shopify then shows the fulfillment status **In progress** natively. No tags or notes are used |
+| Undo "In progress" (confirmation withdrawn before booking) | `fulfillmentOrderOpen(id)` (2026-01+: reopens a progress-reported fulfillment order at a merchant-managed location) |
+| Cancel fake/rejected orders | `orderCancel(orderId, reason: FRAUD\|CUSTOMER\|INVENTORY\|DECLINED\|STAFF\|OTHER, restock, notifyCustomer, staffNote, refundMethod: {originalPaymentMethodsRefund: false})`. It runs asynchronously; completion is confirmed by the `orders/cancelled` webhook or a GraphQL refresh. We never refund from here |
+| Delete orders | `orderDelete(orderId)`. Only some order types can be deleted; when Shopify refuses, we fall back to `orderClose` (shown as **Archived** in Shopify admin) and archive locally |
 | Health check | `shop { name currencyCode … }` |
 | Webhooks | `webhookSubscriptions`, `webhookSubscriptionCreate(topic, webhookSubscription: {uri})` |
 
 Customer contact fields come from `Customer.defaultPhoneNumber.phoneNumber` and
 `defaultEmailAddress.emailAddress`. `Customer.phone` and `Customer.email` are deprecated.
+
+**Two-way sync with Shopify admin and the mobile app**: every `orders/updated` webhook is upserted
+from its REST payload. A GraphQL re-read job then follows, because REST `fulfillment_status`
+cannot express "In progress", "On hold" and similar states. This picks up:
+- an order marked In progress in Shopify, which we treat as phone-confirmed
+- an order moved back to Unfulfilled, which goes back to *call again*
+- cancellations, which remove the order from printing
+- fulfillments made in Shopify
+- phone or address edits after booking, which are flagged so Steadfast can be updated
+- archive and delete
+
+Reconciliation runs every 15 minutes as a backstop for missed webhooks.
+
+Extra scope needs: `write_orders` covers cancel, close and delete. The app user also needs the
+`delete_orders` permission to delete.
 
 **Rate limits**: the query cost leaky bucket. We read `extensions.cost.throttleStatus`. On
 `THROTTLED` we wait `(cost - available) / restoreRate`, back off when the bucket is below 10%,

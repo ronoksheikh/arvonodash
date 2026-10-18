@@ -5,13 +5,14 @@ import {
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { modals } from "@mantine/modals";
 import {
-  AlertTriangle, ExternalLink, MapPin, MoreVertical, Package, Phone, RefreshCw, Send, Trash2, Truck, User, RotateCcw, CheckCircle2, ShieldCheck, Printer, MessageSquarePlus, PackageCheck,
+  AlertTriangle, Ban, ExternalLink, MapPin, MoreVertical, Package, Phone, RefreshCw, Send, Trash2, Truck, User, RotateCcw, CheckCircle2, ShieldCheck, Printer, MessageSquarePlus, PackageCheck,
 } from "lucide-react";
 import { api, del, notifyError, notifySuccess, patch, post, put } from "../api";
 import { useCan } from "../auth";
-import { Copyable, CustomStatusBadge, ErrorState, FulfillmentBadge, KeyValue, LoadingState, RiskBadge, StageBadge, SteadfastStatusBadge, useStatuses, ReturnStatusBadge } from "./ui";
+import { CallingBadge, Copyable, CustomStatusBadge, DispatchBadge, ErrorState, FulfillmentBadge, KeyValue, LabelBadge, LoadingState, RiskBadge, ShopifySyncBadge, StageBadge, SteadfastStatusBadge, useStatuses, ReturnStatusBadge } from "./ui";
+import { CallingPanel } from "./Calling";
 import { ago, dateTime, money, titleCase } from "../format";
-import { NOTE_KINDS, RISK_FLAGS, STEADFAST_STATUSES } from "../../shared/constants";
+import { DISPATCH_EVENTS, NOTE_KINDS, RISK_FLAGS, STEADFAST_STATUSES } from "../../shared/constants";
 import type { Booking, OrderDetail } from "../types";
 
 export function OrderDrawer({ orderId, onClose, onChanged }: { orderId: number | null; onClose: () => void; onChanged?: () => void }) {
@@ -70,6 +71,25 @@ export function OrderDrawer({ orderId, onClose, onChanged }: { orderId: number |
 function DrawerHeader({ d, onClose, refresh }: { d: OrderDetail; onClose: () => void; refresh: () => void }) {
   const o = d.order;
   const can = useCan();
+  const [cancelOpen, setCancelOpen] = useState(false);
+  const remove = useMutation({
+    mutationFn: () => post<{ deleted: boolean; archivedInShopify: boolean; message: string | null }>(`/orders/${o.id}/delete`),
+    onSuccess: (r) => {
+      r.deleted
+        ? notifySuccess("Order deleted in Shopify and archived here")
+        : notifySuccess(r.archivedInShopify ? `Shopify doesn't allow deleting this order (${r.message}). It was archived in Shopify and here instead.` : `Archived here. Shopify: ${r.message}`, "Archived");
+      refresh();
+    },
+    onError: (e) => notifyError(e),
+  });
+  const confirmDelete = () =>
+    modals.openConfirmModal({
+      title: `Delete ${o.name}?`,
+      children: <Text size="sm">Shopify only allows deleting some orders (typically cancelled or archived ones). If deletion isn't allowed, the order is archived in Shopify and in this dashboard instead. This cannot be undone.</Text>,
+      labels: { confirm: "Delete or archive", cancel: "Keep order" },
+      confirmProps: { color: "red" },
+      onConfirm: () => remove.mutate(),
+    });
   const refetch = useMutation({
     mutationFn: () => post(`/orders/${o.id}/refresh`),
     onSuccess: () => { notifySuccess("Order refreshed from Shopify"); refresh(); },
@@ -88,8 +108,12 @@ function DrawerHeader({ d, onClose, refresh }: { d: OrderDetail; onClose: () => 
             {dateTime(o.shopCreatedAt)} · {o.sourceName ? titleCase(o.sourceName) : "Shopify"} · {money(o.total)}
           </Text>
           <Group gap={6} mt="sm">
+            <CallingBadge status={o.callingStatus} size="md" />
             <StageBadge stage={o.courierStage} size="md" />
+            {o.labelStatus !== "not_ready" && <LabelBadge status={o.labelStatus} />}
+            {o.dispatchStatus !== "pending" && <DispatchBadge status={o.dispatchStatus} />}
             <FulfillmentBadge state={o.fulfillmentState} error={o.fulfillmentError} />
+            <ShopifySyncBadge status={o.shopifySyncStatus} error={o.shopifySyncError} />
             <Badge size="sm" variant="outline" color={o.financialStatus === "paid" ? "teal" : "gray"}>{titleCase(o.financialStatus)}</Badge>
             <RiskBadge flags={o.riskFlags} dismissed={o.riskDismissed} />
           </Group>
@@ -102,13 +126,23 @@ function DrawerHeader({ d, onClose, refresh }: { d: OrderDetail; onClose: () => 
             <Menu.Target><ActionIcon variant="default" size="lg" aria-label="More"><MoreVertical size={16} /></ActionIcon></Menu.Target>
             <Menu.Dropdown>
               {can("orders.edit") && <Menu.Item leftSection={<RefreshCw size={14} />} onClick={() => refetch.mutate()}>Refresh from Shopify</Menu.Item>}
-              {can("export") && <Menu.Item leftSection={<Printer size={14} />} onClick={() => window.open(`/print?type=label&ids=${o.id}`, "_blank")}>Print label</Menu.Item>}
               {can("export") && <Menu.Item leftSection={<Printer size={14} />} onClick={() => window.open(`/print?type=slip&ids=${o.id}`, "_blank")}>Print packing slip</Menu.Item>}
+              {can("orders.cancel") && !o.cancelledAt && (
+                <>
+                  <Menu.Divider />
+                  <Menu.Item color="red" leftSection={<Ban size={14} />} onClick={() => setCancelOpen(true)}>Cancel order in Shopify</Menu.Item>
+                </>
+              )}
+              {can("orders.cancel") && !o.archived && (
+                <Menu.Item color="red" leftSection={<Trash2 size={14} />} onClick={confirmDelete}>Delete / archive order</Menu.Item>
+              )}
             </Menu.Dropdown>
           </Menu>
           <ActionIcon variant="subtle" size="lg" color="gray" onClick={onClose} aria-label="Close">✕</ActionIcon>
         </Group>
       </Group>
+      {o.cancelRequestedAt && !o.cancelledAt && <Alert color="gray" variant="light" mt="sm" py={6}>Cancellation sent to Shopify {ago(o.cancelRequestedAt)} — waiting for confirmation.</Alert>}
+      <CancelOrderModal orderId={o.id} name={o.name} opened={cancelOpen} onClose={() => setCancelOpen(false)} onDone={refresh} />
     </div>
   );
 }
@@ -129,6 +163,9 @@ function OverviewTab({ d, refresh, goBooking }: { d: OrderDetail; refresh: () =>
 
   return (
     <Stack gap="lg">
+      {!o.cancelledAt && (
+        <CallingPanel orderId={o.id} status={o.callingStatus} attempts={o.callAttempts} callbackAt={o.callbackAt} locked={o.courierStage !== "unbooked"} calls={d.calls} onDone={refresh} />
+      )}
       {o.riskFlags && o.riskFlags.length > 0 && !o.riskDismissed && (
         <Alert color="orange" variant="light" icon={<AlertTriangle size={18} />} title="Review before booking">
           <Stack gap={4}>
@@ -331,6 +368,9 @@ function BookingTab({ d, refresh, goCourier }: { d: OrderDetail; refresh: () => 
   return (
     <Stack>
       {o.cancelledAt && <Alert color="red" variant="light">This order is cancelled in Shopify and cannot be booked.</Alert>}
+      {!o.cancelledAt && o.callingStatus !== "confirmed" && (
+        <Alert color="yellow" variant="light" title="Not confirmed yet">Call the customer and mark the order Confirmed before booking with Steadfast.</Alert>
+      )}
       {d.customer?.flag === "blocked" && <Alert color="red" variant="light" title="Blocked customer">Booking this order will override the block.</Alert>}
       <SimpleGrid cols={{ base: 1, sm: 2 }}>
         <TextInput label="Recipient name" required maxLength={100} value={form.recipientName} onChange={(e) => setForm({ ...form, recipientName: e.currentTarget.value })} disabled={!editable} />
@@ -380,7 +420,7 @@ function BookingTab({ d, refresh, goCourier }: { d: OrderDetail; refresh: () => 
         <Group gap="xs">
           {editable && <Button variant="default" disabled={!dirty} loading={save.isPending} onClick={() => save.mutate()}>Save</Button>}
           {can("courier.book") && (
-            <Button leftSection={<Send size={15} />} disabled={Boolean(o.cancelledAt)} loading={book.isPending} onClick={confirmBook}>
+            <Button leftSection={<Send size={15} />} disabled={Boolean(o.cancelledAt) || o.callingStatus !== "confirmed"} loading={book.isPending} onClick={confirmBook}>
               Book with Steadfast
             </Button>
           )}
@@ -434,6 +474,35 @@ function CourierTab({ d, refresh }: { d: OrderDetail; refresh: () => void }) {
         </Group>
         {o.fulfillmentError && <Alert color="red" variant="light" mt="sm">{o.fulfillmentError}</Alert>}
         {o.fulfilledAt && <Text size="xs" c="dimmed" mt="xs">Fulfilled {dateTime(o.fulfilledAt)}</Text>}
+      </Card>
+
+      <Card padding="md">
+        <Group justify="space-between">
+          <div>
+            <Text fw={600} size="sm">Label & dispatch</Text>
+            <Text size="xs" c="dimmed">Labels are printed by the label service; dispatch is recorded by staff</Text>
+          </div>
+          <Group gap="xs">
+            <LabelBadge status={o.labelStatus} />
+            <DispatchBadge status={o.dispatchStatus} />
+          </Group>
+        </Group>
+        <SimpleGrid cols={{ base: 2, sm: 4 }} mt="sm" spacing="xs">
+          <div><Text size="xs" c="dimmed">Booked</Text><Text size="sm">{o.bookedAt ? dateTime(o.bookedAt) : "—"}</Text></div>
+          <div><Text size="xs" c="dimmed">Printed</Text><Text size="sm">{o.printedAt ? `${dateTime(o.printedAt)}${o.printCount > 1 ? ` (×${o.printCount})` : ""}` : "—"}</Text></div>
+          <div><Text size="xs" c="dimmed">Dispatched</Text><Text size="sm">{o.dispatchedAt ? `${dateTime(o.dispatchedAt)}` : "—"}</Text>{o.dispatchedBy && <Text size="xs" c="dimmed">{o.dispatchedBy}</Text>}</div>
+          <div><Text size="xs" c="dimmed">Courier received</Text><Text size="sm">{o.courierReceivedAt ? dateTime(o.courierReceivedAt) : "—"}</Text></div>
+        </SimpleGrid>
+        {d.dispatchHistory.length > 0 && (
+          <Timeline bulletSize={12} lineWidth={2} mt="md">
+            {d.dispatchHistory.slice(0, 12).map((e) => (
+              <Timeline.Item key={e.id} title={<Text size="sm">{DISPATCH_EVENTS[e.event] ?? titleCase(e.event)} <Text span size="xs" c="dimmed">· {e.actor} · {ago(e.createdAt)}</Text></Text>}>
+                {e.note && <Text size="xs" c="dimmed">{e.note}</Text>}
+                {e.jobId && <Text size="xs" c="dimmed" className="mono">job {e.jobId.slice(0, 8)}</Text>}
+              </Timeline.Item>
+            ))}
+          </Timeline>
+        )}
       </Card>
 
       {d.consignments.map((c) => {
@@ -614,5 +683,45 @@ function ActivityTab({ d }: { d: OrderDetail }) {
         </Timeline.Item>
       ))}
     </Timeline>
+  );
+}
+
+const CANCEL_REASONS = [
+  { value: "FRAUD", label: "Fake / fraudulent order" },
+  { value: "CUSTOMER", label: "Customer changed their mind" },
+  { value: "INVENTORY", label: "Out of stock" },
+  { value: "DECLINED", label: "Payment declined" },
+  { value: "STAFF", label: "Staff error" },
+  { value: "OTHER", label: "Other" },
+];
+
+function CancelOrderModal({ orderId, name, opened, onClose, onDone }: { orderId: number; name: string; opened: boolean; onClose: () => void; onDone: () => void }) {
+  const [reason, setReason] = useState<string | null>("FRAUD");
+  const [restock, setRestock] = useState(true);
+  const [notify, setNotify] = useState(false);
+  const [note, setNote] = useState("");
+  const cancel = useMutation({
+    mutationFn: () => post(`/orders/${orderId}/cancel`, { reason, restock, notifyCustomer: notify, staffNote: note || undefined }),
+    onSuccess: () => {
+      notifySuccess("Cancellation sent to Shopify", name);
+      onClose();
+      onDone();
+    },
+    onError: (e) => notifyError(e, "Shopify did not cancel the order"),
+  });
+  return (
+    <Modal opened={opened} onClose={onClose} title={`Cancel ${name} in Shopify`}>
+      <Stack>
+        <Alert color="red" variant="light">Cancellation is permanent in Shopify. No refund is issued from here — refunds are always a separate decision.</Alert>
+        <Select label="Reason" data={CANCEL_REASONS} value={reason} onChange={setReason} allowDeselect={false} />
+        <Checkbox label="Restock items" checked={restock} onChange={(e) => setRestock(e.currentTarget.checked)} />
+        <Checkbox label="Send cancellation email to customer" checked={notify} onChange={(e) => setNotify(e.currentTarget.checked)} />
+        <TextInput label="Staff note (Shopify)" maxLength={255} value={note} onChange={(e) => setNote(e.currentTarget.value)} />
+        <Group justify="flex-end">
+          <Button variant="default" onClick={onClose}>Keep order</Button>
+          <Button color="red" loading={cancel.isPending} onClick={() => cancel.mutate()}>Cancel order</Button>
+        </Group>
+      </Stack>
+    </Modal>
   );
 }

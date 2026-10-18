@@ -6,7 +6,7 @@ import { activityLog, consignments, customers, orderNotes, orders, payments, ret
 import { requirePerm } from "../lib/auth";
 import { nowIso, startOfDayIso } from "../lib/util";
 import { logActivity } from "../services/activity";
-import { customerHistory, refreshRiskFlags } from "../services/orders";
+import { ATTENTION_SQL, customerHistory, refreshRiskFlags } from "../services/orders";
 import { getSettings } from "../services/settings";
 import * as steadfast from "../services/steadfast";
 import { RETURN_FOLLOW_UPS, RETURN_STATUSES } from "../../shared/constants";
@@ -26,7 +26,9 @@ dashboardRoutes.get("/", async (c) => {
 
   const count = async (where: SQL | undefined) => (await db.select({ n: sql<number>`count(*)` }).from(orders).where(where).get())?.n ?? 0;
 
-  const [todayOrders, todayRevenue, unbooked, booked, inTransit, delivered, returned, attention] = await Promise.all([
+  const [toCall, readyToBook, todayOrders, todayRevenue, unbooked, booked, inTransit, delivered, returned, attention] = await Promise.all([
+    count(and(live, eq(orders.courierStage, "unbooked"), inArray(orders.callingStatus, ["not_called", "no_answer", "call_again"]))),
+    count(and(live, eq(orders.courierStage, "unbooked"), eq(orders.callingStatus, "confirmed"))),
     count(and(eq(orders.archived, false), gte(orders.shopCreatedAt, today))),
     db.select({ v: sql<number>`coalesce(sum(${orders.total}), 0)` }).from(orders).where(and(live, gte(orders.shopCreatedAt, today))).get(),
     count(and(live, eq(orders.courierStage, "unbooked"))),
@@ -37,12 +39,7 @@ dashboardRoutes.get("/", async (c) => {
     count(
       and(
         eq(orders.archived, false),
-        sql`(
-          (json_array_length(coalesce(${orders.riskFlags}, '[]')) > 0 and ${orders.riskDismissed} = 0 and ${orders.courierStage} = 'unbooked' and ${orders.cancelledAt} is null)
-          or ${orders.courierStage} in ('issue', 'on_hold')
-          or ${orders.fulfillmentState} = 'failed'
-          or (${orders.cancelledAt} is not null and ${orders.courierStage} in ('booked', 'in_transit', 'on_hold'))
-        )`,
+        ATTENTION_SQL,
       ),
     ),
   ]);
@@ -116,12 +113,7 @@ dashboardRoutes.get("/", async (c) => {
     .where(
       and(
         eq(orders.archived, false),
-        sql`(
-          (json_array_length(coalesce(${orders.riskFlags}, '[]')) > 0 and ${orders.riskDismissed} = 0 and ${orders.courierStage} = 'unbooked' and ${orders.cancelledAt} is null)
-          or ${orders.courierStage} in ('issue', 'on_hold')
-          or ${orders.fulfillmentState} = 'failed'
-          or (${orders.cancelledAt} is not null and ${orders.courierStage} in ('booked', 'in_transit', 'on_hold'))
-        )`,
+        ATTENTION_SQL,
       ),
     )
     .orderBy(desc(orders.shopCreatedAt))
@@ -139,7 +131,7 @@ dashboardRoutes.get("/", async (c) => {
   return c.json({
     days,
     today: { orders: todayOrders, revenue: todayRevenue?.v ?? 0 },
-    pipeline: { unbooked, booked, inTransit, delivered, returned, attention },
+    pipeline: { toCall, readyToBook, unbooked, booked, inTransit, delivered, returned, attention },
     oldestUnbookedAt: oldestUnbooked?.at ?? null,
     cod: {
       booked: cod?.booked ?? 0,

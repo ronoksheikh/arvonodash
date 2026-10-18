@@ -5,13 +5,14 @@ import { jobs } from "../db/schema";
 import { nowIso, addMinutes } from "../lib/util";
 import { fulfillOrder } from "./fulfillment";
 import { addOrderTags } from "./shopify";
+import { refreshOrderFromShopify, syncProcessingToShopify } from "./calling";
 
 /**
  * Minimal D1-backed outbox for work that talks to Shopify after a courier event.
  * Jobs run immediately (via waitUntil) and are retried by the cron with exponential backoff.
  */
 
-export type JobType = "fulfill_order" | "shopify_tag";
+export type JobType = "fulfill_order" | "shopify_tag" | "shopify_processing" | "shopify_refresh";
 
 export async function enqueueJob(db: DB, type: JobType, key: string, payload: unknown, opts: { reset?: boolean } = {}) {
   const now = nowIso();
@@ -43,6 +44,12 @@ async function runJob(env: Env, db: DB, job: typeof jobs.$inferSelect) {
       return;
     case "shopify_tag":
       await addOrderTags(env, db, String(payload.shopifyOrderId), payload.tags as string[]);
+      return;
+    case "shopify_processing":
+      await syncProcessingToShopify(env, db, Number(payload.orderId));
+      return;
+    case "shopify_refresh":
+      await refreshOrderFromShopify(env, db, String(payload.shopifyOrderId));
       return;
     default:
       throw new Error(`Unknown job type ${job.type}`);

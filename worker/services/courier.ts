@@ -1,12 +1,13 @@
-import { and, eq, inArray, isNull, sql } from "drizzle-orm";
-import type { DB } from "../db";
+import { and, eq, isNull, sql } from "drizzle-orm";
+import { inList, type DB } from "../db";
 import type { Env, SessionUser } from "../env";
 import { consignments, customers, customStatuses, orders, returns, trackingEvents, type BookingDetails } from "../db/schema";
 import * as steadfast from "./steadfast";
 import { enqueueJob } from "./jobs";
 import { getSettings, type AppSettings } from "./settings";
 import { logActivity, type Actor } from "./activity";
-import { buildAddress } from "./orders";
+import { buildAddress, shopifyContactKey } from "./orders";
+import { onBooked, onCourierReceived, onNotPrintable } from "./dispatch";
 import { HttpError, normalizeBdPhone, nowIso, toNumber, truncate } from "../lib/util";
 
 type OrderRow = typeof orders.$inferSelect;
@@ -68,7 +69,7 @@ export async function bookOrders(
   const blockingStatuses = new Set(
     (await db.select({ id: customStatuses.id }).from(customStatuses).where(eq(customStatuses.blocksBooking, true)).all()).map((s) => s.id),
   );
-  const rows = await db.select().from(orders).where(inArray(orders.id, orderIds)).all();
+  const rows = await db.select().from(orders).where(inList(orders.id, orderIds)).all();
   const results: BookingResult[] = orderIds.filter((id) => !rows.some((r) => r.id === id)).map((id) => ({ orderId: id, ok: false, error: "Order not found" }));
 
   const queue = [...rows];
@@ -95,6 +96,7 @@ async function bookOne(
 ): Promise<BookingResult> {
   const base = { orderId: order.id, name: order.name };
   if (order.cancelledAt) return { ...base, ok: false, error: "Order is cancelled in Shopify" };
+  if (order.callingStatus !== "confirmed") return { ...base, ok: false, error: "Order is not confirmed yet — call the customer first" };
   if (order.statusId && blockingStatuses.has(order.statusId)) return { ...base, ok: false, error: "Order status blocks booking" };
   if (order.shopifyFulfillmentStatus === "fulfilled" && order.fulfillmentState !== "fulfilled")
     return { ...base, ok: false, error: "Order is already fulfilled in Shopify" };
@@ -181,8 +183,9 @@ async function bookOne(
   for (const c of existing) await db.update(consignments).set({ superseded: true }).where(eq(consignments.id, c.id));
   await db
     .update(orders)
-    .set({ courierStage: "booked", activeConsignmentId: reserved.id, booking: booking, updatedAt: nowIso() })
+    .set({ courierStage: "booked", activeConsignmentId: reserved.id, booking: booking, bookedSource: shopifyContactKey(order), updatedAt: nowIso() })
     .where(eq(orders.id, order.id));
+  await onBooked(db, order.id, reserved.id, user);
   await db.insert(trackingEvents).values({
     consignmentRowId: reserved.id,
     orderId: order.id,
@@ -284,6 +287,9 @@ export async function applyCourierUpdate(
     details: { from: c.status, to: newStatus, source: update.source },
   });
 
+  if (firstPickup) await onCourierReceived(db, order.id, c.id, occurredAt);
+  if (stage === "cancelled") await onNotPrintable(db, order.id, "Consignment cancelled before pickup", { name: "steadfast" });
+
   const appSettings = await getSettings(db);
   const trigger = appSettings.fulfillmentTrigger;
   const shouldFulfill =
@@ -320,7 +326,7 @@ export async function pollActiveConsignments(env: Env, db: DB, opts: { limit?: n
     .from(consignments)
     .where(
       opts.ids
-        ? inArray(consignments.id, opts.ids)
+        ? inList(consignments.id, opts.ids)
         : and(
             eq(consignments.isFinal, false),
             eq(consignments.superseded, false),

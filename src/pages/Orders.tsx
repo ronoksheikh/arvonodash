@@ -4,17 +4,20 @@ import { DatePickerInput } from "@mantine/dates";
 import { useDebouncedValue } from "@mantine/hooks";
 import { keepPreviousData, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useSearchParams } from "react-router";
-import { ArrowDownUp, Download, Filter, MoreHorizontal, Printer, Search, Send, Tag, X, CheckCircle2, XCircle, Archive, ShieldOff, ListChecks } from "lucide-react";
+import { PhoneCall, ArrowDownUp, Download, Filter, MoreHorizontal, Printer, Search, Send, Tag, X, CheckCircle2, XCircle, Archive, ShieldOff, ListChecks } from "lucide-react";
 import { api, post, qs, notifyError, notifySuccess } from "../api";
 import { useCan } from "../auth";
-import { CustomStatusBadge, EmptyState, ErrorState, FulfillmentBadge, LoadingState, PageHeader, Panel, RiskBadge, StageBadge, TableFooter, useStatuses } from "../components/ui";
+import { CustomStatusBadge, DispatchBadge, EmptyState, ErrorState, FulfillmentBadge, LabelBadge, LoadingState, PageHeader, Panel, RiskBadge, ShopifySyncBadge, StageBadge, TableFooter, useStatuses } from "../components/ui";
+import { CallingMenu } from "../components/Calling";
 import { OrderDrawer } from "../components/OrderDrawer";
 import { dateShort, money } from "../format";
+import { CALLING_STATUSES } from "../../shared/constants";
 import type { OrderListRow } from "../types";
 
 const TABS = [
   { value: "all", label: "All" },
-  { value: "unbooked", label: "To book" },
+  { value: "to_call", label: "To call" },
+  { value: "ready", label: "Ready to book" },
   { value: "booked", label: "Booked" },
   { value: "in_transit", label: "In transit" },
   { value: "delivered", label: "Delivered" },
@@ -99,6 +102,16 @@ export default function Orders() {
     onError: (e) => notifyError(e),
   });
 
+  const bulkCalling = useMutation({
+    mutationFn: (status: string) => post<{ updated: number; results: { ok: boolean; error?: string }[] }>("/orders/calling/bulk", { ids: [...selected], status }),
+    onSuccess: (r) => {
+      const failed = r.results.filter((x) => !x.ok);
+      failed.length ? notifyError(new Error(`${failed.length} not changed: ${failed[0].error}`), `Updated ${r.updated}`) : notifySuccess(`Updated ${r.updated} orders`);
+      invalidate();
+    },
+    onError: (e) => notifyError(e),
+  });
+
   const book = useMutation({
     mutationFn: async ({ ids, allowRisky }: { ids: number[]; allowRisky: boolean }) => {
       const all: BookResult[] = [];
@@ -129,10 +142,10 @@ export default function Orders() {
     const ids = selected.size ? [...selected].join(",") : undefined;
     window.location.href = `/api/orders/export.csv${qs({ ...filters, page: undefined, ids })}`;
   };
-  const print = (type: "label" | "slip") => window.open(`/print?type=${type}&ids=${[...selected].join(",")}`, "_blank");
+  const print = (type: "slip") => window.open(`/print?type=${type}&ids=${[...selected].join(",")}`, "_blank");
   const sortBy = (key: string) => set({ sort: key, dir: filters.sort === key && filters.dir === "desc" ? "asc" : "desc" });
 
-  const bookable = selectedRows.filter((r) => r.courierStage === "unbooked" && !r.cancelledAt);
+  const bookable = selectedRows.filter((r) => r.courierStage === "unbooked" && !r.cancelledAt && r.callingStatus === "confirmed");
 
   return (
     <>
@@ -231,8 +244,9 @@ export default function Orders() {
                     <Table.Th onClick={() => sortBy("customer")} style={{ cursor: "pointer" }}>Customer <ArrowDownUp size={11} /></Table.Th>
                     <Table.Th ta="right" onClick={() => sortBy("total")} style={{ cursor: "pointer" }}>Total <ArrowDownUp size={11} /></Table.Th>
                     <Table.Th>Payment</Table.Th>
-                    <Table.Th>Status</Table.Th>
+                    <Table.Th>Calling</Table.Th>
                     <Table.Th>Courier</Table.Th>
+                    <Table.Th>Label · Dispatch</Table.Th>
                     <Table.Th>Fulfillment</Table.Th>
                     <Table.Th pr="md">Flags</Table.Th>
                   </Table.Tr>
@@ -259,14 +273,32 @@ export default function Orders() {
                       <Table.Td>
                         {o.cancelledAt ? <Badge color="dark" size="sm">Cancelled</Badge> : <Badge color={o.financialStatus === "paid" ? "teal" : "gray"} size="sm" variant="outline">{o.financialStatus === "paid" ? "Prepaid" : o.outstanding > 0 ? "COD" : (o.financialStatus ?? "—")}</Badge>}
                       </Table.Td>
-                      <Table.Td><CustomStatusBadge statusId={o.statusId} statuses={statuses.data} /></Table.Td>
+                      <Table.Td>
+                        <CallingMenu orderId={o.id} status={o.callingStatus} locked={o.courierStage !== "unbooked" || Boolean(o.cancelledAt)} onDone={invalidate} />
+                        {o.callAttempts > 0 && <Text size="xs" c="dimmed" mt={2}>{o.callAttempts} call{o.callAttempts === 1 ? "" : "s"}{o.callbackAt ? ` · ${dateShort(o.callbackAt)}` : ""}</Text>}
+                      </Table.Td>
                       <Table.Td>
                         <StageBadge stage={o.courierStage} />
                         {o.trackingCode && <Text size="xs" c="dimmed" className="mono" mt={2}>{o.trackingCode}</Text>}
                       </Table.Td>
-                      <Table.Td><FulfillmentBadge state={o.fulfillmentState} error={o.fulfillmentError} /></Table.Td>
+                      <Table.Td>
+                        {o.labelStatus === "not_ready" ? <Text size="xs" c="dimmed">—</Text> : (
+                          <Stack gap={4} align="flex-start">
+                            <LabelBadge status={o.labelStatus} />
+                            {o.dispatchStatus !== "pending" && <DispatchBadge status={o.dispatchStatus} />}
+                          </Stack>
+                        )}
+                      </Table.Td>
+                      <Table.Td>
+                        <Stack gap={4} align="flex-start">
+                          <FulfillmentBadge state={o.fulfillmentState} error={o.fulfillmentError} />
+                          {o.shopifySyncStatus === "failed" && <ShopifySyncBadge status={o.shopifySyncStatus} />}
+                        </Stack>
+                      </Table.Td>
                       <Table.Td pr="md">
                         <Group gap={4}>
+                          {o.statusId && <CustomStatusBadge statusId={o.statusId} statuses={statuses.data} />}
+                          {o.cancelRequestedAt && !o.cancelledAt && <Badge size="sm" color="dark" variant="outline">Cancelling…</Badge>}
                           <RiskBadge flags={o.riskFlags} dismissed={o.riskDismissed} />
                           {(o.internalTags ?? []).slice(0, 2).map((t) => (
                             <Badge key={t} size="sm" color="gray" variant="outline" onClick={(e) => { e.stopPropagation(); set({ tag: t }); }} style={{ cursor: "pointer" }}>{t}</Badge>
@@ -291,6 +323,16 @@ export default function Orders() {
               <Paper shadow="lg" withBorder radius="xl" px="md" py={8} className="app-panel">
                 <Group gap="xs" wrap="wrap" justify="center">
                   <Text size="sm" fw={600} px={4}>{selected.size} selected</Text>
+                  {can("orders.call") && (
+                    <Menu position="top">
+                      <Menu.Target><Button size="xs" variant="default" leftSection={<PhoneCall size={14} />}>Calling</Button></Menu.Target>
+                      <Menu.Dropdown>
+                        {Object.entries(CALLING_STATUSES).filter(([k]) => k !== "not_called").map(([k, st]) => (
+                          <Menu.Item key={k} onClick={() => bulkCalling.mutate(k)}><Badge color={st.color} size="sm">{st.label}</Badge></Menu.Item>
+                        ))}
+                      </Menu.Dropdown>
+                    </Menu>
+                  )}
                   {can("courier.book") && (
                     <Button size="xs" leftSection={<Send size={14} />} disabled={!bookable.length} onClick={() => setBookOpen(true)}>
                       Book with Steadfast{bookable.length !== selected.size && bookable.length ? ` (${bookable.length})` : ""}
@@ -311,7 +353,6 @@ export default function Orders() {
                   )}
                   {can("export") && (
                     <>
-                      <Button size="xs" variant="default" leftSection={<Printer size={14} />} onClick={() => print("label")}>Labels</Button>
                       <Button size="xs" variant="default" leftSection={<Printer size={14} />} onClick={() => print("slip")}>Packing slips</Button>
                     </>
                   )}
@@ -358,10 +399,8 @@ export default function Orders() {
                 </Table.Tbody>
               </Table>
             </ScrollArea.Autosize>
-            {results.some((r) => r.ok) && can("export") && (
-              <Button leftSection={<Printer size={15} />} variant="light" onClick={() => window.open(`/print?type=label&ids=${results.filter((r) => r.ok).map((r) => r.orderId).join(",")}`, "_blank")}>
-                Print labels for booked orders
-              </Button>
+            {results.some((r) => r.ok) && (
+              <Text size="sm" c="dimmed">Booked orders are now in Ready to print for the label service.</Text>
             )}
           </Stack>
         )}
@@ -385,7 +424,7 @@ function BookModal({ opened, onClose, rows, skipped, loading, onConfirm }: { ope
         <Text size="sm">
           This creates Steadfast consignments using each order's booking details (edited values where saved). Total COD: <b>{money(cod)}</b>.
         </Text>
-        {skipped > 0 && <Alert color="gray" variant="light">{skipped} selected order(s) are already booked or cancelled and will be skipped.</Alert>}
+        {skipped > 0 && <Alert color="gray" variant="light">{skipped} selected order(s) are not confirmed, already booked or cancelled and will be skipped.</Alert>}
         {flagged.length > 0 && (
           <Alert color="orange" variant="light" title={`${flagged.length} flagged order(s)`}>
             <List size="sm">{flagged.slice(0, 6).map((r) => <List.Item key={r.id}>{r.name} — {r.customerName}</List.Item>)}</List>

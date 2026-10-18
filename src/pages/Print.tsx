@@ -1,8 +1,6 @@
-import { useEffect, useRef } from "react";
-import { Alert, Box, Button, Group, Paper, SegmentedControl, Stack, Text } from "@mantine/core";
+import { Box, Button, Group, Paper, Stack, Text } from "@mantine/core";
 import { useQuery } from "@tanstack/react-query";
 import { useSearchParams } from "react-router";
-import JsBarcode from "jsbarcode";
 import { Printer } from "lucide-react";
 import { api } from "../api";
 import { ErrorState, LoadingState } from "../components/ui";
@@ -24,48 +22,7 @@ type PrintOrder = {
 };
 type PrintData = { business: { name: string; phone: string; address: string }; orders: PrintOrder[] };
 
-function Barcode({ value, height = 50 }: { value: string; height?: number }) {
-  const ref = useRef<SVGSVGElement>(null);
-  useEffect(() => {
-    if (ref.current) JsBarcode(ref.current, value, { format: "CODE128", height, displayValue: true, fontSize: 14, margin: 0, background: "transparent" });
-  }, [value, height]);
-  return <svg ref={ref} />;
-}
-
 const pageStyle = { background: "#fff", color: "#111", boxShadow: "0 1px 4px rgba(0,0,0,.12)", margin: "0 auto 16px" } as const;
-
-function Label({ o, business }: { o: PrintOrder; business: PrintData["business"] }) {
-  const b = o.booking;
-  const cod = o.consignment?.codAmount ?? b.codAmount;
-  return (
-    <div className="print-page" style={{ ...pageStyle, width: "100mm", minHeight: "150mm", padding: "5mm", fontSize: 12, fontFamily: "Inter, sans-serif" }}>
-      <div style={{ display: "flex", justifyContent: "space-between", borderBottom: "2px solid #111", paddingBottom: 6 }}>
-        <div><b style={{ fontSize: 15 }}>{business.name}</b><div>{business.phone}</div></div>
-        <div style={{ textAlign: "right" }}><b>STEADFAST</b><div>{o.name}</div></div>
-      </div>
-      <div style={{ textAlign: "center", padding: "8px 0", borderBottom: "1px dashed #999" }}>
-        {o.consignment?.trackingCode ? <Barcode value={o.consignment.trackingCode} height={60} /> : <div style={{ padding: 20, color: "#a00" }}>Not booked yet — no tracking code</div>}
-        {o.consignment?.consignmentId && <div style={{ fontSize: 11 }}>Consignment ID {o.consignment.consignmentId} · Invoice {o.consignment.invoice}</div>}
-      </div>
-      <div style={{ padding: "8px 0", borderBottom: "1px dashed #999" }}>
-        <div style={{ fontSize: 10, textTransform: "uppercase", color: "#555" }}>Deliver to</div>
-        <div style={{ fontSize: 16, fontWeight: 700 }}>{b.recipientName}</div>
-        <div style={{ fontSize: 15, fontWeight: 600 }}>{b.recipientPhone}{b.alternativePhone ? ` / ${b.alternativePhone}` : ""}</div>
-        <div style={{ marginTop: 4, fontSize: 13 }}>{b.recipientAddress}</div>
-        {b.deliveryType === 1 && <div style={{ marginTop: 4, fontWeight: 600 }}>POINT DELIVERY / HUB PICKUP</div>}
-      </div>
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "8px 0", borderBottom: "1px dashed #999" }}>
-        <div>
-          <div style={{ fontSize: 10, textTransform: "uppercase", color: "#555" }}>Cash on delivery</div>
-          <div style={{ fontSize: 24, fontWeight: 800 }}>{cod > 0 ? money(cod) : "PAID"}</div>
-        </div>
-        <div style={{ textAlign: "right", fontSize: 11 }}>{o.lineItems.reduce((s, li) => s + li.quantity, 0)} item(s)<br />{day(o.createdAt)}</div>
-      </div>
-      {(o.consignment?.note || b.note) && <div style={{ paddingTop: 6, fontSize: 11 }}><b>Note:</b> {o.consignment?.note ?? b.note}</div>}
-      {business.address && <div style={{ paddingTop: 6, fontSize: 10, color: "#555" }}>Return to: {business.address}</div>}
-    </div>
-  );
-}
 
 function Slip({ o, business }: { o: PrintOrder; business: PrintData["business"] }) {
   const b = o.booking;
@@ -108,32 +65,27 @@ function Slip({ o, business }: { o: PrintOrder; business: PrintData["business"] 
   );
 }
 
+/** Printable A5 packing slips. Shipping labels are produced by the external label service. */
 export default function Print() {
-  const [params, setParams] = useSearchParams();
-  const type = params.get("type") === "slip" ? "slip" : "label";
+  const [params] = useSearchParams();
   const ids = params.get("ids") ?? "";
   const q = useQuery({ queryKey: ["print", ids], queryFn: () => api<PrintData>(`/orders/print?ids=${ids}`), enabled: Boolean(ids) });
   if (q.isLoading) return <LoadingState />;
   if (q.error) return <ErrorState error={q.error} />;
   const d = q.data;
-  const unbooked = d?.orders.filter((o) => !o.consignment?.trackingCode).length ?? 0;
   return (
     <Box p="md" style={{ background: "#eceef2", minHeight: "100vh" }}>
       <Paper className="no-print" p="md" mb="md" maw={760} mx="auto" withBorder>
         <Group justify="space-between">
           <Stack gap={2}>
-            <Text fw={600}>{d?.orders.length ?? 0} {type === "label" ? "shipping labels (100×150 mm)" : "packing slips (A5)"}</Text>
-            <Text size="xs" c="dimmed">Set the printer paper size to match, margins “None”.</Text>
+            <Text fw={600}>{d?.orders.length ?? 0} packing slips (A5)</Text>
+            <Text size="xs" c="dimmed">Set the printer paper size to A5, margins “None”.</Text>
           </Stack>
-          <Group>
-            <SegmentedControl size="xs" value={type} onChange={(v) => setParams({ type: v, ids })} data={[{ value: "label", label: "Labels" }, { value: "slip", label: "Slips" }]} />
-            <Button leftSection={<Printer size={15} />} onClick={() => window.print()}>Print</Button>
-          </Group>
+          <Button leftSection={<Printer size={15} />} onClick={() => window.print()}>Print</Button>
         </Group>
-        {type === "label" && unbooked > 0 && <Alert mt="sm" color="orange" variant="light">{unbooked} order(s) are not booked yet and have no tracking barcode.</Alert>}
       </Paper>
-      <style>{`@page { size: ${type === "label" ? "100mm 150mm" : "A5"}; margin: 0; }`}</style>
-      {d?.orders.map((o) => (type === "label" ? <Label key={o.id} o={o} business={d.business} /> : <Slip key={o.id} o={o} business={d.business} />))}
+      <style>{`@page { size: A5; margin: 0; }`}</style>
+      {d?.orders.map((o) => <Slip key={o.id} o={o} business={d.business} />)}
     </Box>
   );
 }

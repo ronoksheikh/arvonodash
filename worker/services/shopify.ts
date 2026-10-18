@@ -119,6 +119,7 @@ export async function shopifyGraphql<T>(env: Env, db: DB, query: string, variabl
 // Normalized order shape shared by webhook (REST JSON) and GraphQL imports.
 
 export type NormalizedOrder = {
+  source: "rest" | "graphql";
   shopifyId: string;
   name: string;
   orderNumber: number | null;
@@ -165,6 +166,7 @@ export function normalizeRestOrder(o: any): NormalizedOrder {
   const cust = o.customer ?? {};
   const tags = typeof o.tags === "string" ? o.tags.split(",").map((t: string) => t.trim()).filter(Boolean) : [];
   return {
+    source: "rest",
     shopifyId: String(o.id),
     name: o.name ?? `#${o.order_number}`,
     orderNumber: o.order_number ?? null,
@@ -246,6 +248,7 @@ export function normalizeGraphqlOrder(o: any): NormalizedOrder {
   const cust = o.customer ?? {};
   const money = (m: { shopMoney?: { amount?: string } } | null | undefined) => toNumber(m?.shopMoney?.amount);
   return {
+    source: "graphql",
     shopifyId: gidToId(o.id)!,
     name: o.name,
     orderNumber: o.number ?? null,
@@ -474,4 +477,111 @@ export async function registerWebhooks(env: Env, db: DB, callbackUrl: string) {
     results.push(errs.length ? { topic, status: "error", message: errs.map((e) => e.message).join("; ") } : { topic, status: "created" });
   }
   return results;
+}
+
+// ---------------------------------------------------------------------------
+// Order processing state & cancellation
+
+/**
+ * Marks the order "In progress" in Shopify the native way: reports progress on each open
+ * fulfillment order (fulfillmentOrderReportProgress), which Shopify shows as fulfillment status
+ * "In progress". Already in-progress fulfillment orders are left alone.
+ */
+export async function markOrderInProgress(env: Env, db: DB, shopifyOrderId: string, reasonNotes: string) {
+  const info = await getFulfillmentOrders(env, db, shopifyOrderId);
+  if (!info) throw new Error("Order not found in Shopify");
+  const open = info.fulfillmentOrders.filter((fo) => fo.status === "OPEN" && fo.lineItems.some((li) => li.remainingQuantity > 0));
+  for (const fo of open) {
+    const data = await shopifyGraphql<{ fulfillmentOrderReportProgress: { fulfillmentOrder: { id: string; status: string } | null; userErrors: { message: string }[] } }>(
+      env,
+      db,
+      `mutation ReportProgress($id: ID!, $progressReport: FulfillmentOrderReportProgressInput) {
+        fulfillmentOrderReportProgress(id: $id, progressReport: $progressReport) {
+          fulfillmentOrder { id status }
+          userErrors { message }
+        }
+      }`,
+      { id: fo.id, progressReport: { reasonNotes } },
+    );
+    const errs = data.fulfillmentOrderReportProgress.userErrors;
+    if (errs.length) throw new Error(errs.map((e) => e.message).join("; "));
+  }
+  return { updated: open.length, alreadyInProgress: info.fulfillmentOrders.filter((fo) => fo.status === "IN_PROGRESS").length };
+}
+
+/** Reverts "In progress" back to open (fulfillmentOrderOpen) when a confirmation is withdrawn. */
+export async function reopenOrder(env: Env, db: DB, shopifyOrderId: string) {
+  const info = await getFulfillmentOrders(env, db, shopifyOrderId);
+  if (!info) throw new Error("Order not found in Shopify");
+  const inProgress = info.fulfillmentOrders.filter((fo) => fo.status === "IN_PROGRESS");
+  for (const fo of inProgress) {
+    const data = await shopifyGraphql<{ fulfillmentOrderOpen: { userErrors: { message: string }[] } }>(
+      env,
+      db,
+      `mutation Open($id: ID!) { fulfillmentOrderOpen(id: $id) { fulfillmentOrder { id status } userErrors { message } } }`,
+      { id: fo.id },
+    );
+    const errs = data.fulfillmentOrderOpen.userErrors;
+    if (errs.length) throw new Error(errs.map((e) => e.message).join("; "));
+  }
+  return { reopened: inProgress.length };
+}
+
+export const CANCEL_REASONS = ["CUSTOMER", "DECLINED", "FRAUD", "INVENTORY", "OTHER", "STAFF"] as const;
+
+/** orderCancel runs asynchronously in Shopify; the orders/cancelled webhook confirms completion. */
+export async function cancelOrder(
+  env: Env,
+  db: DB,
+  shopifyOrderId: string,
+  opts: { reason: (typeof CANCEL_REASONS)[number]; restock: boolean; notifyCustomer: boolean; staffNote?: string },
+) {
+  const data = await shopifyGraphql<{
+    orderCancel: { job: { id: string; done: boolean } | null; orderCancelUserErrors: { code: string | null; message: string }[] };
+  }>(
+    env,
+    db,
+    `mutation Cancel($orderId: ID!, $reason: OrderCancelReason!, $restock: Boolean!, $notifyCustomer: Boolean, $staffNote: String, $refundMethod: OrderCancelRefundMethodInput) {
+      orderCancel(orderId: $orderId, reason: $reason, restock: $restock, notifyCustomer: $notifyCustomer, staffNote: $staffNote, refundMethod: $refundMethod) {
+        job { id done }
+        orderCancelUserErrors { code message }
+      }
+    }`,
+    {
+      orderId: `gid://shopify/Order/${shopifyOrderId}`,
+      reason: opts.reason,
+      restock: opts.restock,
+      notifyCustomer: opts.notifyCustomer,
+      staffNote: opts.staffNote?.slice(0, 255),
+      // Never refund automatically; refunds are a separate, explicit decision in Shopify.
+      refundMethod: { originalPaymentMethodsRefund: false },
+    },
+  );
+  const errs = data.orderCancel.orderCancelUserErrors;
+  if (errs.length) throw new HttpError(422, errs.map((e) => e.message).join("; "));
+  return data.orderCancel.job;
+}
+
+/** Deletes an order where Shopify allows it; returns the Shopify error message otherwise. */
+export async function deleteOrder(env: Env, db: DB, shopifyOrderId: string): Promise<{ deleted: boolean; error?: string }> {
+  const data = await shopifyGraphql<{ orderDelete: { deletedId: string | null; userErrors: { message: string }[] } }>(
+    env,
+    db,
+    `mutation Delete($orderId: ID!) { orderDelete(orderId: $orderId) { deletedId userErrors { message } } }`,
+    { orderId: `gid://shopify/Order/${shopifyOrderId}` },
+  );
+  const errs = data.orderDelete.userErrors;
+  return errs.length ? { deleted: false, error: errs.map((e) => e.message).join("; ") } : { deleted: Boolean(data.orderDelete.deletedId) };
+}
+
+/** Closes the order, which Shopify admin shows as "Archived". */
+export async function closeOrder(env: Env, db: DB, shopifyOrderId: string) {
+  const data = await shopifyGraphql<{ orderClose: { userErrors: { message: string }[] } }>(
+    env,
+    db,
+    `mutation Close($input: OrderCloseInput!) { orderClose(input: $input) { order { id closedAt } userErrors { message } } }`,
+    { input: { id: `gid://shopify/Order/${shopifyOrderId}` } },
+  );
+  const errs = data.orderClose.userErrors;
+  if (errs.length) throw new Error(errs.map((e) => e.message).join("; "));
 }

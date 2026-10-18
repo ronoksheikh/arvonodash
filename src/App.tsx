@@ -8,6 +8,8 @@ import { LoginPage } from "./pages/Login";
 const Overview = lazy(() => import("./pages/Overview"));
 const Orders = lazy(() => import("./pages/Orders"));
 const Consignments = lazy(() => import("./pages/Consignments"));
+const PrintQueue = lazy(() => import("./pages/PrintQueue"));
+const Dispatch = lazy(() => import("./pages/Dispatch"));
 const Returns = lazy(() => import("./pages/Returns"));
 const Customers = lazy(() => import("./pages/Customers"));
 const Cod = lazy(() => import("./pages/Cod"));
@@ -34,6 +36,8 @@ export function App() {
           <Route index element={<Overview />} />
           <Route path="orders" element={<Orders />} />
           <Route path="consignments" element={<Consignments />} />
+          <Route path="print-queue" element={<PrintQueue />} />
+          <Route path="dispatch" element={<Dispatch />} />
           <Route path="returns" element={<Returns />} />
           <Route path="customers" element={<Customers />} />
           <Route path="cod" element={<Cod />} />

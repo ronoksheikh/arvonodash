@@ -50,7 +50,7 @@ Status legend: [x] done · [~] partial / limited by API · [ ] not started
 ## COD & operations
 - [x] COD booked/collected/in transit/awaiting payout/settled/lost; Steadfast balance
 - [x] Payout sync matching consignments (defensive parsing — payout payload undocumented)
-- [x] CSV export, printable labels (Code128) and packing slips
+- [x] CSV export and packing slips (labels come from the external label service)
 - [x] Activity log, sync history, webhook payload viewer, retry/cancel jobs, manual sync controls
 - [x] Staff accounts & permissions
 
@@ -60,8 +60,23 @@ Status legend: [x] done · [~] partial / limited by API · [ ] not started
 
 ## Testing
 - [x] Unit tests (vitest): 22 passing
-- [x] End-to-end suite against mock Shopify/Steadfast: 28 checks passing
+- [x] End-to-end suite against mock Shopify/Steadfast: 41 checks passing
 - [x] Visual check (Playwright screenshots) light/dark/mobile, no console errors
+
+## Order verification & dispatch (phase 2)
+- [x] Calling status (Not called / No answer / Call again / Confirmed / Rejected) with notes, callback time, call history
+- [x] Quick confirm from table, bulk calling actions, drawer verification panel
+- [x] Confirmed → processing In progress, synced natively to Shopify (fulfillmentOrderReportProgress / fulfillmentOrderOpen)
+- [x] Booking only for confirmed orders (still manual)
+- [x] Cancel orders in Shopify (orderCancel, no refund) and delete-or-archive (orderDelete → orderClose fallback)
+- [x] Two-way sync of Shopify admin/mobile edits (GraphQL re-read after webhooks, 15-min reconciliation)
+- [x] Separate states: calling, processing, booking, label printing, dispatch
+- [x] Label service API: printable, claim, printed, release, summary, mark-dispatched, jobs (API keys + scopes + idempotency)
+- [x] Atomic claims, reservation expiry, late-confirmation safety, audited reprints, full history
+- [x] Asia/Dhaka business dates, same-day and next-day (upTo) dispatch
+- [x] Ready to print and Dispatch pages; API key management
+- [x] D1 100-parameter / 100-column limits handled (json_each lists, trimmed joins)
+- [x] e2e suite extended to 41 checks
 
 ## Ideas / next
 - [ ] SMS confirmation to customers (needs a BD SMS gateway — out of scope, no external services)

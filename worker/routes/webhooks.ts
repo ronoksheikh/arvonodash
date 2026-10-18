@@ -63,6 +63,7 @@ webhookRoutes.post("/shopify", async (c) => {
     return c.text("Invalid JSON", 400);
   }
   const result = await ingest(c.env, "shopify", webhookId, topic, raw, () => processShopifyEvent(getDb(c.env.DB), topic, payload));
+  if (result === "processed") c.executionCtx.waitUntil(processJobs(c.env, getDb(c.env.DB), { limit: 5 }));
   return c.json({ ok: true, result });
 });
 

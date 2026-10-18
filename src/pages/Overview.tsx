@@ -12,7 +12,7 @@ import type { Activity } from "../types";
 type Dashboard = {
   days: number;
   today: { orders: number; revenue: number };
-  pipeline: { unbooked: number; booked: number; inTransit: number; delivered: number; returned: number; attention: number };
+  pipeline: { toCall: number; readyToBook: number; unbooked: number; booked: number; inTransit: number; delivered: number; returned: number; attention: number };
   oldestUnbookedAt: string | null;
   cod: { booked: number; collected: number; inTransit: number; settled: number; deliveryCharges: number };
   successRate: number | null;
@@ -121,15 +121,16 @@ export default function Overview() {
         description="Live numbers from Shopify orders and Steadfast consignments"
         actions={<SegmentedControl size="xs" value={days} onChange={setDays} data={[{ value: "7", label: "7d" }, { value: "30", label: "30d" }, { value: "90", label: "90d" }]} />}
       />
-      <SimpleGrid cols={{ base: 2, sm: 3, lg: 6 }} spacing="md">
+      <SimpleGrid cols={{ base: 2, sm: 4, lg: 7 }} spacing="md">
         <Stat label="Today's orders" value={num(d.today.orders)} hint={`${money(d.today.revenue)} revenue`} onClick={() => navigate("/orders")} />
         <Stat
-          label="Pending booking"
-          value={num(d.pipeline.unbooked)}
-          hint={d.oldestUnbookedAt ? `Oldest ${ago(d.oldestUnbookedAt)}` : "All caught up"}
-          onClick={() => navigate("/orders?tab=unbooked")}
-          accent={d.pipeline.unbooked ? "brand" : undefined}
+          label="To call"
+          value={num(d.pipeline.toCall)}
+          hint={d.oldestUnbookedAt ? `Oldest unbooked ${ago(d.oldestUnbookedAt)}` : "All caught up"}
+          onClick={() => navigate("/orders?tab=to_call")}
+          accent={d.pipeline.toCall ? "orange" : undefined}
         />
+        <Stat label="Ready to book" value={num(d.pipeline.readyToBook)} hint="Confirmed by phone" onClick={() => navigate("/orders?tab=ready")} accent={d.pipeline.readyToBook ? "brand" : undefined} />
         <Stat label="Booked" value={num(d.pipeline.booked)} hint="Awaiting pickup" onClick={() => navigate("/orders?tab=booked")} />
         <Stat label="In transit" value={num(d.pipeline.inTransit)} hint="Incl. on hold" onClick={() => navigate("/orders?tab=in_transit")} />
         <Stat label={`Delivered (${d.days}d)`} value={num(d.pipeline.delivered)} onClick={() => navigate("/orders?tab=delivered")} />

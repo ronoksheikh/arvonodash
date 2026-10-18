@@ -4,13 +4,20 @@ import { consignments, customers, customStatuses, orders } from "../db/schema";
 import type { NormalizedOrder } from "./shopify";
 import type { AppSettings } from "./settings";
 import { cleanPhone, normalizeBdPhone, nowIso } from "../lib/util";
+import { applyShopifySideChanges } from "./calling";
 
 /** Insert or update an order from Shopify. Internal workflow fields are never overwritten. */
-export async function upsertOrder(db: DB, o: NormalizedOrder, appSettings: AppSettings) {
+export async function upsertOrder(db: DB, input: NormalizedOrder, appSettings: AppSettings) {
+  let o = input;
   const existing = await db.select().from(orders).where(eq(orders.shopifyId, o.shopifyId)).get();
   // Ignore stale deliveries (webhooks can arrive out of order).
   if (existing && existing.shopUpdatedAt > o.shopUpdatedAt) return { id: existing.id, created: false, stale: true };
 
+  // REST webhook payloads only know unfulfilled/partial/fulfilled; keep finer GraphQL states such as
+  // "in_progress" or "on_hold" until a GraphQL refresh says otherwise.
+  if (existing && o.source === "rest" && o.shopifyFulfillmentStatus === "unfulfilled" && existing.shopifyFulfillmentStatus && !["fulfilled", "partial", "partially_fulfilled"].includes(existing.shopifyFulfillmentStatus)) {
+    o = { ...o, shopifyFulfillmentStatus: existing.shopifyFulfillmentStatus };
+  }
   const phone = normalizeBdPhone(o.rawPhone);
   const customerId = await upsertCustomer(db, {
     phone: phone ?? cleanPhone(o.rawPhone),
@@ -87,6 +94,8 @@ export async function upsertOrder(db: DB, o: NormalizedOrder, appSettings: AppSe
     id = row.id;
   }
   await refreshRiskFlags(db, id, appSettings);
+  const after = await db.select().from(orders).where(eq(orders.id, id)).get();
+  if (after) await applyShopifySideChanges(db, existing, after);
   return { id, created: !existing, stale: false };
 }
 
@@ -190,6 +199,10 @@ export async function refreshRiskFlags(db: DB, orderId: number, appSettings: App
     if (finished >= 2 && h.returned / finished >= 0.5) flags.push("high_return_rate");
   }
 
+  // Shopify edits (admin or mobile app) after booking: the courier still has the old details.
+  if (order.bookedSource && !["delivered", "partial_delivered", "returned", "cancelled"].includes(order.courierStage) && order.bookedSource !== shopifyContactKey(order)) {
+    flags.push("changed_after_booking");
+  }
   await db.update(orders).set({ riskFlags: flags, duplicateOfOrderId: duplicateOf }).where(eq(orders.id, order.id));
 }
 
@@ -199,3 +212,18 @@ export function buildAddress(o: { address1: string | null; address2: string | nu
   const deduped = parts.filter((p, i) => i === 0 || p.toLowerCase() !== parts[i - 1].toLowerCase());
   return deduped.join(", ");
 }
+
+/** Snapshot of the Shopify contact details a booking was made from, to detect later edits in Shopify. */
+export function shopifyContactKey(o: { rawPhone: string | null; address1: string | null; address2: string | null; city: string | null; zip: string | null }) {
+  return [o.rawPhone ?? "", buildAddress({ ...o, province: null })].join("|");
+}
+
+/** Orders that need a human: unreviewed flags, courier issues, failed syncs, cancellations after booking. */
+export const ATTENTION_SQL = sql`(
+  (json_array_length(coalesce(${orders.riskFlags}, '[]')) > 0 and ${orders.riskDismissed} = 0 and ${orders.courierStage} = 'unbooked' and ${orders.cancelledAt} is null)
+  or exists (select 1 from json_each(coalesce(${orders.riskFlags}, '[]')) where value = 'changed_after_booking')
+  or ${orders.courierStage} in ('issue', 'on_hold')
+  or ${orders.fulfillmentState} = 'failed'
+  or ${orders.shopifySyncStatus} = 'failed'
+  or (${orders.cancelledAt} is not null and ${orders.courierStage} in ('booked', 'in_transit', 'on_hold'))
+)`;

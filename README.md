@@ -15,6 +15,22 @@ Shopify ──webhooks──► Worker (Hono) ◄──webhooks── Steadfast
                           └─ React + Mantine dashboard (static assets)
 ```
 
+## Daily workflow
+
+```
+New order → Call customer → Confirmed (Shopify: In progress) → Admin books Steadfast → Ready to print
+→ Label service prints & confirms → Printed → Dispatched (staff) → Steadfast confirms pickup
+→ Shopify fulfilled (tracking added) → Delivered / Returned
+```
+
+Everything is synchronised automatically, with three exceptions that always stay manual:
+- the **calling confirmation**
+- **Steadfast booking**
+- **physical dispatch**
+
+Each order keeps five separate states: calling, processing, Steadfast booking, label printing and
+dispatch. Shopify fulfillment and courier delivery are tracked on top of these.
+
 ## Features
 
 - **Overview**: today's orders and revenue, the booking/transit/delivered/returned pipeline,
@@ -30,10 +46,31 @@ Shopify ──webhooks──► Worker (Hono) ◄──webhooks── Steadfast
   - an incomplete address
   - a customer with a high return rate, or one flagged risky or blocked
   - a high COD value, a large quantity, or a test order
+- **Calling & verification**: Not called / No answer / Call again / Confirmed / Rejected. Set
+  these from the order table (one-click confirm) or the order drawer, with call notes, callback
+  time and full call history.
+  - Confirming moves the order to *In progress*, natively in Shopify
+    (`fulfillmentOrderReportProgress`), and makes it bookable.
+  - Rejected orders can be cancelled in Shopify (`orderCancel`, never refunds) or
+    deleted/archived where Shopify allows it.
+- **Two-way Shopify sync**: changes made in the Shopify admin or mobile app sync back to this
+  dashboard. These include In progress, cancellations, fulfillments, address and phone edits
+  (flagged when the order is already booked), and archive/delete.
+- **Ready to print**: per-day (Asia/Dhaka) unprinted, reserved and printed lists, daily totals, the
+  next-day backlog, print job history, release, and audited reprint requests.
+- **Dispatch**: ready to dispatch, awaiting courier receipt, courier received, and exceptions
+  (held, failed, returned, cancelled after booking, dispatched more than 24 h ago without a
+  pickup). Includes bulk *Mark dispatched* and *Undo* with a reason.
+- **Label service API** (`/api/v1/dispatch/*`, see [docs/DISPATCH_API.md](docs/DISPATCH_API.md)):
+  - API keys with scopes
+  - mandatory idempotency keys
+  - atomic claims, so concurrent print processes never get the same order
+  - printed only on explicit confirmation
+  - expiring reservations, safe late confirmations, and full print/dispatch history
 - **Booking editor**: edit the recipient, phone, alternative phone, address (250-character
   limit), COD, delivery type (home or point), item description, lot and rider note before
   booking. You can also ship only some items, which gives a partial fulfillment.
-- **Manual booking only**: orders are sent to Steadfast only when a staff member clicks *Book*,
+- **Manual booking only, for confirmed orders**: orders are sent to Steadfast only when a staff member clicks *Book*,
   one at a time or in bulk. Imports and webhooks never book. Duplicates are blocked by an
   active-consignment check plus a unique invoice, enforced in D1 and by Steadfast. Custom
   statuses such as *Hold* or *Fake* can block booking.
@@ -54,8 +91,8 @@ Shopify ──webhooks──► Worker (Hono) ◄──webhooks── Steadfast
   ratings.
 - **COD & settlements**: COD booked, collected, with the courier, awaiting payout and settled,
   plus the Steadfast balance, payouts matched to parcels, and delivered parcels not yet paid out.
-- **Operations**: CSV export (filtered or selected), printable 100×150 mm shipping labels with a
-  Code128 barcode, A5 packing slips, staff accounts with roles and per-permission overrides, an
+- **Operations**: CSV export (filtered or selected), A5 packing slips (shipping labels come from
+  the external label service), staff accounts with roles and per-permission overrides, an
   activity log, a sync history with webhook payload inspection, retry controls, and connection
   tests.
 - **UI**: Mantine with light and dark mode, a responsive sidebar and mobile layout, drawers,
@@ -98,9 +135,11 @@ npm run db:migrate:remote
 2. Add the Admin API scopes: `read_orders`, `write_orders`, `read_customers`,
    `read_merchant_managed_fulfillment_orders` and `write_merchant_managed_fulfillment_orders`.
    Add `read_all_orders` if you want to import orders older than 60 days.
-3. Request **protected customer data** access for name, email, phone and address.
-4. Release a version and install the app on the store.
-5. Copy the **Client ID** and **Client secret** from the app's Settings page.
+3. Make sure the app user has the *fulfill and ship orders* permission, and *delete orders* if you
+   want deletions.
+4. Request **protected customer data** access for name, email, phone and address.
+5. Release a version and install the app on the store.
+6. Copy the **Client ID** and **Client secret** from the app's Settings page.
 
 If you still have a legacy admin-created custom app, you can use its `shpat_…` token as
 `SHOPIFY_ACCESS_TOKEN` instead. Set `SHOPIFY_WEBHOOK_SECRET` if its webhook signing secret
@@ -133,7 +172,12 @@ you to create the **owner** account.
 
   Use *Test connection* in Settings to verify both APIs.
 
-### 7. Import existing orders
+### 7. Connect the label service
+In Settings → API keys, create a key with `dispatch:read` and `dispatch:print`. Add
+`dispatch:dispatch` if the service should also record handover. Then follow
+[docs/DISPATCH_API.md](docs/DISPATCH_API.md).
+
+### 8. Import existing orders
 Go to Sync & webhooks → *Start import* and choose a number of days. Large imports continue
 automatically in the background. Imported orders are never booked.
 
@@ -160,7 +204,7 @@ npm test                 # unit tests (phone normalization, status mapping, HMAC
 npm run typecheck
 ```
 
-The end-to-end suite has 28 checks. It covers the following, against a mock Shopify/Steadfast
+The end-to-end suite has 41 checks. It covers the following, against a mock Shopify/Steadfast
 API:
 - setup and login
 - webhooks with HMAC and bearer auth
@@ -168,6 +212,11 @@ API:
 - manual booking and duplicate-booking refusal
 - partial fulfillment on pickup
 - polling recovery, returns, rebooking and payouts
+- calling confirmation and Shopify In progress
+- the print/dispatch API: concurrent claims, expiry, idempotent replays, reprints, summary and
+  mark-dispatched
+- Shopify-side cancel and edits
+- cancel and delete fallback
 - import, CSV export and permissions
 
 To run it:
@@ -198,6 +247,7 @@ npm run test:e2e
 | Processing failures | The event is stored first and acknowledged; failed events are retried by the cron for 2 days |
 | Missed webhooks | Every 5 min, active consignments not updated in 30 min are polled. Every hour, Shopify orders updated since the watermark are reconciled |
 | Shopify calls after courier events | The D1 `jobs` outbox runs immediately via `waitUntil`, then retries with exponential backoff (8 attempts) |
+| Double printing | Single-statement conditional claims (`label_status = 'unprinted'`), printed only on explicit confirmation, idempotency keys, late confirmations honoured, reprints only by audited request |
 | Double booking | Active-consignment check plus a unique invoice reserved in D1 before calling Steadfast. An uncertain outcome (timeout) is kept as *unconfirmed* and reconciled by invoice |
 | Double fulfillment | Shopify fulfillment-order `remainingQuantity` is the source of truth; job keys are unique per order and consignment |
 | Rate limits | Shopify cost-based throttling with backoff; `429` / `5xx` retries for both APIs |

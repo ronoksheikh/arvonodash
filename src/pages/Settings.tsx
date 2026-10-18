@@ -48,14 +48,16 @@ export default function SettingsPage() {
         <Tabs.List mb="lg">
           <Tabs.Tab value="connections">Connections</Tabs.Tab>
           <Tabs.Tab value="workflow">Workflow</Tabs.Tab>
-          <Tabs.Tab value="statuses">Order statuses</Tabs.Tab>
+          <Tabs.Tab value="statuses">Internal labels</Tabs.Tab>
           {can("users.manage") && <Tabs.Tab value="staff">Staff & permissions</Tabs.Tab>}
+          {can("settings.manage") && <Tabs.Tab value="api">API keys</Tabs.Tab>}
           <Tabs.Tab value="account">My account</Tabs.Tab>
         </Tabs.List>
         <Tabs.Panel value="connections"><Connections d={q.data!} /></Tabs.Panel>
         <Tabs.Panel value="workflow"><Workflow d={q.data!} /></Tabs.Panel>
         <Tabs.Panel value="statuses"><Statuses statuses={q.data!.statuses} /></Tabs.Panel>
         {can("users.manage") && <Tabs.Panel value="staff"><Staff /></Tabs.Panel>}
+        {can("settings.manage") && <Tabs.Panel value="api"><ApiKeys /></Tabs.Panel>}
         <Tabs.Panel value="account"><Account /></Tabs.Panel>
       </Tabs>
     </>
@@ -203,7 +205,7 @@ function Statuses({ statuses }: { statuses: CustomStatus[] }) {
   const disabled = !can("settings.manage");
   return (
     <Card maw={820} padding={0}>
-      <Text size="sm" c="dimmed" p="md">Custom statuses track your own workflow (e.g. phone confirmation) independently of Shopify and courier status. Statuses that block booking prevent sending orders to Steadfast.</Text>
+      <Text size="sm" c="dimmed" p="md">Optional internal labels (e.g. Hold, Priority, Exchange), separate from the calling status, Shopify status and courier status. Labels that block booking prevent sending orders to Steadfast.</Text>
       <Table className="app-table" verticalSpacing={8}>
         <Table.Thead><Table.Tr><Table.Th pl="md">Status</Table.Th><Table.Th>Color</Table.Th><Table.Th>Default for new orders</Table.Th><Table.Th>Blocks booking</Table.Th><Table.Th pr="md" /></Table.Tr></Table.Thead>
         <Table.Tbody>
@@ -322,5 +324,74 @@ function Account() {
         <Text size="xs" c="dimmed" mt="md">To change your password, ask an owner to set a new one from Staff & permissions{user?.role === "owner" ? " (or edit your own entry there)" : ""}.</Text>
       </Stack>
     </Card>
+  );
+}
+
+type ApiKey = { id: number; name: string; prefix: string; scopes: string[]; lastUsedAt: string | null; revokedAt: string | null; createdAt: string };
+
+function ApiKeys() {
+  const qc = useQueryClient();
+  const q = useQuery({ queryKey: ["api-keys"], queryFn: () => api<{ keys: ApiKey[]; scopes: Record<string, string> }>("/settings/api-keys") });
+  const [open, setOpen] = useState(false);
+  const [name, setName] = useState("Label printing service");
+  const [scopes, setScopes] = useState<string[]>(["dispatch:read", "dispatch:print"]);
+  const [created, setCreated] = useState<string | null>(null);
+  const create = useMutation({
+    mutationFn: () => post<{ key: string }>("/settings/api-keys", { name, scopes }),
+    onSuccess: (r) => { setCreated(r.key); qc.invalidateQueries({ queryKey: ["api-keys"] }); },
+    onError: (e) => notifyError(e),
+  });
+  const revoke = useMutation({
+    mutationFn: (id: number) => post(`/settings/api-keys/${id}/revoke`),
+    onSuccess: () => { notifySuccess("Key revoked"); qc.invalidateQueries({ queryKey: ["api-keys"] }); },
+    onError: (e) => notifyError(e),
+  });
+  if (q.isLoading) return <LoadingState />;
+  if (q.error) return <ErrorState error={q.error} />;
+  return (
+    <>
+      <Card padding={0} maw={980}>
+        <Group justify="space-between" p="md">
+          <div>
+            <Text fw={600}>API keys</Text>
+            <Text size="sm" c="dimmed">For the external label printing service. Send as <Code>Authorization: Bearer &lt;key&gt;</Code>. See docs/DISPATCH_API.md.</Text>
+          </div>
+          <Button size="xs" leftSection={<Plus size={14} />} onClick={() => { setCreated(null); setOpen(true); }}>New key</Button>
+        </Group>
+        <Table className="app-table" verticalSpacing={10}>
+          <Table.Thead><Table.Tr><Table.Th pl="md">Name</Table.Th><Table.Th>Key</Table.Th><Table.Th>Scopes</Table.Th><Table.Th>Last used</Table.Th><Table.Th pr="md" /></Table.Tr></Table.Thead>
+          <Table.Tbody>
+            {q.data!.keys.map((k) => (
+              <Table.Tr key={k.id} style={{ cursor: "default", opacity: k.revokedAt ? 0.5 : 1 }}>
+                <Table.Td pl="md"><Text size="sm" fw={500}>{k.name}</Text><Text size="xs" c="dimmed">created {ago(k.createdAt)}</Text></Table.Td>
+                <Table.Td><Text size="sm" className="mono">{k.prefix}…</Text></Table.Td>
+                <Table.Td><Group gap={4}>{k.scopes.map((s) => <Badge key={s} size="xs" variant="outline">{s}</Badge>)}</Group></Table.Td>
+                <Table.Td><Text size="xs" c="dimmed">{k.lastUsedAt ? ago(k.lastUsedAt) : "never"}</Text></Table.Td>
+                <Table.Td pr="md" ta="right">{k.revokedAt ? <Badge color="gray" size="sm">Revoked</Badge> : <Button size="compact-xs" color="red" variant="subtle" onClick={() => revoke.mutate(k.id)}>Revoke</Button>}</Table.Td>
+              </Table.Tr>
+            ))}
+          </Table.Tbody>
+        </Table>
+      </Card>
+      <Modal opened={open} onClose={() => setOpen(false)} title="New API key">
+        {created ? (
+          <Stack>
+            <Alert color="yellow" variant="light">Copy this key now. It is stored only as a hash and cannot be shown again.</Alert>
+            <Copyable value={created} />
+            <Group justify="flex-end"><Button onClick={() => setOpen(false)}>Done</Button></Group>
+          </Stack>
+        ) : (
+          <Stack>
+            <TextInput label="Name" value={name} onChange={(e) => setName(e.currentTarget.value)} />
+            <Stack gap={6}>
+              {Object.entries(q.data!.scopes).map(([s, label]) => (
+                <Checkbox key={s} label={<><Code>{s}</Code> — {label}</>} checked={scopes.includes(s)} onChange={(e) => setScopes(e.currentTarget.checked ? [...scopes, s] : scopes.filter((x) => x !== s))} />
+              ))}
+            </Stack>
+            <Group justify="flex-end"><Button disabled={!name.trim() || !scopes.length} loading={create.isPending} onClick={() => create.mutate()}>Create key</Button></Group>
+          </Stack>
+        )}
+      </Modal>
+    </>
   );
 }

@@ -41,7 +41,9 @@ const step = async (name, fn) => {
   }
 };
 
-function shopifyWebhook(topic, payload, id = crypto.randomUUID(), secret = SHOPIFY_SECRET) {
+async function shopifyWebhook(topic, payload, id = crypto.randomUUID(), secret = SHOPIFY_SECRET) {
+  // Keep the mock's GraphQL view of the order in sync with what the webhook says.
+  if (secret === SHOPIFY_SECRET && payload.line_items) await fetch(`${MOCK}/__orders`, { method: "POST", body: JSON.stringify(payload) });
   const raw = JSON.stringify(payload);
   const hmac = crypto.createHmac("sha256", secret).update(raw).digest("base64");
   return call("POST", "/webhooks/shopify", raw, {
@@ -52,6 +54,13 @@ function shopifyWebhook(topic, payload, id = crypto.randomUUID(), secret = SHOPI
 
 const steadfastWebhook = (payload, token = SF_TOKEN) =>
   call("POST", "/webhooks/steadfast", payload, { auth: false, headers: { Authorization: `Bearer ${token}` } });
+
+let apiKey = "";
+const v1 = (method, path, body, { key = apiKey, idem = crypto.randomUUID(), headers = {} } = {}) =>
+  call(method, `/api/v1/dispatch${path}`, body, { auth: false, headers: { Authorization: `Bearer ${key}`, ...(method === "POST" && idem ? { "Idempotency-Key": idem } : {}), ...headers } });
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const today = new Date(Date.now() + 6 * 3_600_000).toISOString().slice(0, 10);
+const orderDetail = async (id) => (await call("GET", `/api/orders/${id}`)).body;
 
 const mockState = () => fetch(`${MOCK}/__state`).then((r) => r.json());
 const setCourierStatus = (consignment_id, status) =>
@@ -110,7 +119,7 @@ await step("Shopify orders/create webhook creates order (idempotent)", async () 
   orderA = list.body.rows[0];
   assert.equal(orderA.phone, "01812345678");
   assert.equal(orderA.courierStage, "unbooked");
-  assert.equal(orderA.statusId !== null, true, "default status assigned");
+  assert.equal(orderA.callingStatus, "not_called");
 });
 
 await step("second order from same phone is flagged as duplicate", async () => {
@@ -145,6 +154,33 @@ await step("booking edits are validated and saved (partial shipment)", async () 
   assert.equal(d.body.booking.codAmount, 900);
 });
 
+await step("booking requires a confirmed call", async () => {
+  const r = await call("POST", "/api/orders/book", { ids: [orderA.id] });
+  assert.equal(r.body.results[0].ok, false);
+  assert.match(r.body.results[0].error, /not confirmed/);
+  const list = await call("GET", "/api/orders?tab=to_call");
+  assert.equal(list.body.total, 2);
+  assert.equal(list.body.rows[0].callingStatus, "not_called");
+});
+
+await step("calling: no answer, then confirmed → In progress natively in Shopify", async () => {
+  const na = await call("POST", `/api/orders/${orderA.id}/calling`, { status: "no_answer", note: "Rang twice" });
+  assert.equal(na.status, 200, JSON.stringify(na.body));
+  const ok = await call("POST", `/api/orders/${orderA.id}/calling`, { status: "confirmed", note: "Customer confirmed size L" });
+  assert.equal(ok.body.processingStatus, "in_progress");
+  await sleep(800);
+  const s = await mockState();
+  assert.ok(s.progressReports.some((r) => r.id === "gid://shopify/FulfillmentOrder/50011"), "fulfillmentOrderReportProgress called");
+  const d = await orderDetail(orderA.id);
+  assert.equal(d.order.callingStatus, "confirmed");
+  assert.equal(d.order.callAttempts, 2);
+  assert.equal(d.order.shopifySyncStatus, "synced");
+  assert.equal(d.calls.length, 2);
+  assert.equal(d.calls[0].note, "Customer confirmed size L");
+  const ready = await call("GET", "/api/orders?tab=ready");
+  assert.equal(ready.body.total, 1);
+});
+
 await step("orders are never booked automatically", async () => {
   const s = await mockState();
   assert.equal(s.consignments.length, 0);
@@ -166,6 +202,116 @@ await step("manual booking creates consignment; duplicate booking refused", asyn
   consignmentA = d.body.consignments[0];
   assert.equal(d.body.order.courierStage, "booked");
   assert.equal(d.body.order.fulfillmentState, "none", "not fulfilled on booking with default trigger");
+  assert.equal(d.body.order.labelStatus, "unprinted");
+});
+
+await step("dispatch API: API key auth, scopes and idempotency key required", async () => {
+  const k = await call("POST", "/api/settings/api-keys", { name: "Label service", scopes: ["dispatch:read", "dispatch:print", "dispatch:dispatch"] });
+  assert.equal(k.status, 200, JSON.stringify(k.body));
+  apiKey = k.body.key;
+  const ro = await call("POST", "/api/settings/api-keys", { name: "Read only", scopes: ["dispatch:read"] });
+  const bad = await v1("GET", "/printable", undefined, { key: "arv_nope" });
+  assert.equal(bad.status, 401);
+  const noIdem = await v1("POST", "/claim", { date: today }, { idem: null });
+  assert.equal(noIdem.status, 400);
+  const scoped = await v1("POST", "/claim", { date: today }, { key: ro.body.key });
+  assert.equal(scoped.status, 403);
+});
+
+await step("printable lists booked order with label data (Dhaka date)", async () => {
+  const r = await v1("GET", `/printable?date=${today}`);
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  assert.equal(r.body.count, 1);
+  const o = r.body.orders[0];
+  assert.equal(o.orderName, "#5001");
+  assert.equal(o.invoice, "5001");
+  assert.equal(o.trackingCode, consignmentA.trackingCode);
+  assert.equal(o.codAmount, 900);
+  assert.equal(o.customer.phone, "01812345678");
+  assert.deepEqual(o.items, [{ title: "Cotton Panjabi", variant: "L", sku: "PJ-L", quantity: 1 }], "only the items in this consignment");
+  assert.equal(o.labelStatus, "unprinted");
+  const other = await v1("GET", "/printable?date=2020-01-01");
+  assert.equal(other.body.count, 0);
+  const fetchedAgain = await v1("GET", `/printable?date=${today}`);
+  assert.equal(fetchedAgain.body.orders[0].labelStatus, "unprinted", "fetching never changes state");
+});
+
+let jobA;
+await step("concurrent claims never hand out the same order", async () => {
+  const [c1, c2] = await Promise.all([v1("POST", "/claim", { date: today }), v1("POST", "/claim", { date: today })]);
+  const all = [...c1.body.orders, ...c2.body.orders].map((o) => o.orderId);
+  assert.equal(all.length, 1, JSON.stringify([c1.body, c2.body]));
+  jobA = c1.body.jobId ?? c2.body.jobId;
+  const again = await v1("POST", "/claim", { date: today });
+  assert.equal(again.body.count, 0);
+  const reserved = await v1("GET", `/printable?date=${today}&status=reserved`);
+  assert.equal(reserved.body.count, 1);
+});
+
+await step("dispatch requires a printed label; release returns order to the pool", async () => {
+  const early = await v1("POST", "/mark-dispatched", { orderIds: [orderA.id] });
+  assert.equal(early.body.results[0].result, "label_not_printed");
+  const rel = await v1("POST", "/release", { jobId: jobA, reason: "printer jam" });
+  assert.equal(rel.body.released, 1);
+  const c = await v1("POST", "/claim", { date: today, limit: 10 });
+  assert.equal(c.body.count, 1);
+  jobA = c.body.jobId;
+});
+
+await step("expired reservations are recovered; a late confirmation is still honoured", async () => {
+  const { execSync } = await import("node:child_process");
+  execSync(`npx wrangler d1 execute DB --local --command "UPDATE orders SET reserved_until = '2000-01-01T00:00:00.000Z' WHERE label_status = 'reserved'"`, { stdio: "ignore" });
+  const r = await v1("GET", `/printable?date=${today}`);
+  assert.equal(r.body.count, 1, "back in the unprinted pool");
+  const job = (await v1("GET", `/jobs/${jobA}`)).body;
+  assert.ok(job.events.some((e) => e.event === "expired"));
+});
+
+await step("printed confirmation marks only confirmed labels; replays are idempotent", async () => {
+  const idem = crypto.randomUUID();
+  const p = await v1("POST", "/printed", { jobId: jobA, orderIds: [orderA.id] }, { idem });
+  assert.equal(p.body.printed, 1, JSON.stringify(p.body));
+  const replay = await v1("POST", "/printed", { jobId: jobA, orderIds: [orderA.id] }, { idem });
+  assert.equal(replay.headers.get("idempotent-replayed"), "true");
+  assert.deepEqual(replay.body, p.body);
+  const mismatch = await v1("POST", "/printed", { jobId: jobA, orderIds: [] }, { idem });
+  assert.equal(mismatch.status, 422);
+  const dup = await v1("POST", "/printed", { orderIds: [orderA.id] });
+  assert.equal(dup.body.results[0].result, "already_printed");
+  const r = await v1("GET", `/printable?date=${today}`);
+  assert.equal(r.body.count, 0, "printed orders never come back automatically");
+  const claim = await v1("POST", "/claim", { date: today });
+  assert.equal(claim.body.count, 0);
+});
+
+await step("manual reprint needs a reason and is audited", async () => {
+  const noReason = await call("POST", "/api/v1/dispatch/reprint", { orderIds: [orderA.id] });
+  assert.equal(noReason.status, 400);
+  const ok = await call("POST", "/api/v1/dispatch/reprint", { orderIds: [orderA.id], reason: "Label smudged" });
+  assert.deepEqual(ok.body.requeued, [orderA.id]);
+  const c = await v1("POST", "/claim", { date: today });
+  await v1("POST", "/printed", { jobId: c.body.jobId });
+  const d = await orderDetail(orderA.id);
+  assert.equal(d.order.printCount, 2);
+  assert.ok(d.dispatchHistory.some((e) => e.event === "reprint_requested" && e.note === "Label smudged"));
+});
+
+await step("summary reports daily totals; mark-dispatched records handover", async () => {
+  const s1 = await v1("GET", `/summary?date=${today}`);
+  assert.equal(s1.body.bookedConsignments, 1);
+  assert.equal(s1.body.printed, 1);
+  assert.equal(s1.body.awaitingDispatch, 1);
+  assert.equal(s1.body.confirmedOrders, 1);
+  const m = await v1("POST", "/mark-dispatched", { orderIds: [orderA.id, 999999] });
+  assert.equal(m.body.dispatched, 1);
+  assert.equal(m.body.results[1].result, "not_found");
+  const again = await v1("POST", "/mark-dispatched", { orderIds: [orderA.id] });
+  assert.equal(again.body.results[0].result, "already_dispatched");
+  const s2 = await v1("GET", `/summary?date=${today}`);
+  assert.equal(s2.body.dispatched, 1);
+  assert.equal(s2.body.awaitingDispatch, 0);
+  const d = await orderDetail(orderA.id);
+  assert.equal(d.order.fulfillmentState, "none", "dispatch alone never fulfills");
 });
 
 await step("Steadfast webhook rejects wrong bearer token", async () => {
@@ -187,6 +333,7 @@ await step("pickup webhook triggers Shopify fulfillment with tracking (partial i
   const d = await call("GET", `/api/orders/${orderA.id}`);
   assert.equal(d.body.order.fulfillmentState, "fulfilled");
   assert.equal(d.body.order.courierStage, "in_transit");
+  assert.equal(d.body.order.dispatchStatus, "courier_received");
   assert.ok(s.tags.some((t) => t.tags.includes("steadfast-booked")), "booked tag job ran");
 });
 
@@ -235,11 +382,11 @@ await step("blocked status prevents booking; flagged order books after status ch
   const settings = await call("GET", "/api/settings");
   const hold = settings.body.statuses.find((s) => s.blocksBooking);
   await call("PATCH", `/api/orders/${orderB.id}`, { statusId: hold.id });
+  await call("POST", `/api/orders/${orderB.id}/calling`, { status: "confirmed" });
   const r = await call("POST", "/api/orders/book", { ids: [orderB.id] });
   assert.equal(r.body.results[0].ok, false);
   assert.match(r.body.results[0].error, /blocks booking/);
-  const confirmed = settings.body.statuses.find((s) => s.name === "Confirmed");
-  await call("PATCH", `/api/orders/${orderB.id}`, { statusId: confirmed.id });
+  await call("PATCH", `/api/orders/${orderB.id}`, { statusId: null });
   const ok = await call("POST", "/api/orders/book", { ids: [orderB.id] });
   assert.equal(ok.body.results[0].ok, true, JSON.stringify(ok.body));
   const d = await call("GET", `/api/orders/${orderB.id}`);
@@ -276,6 +423,67 @@ await step("release + rebook (redelivery) uses a new invoice", async () => {
   assert.equal(ok.body.results[0].ok, true, JSON.stringify(ok.body));
   const s = await mockState();
   assert.ok(s.consignments.some((c) => c.invoice === "5002-R1"));
+  const d = await orderDetail(orderB.id);
+  assert.equal(d.order.labelStatus, "unprinted", "rebooked parcel needs a new label");
+  assert.equal(d.order.dispatchStatus, "pending");
+});
+
+await step("Shopify-side cancellation removes order from printing", async () => {
+  await shopifyWebhook("orders/create", restOrder(5003, { shipping_address: { name: "Rafi", address1: "Flat 3B, Uttara Sector 7", city: "Dhaka", phone: "01911222333" } }));
+  const c = (await call("GET", "/api/orders?search=%235003")).body.rows[0];
+  await call("POST", `/api/orders/${c.id}/calling`, { status: "confirmed" });
+  const b = await call("POST", "/api/orders/book", { ids: [c.id] });
+  assert.equal(b.body.results[0].ok, true);
+  let r = await v1("GET", `/printable?date=${today}`);
+  assert.ok(r.body.orders.some((o) => o.orderId === c.id));
+  await shopifyWebhook("orders/cancelled", restOrder(5003, { cancelled_at: new Date().toISOString(), updated_at: new Date(Date.now() + 1000).toISOString(), shipping_address: { name: "Rafi", address1: "Flat 3B, Uttara Sector 7", city: "Dhaka", phone: "01911222333" } }));
+  r = await v1("GET", `/printable?date=${today}`);
+  assert.ok(!r.body.orders.some((o) => o.orderId === c.id), "cancelled orders are never printable");
+  const att = await call("GET", "/api/orders?tab=attention");
+  assert.ok(att.body.rows.some((o) => o.id === c.id), "cancelled-after-booking needs attention");
+});
+
+await step("edits made in Shopify admin/mobile sync back (In progress, address change)", async () => {
+  const base = restOrder(5004, { shipping_address: { name: "Nadia", address1: "House 9, Banani Road 11", city: "Dhaka", phone: "01555666777" } });
+  await shopifyWebhook("orders/create", base);
+  const o = (await call("GET", "/api/orders?search=%235004")).body.rows[0];
+  assert.equal(o.callingStatus, "not_called");
+  await fetch(`${MOCK}/__fo_status`, { method: "POST", body: JSON.stringify({ orderId: "5004", status: "IN_PROGRESS" }) });
+  await shopifyWebhook("orders/updated", { ...base, updated_at: new Date(Date.now() + 2000).toISOString() });
+  await sleep(1000);
+  let d = await orderDetail(o.id);
+  assert.equal(d.order.callingStatus, "confirmed", "Shopify In progress counts as confirmation");
+  assert.equal(d.order.processingStatus, "in_progress");
+  await call("POST", "/api/orders/book", { ids: [o.id] });
+  const moved = { ...base, updated_at: new Date(Date.now() + 4000).toISOString(), shipping_address: { ...base.shipping_address, address1: "House 22, Gulshan Avenue" } };
+  await shopifyWebhook("orders/updated", moved);
+  d = await orderDetail(o.id);
+  assert.equal(d.order.address1, "House 22, Gulshan Avenue");
+  assert.ok(d.order.riskFlags.includes("changed_after_booking"));
+});
+
+await step("cancel fake order in Shopify (no refund) and delete-or-archive fallback", async () => {
+  await shopifyWebhook("orders/create", restOrder(5005, { shipping_address: { name: "Fake Person", address1: "asdf", city: "Dhaka", phone: "01700000000" } }));
+  const o = (await call("GET", "/api/orders?search=%235005")).body.rows[0];
+  await call("POST", `/api/orders/${o.id}/calling`, { status: "rejected", note: "Number says never ordered" });
+  const bad = await call("POST", `/api/orders/${o.id}/cancel`, { reason: "NOPE" });
+  assert.equal(bad.status, 400);
+  const c = await call("POST", `/api/orders/${o.id}/cancel`, { reason: "FRAUD", restock: true, staffNote: "Fake order" });
+  assert.equal(c.status, 200, JSON.stringify(c.body));
+  const s = await mockState();
+  const cancelled = s.cancelled.find((x) => x.id === "5005");
+  assert.equal(cancelled.reason, "FRAUD");
+  assert.equal(cancelled.refundMethod.originalPaymentMethodsRefund, false);
+  await sleep(3800);
+  const d = await orderDetail(o.id);
+  assert.ok(d.order.cancelledAt, "cancellation confirmed from Shopify");
+  assert.equal(d.order.processingStatus, "cancelled");
+  const del = await call("POST", `/api/orders/${o.id}/delete`);
+  assert.equal(del.body.deleted, false);
+  assert.equal(del.body.archivedInShopify, true);
+  assert.equal(del.body.archivedHere, true);
+  const booked = await call("POST", `/api/orders/${orderB.id}/cancel`, { reason: "CUSTOMER" });
+  assert.equal(booked.status, 409, "active consignment blocks cancellation");
 });
 
 await step("Steadfast return request for delivered parcel", async () => {
@@ -305,8 +513,9 @@ await step("search by tracking code, CSV export, dashboard, customers", async ()
   const dash = await call("GET", "/api/dashboard?days=30");
   assert.equal(dash.status, 200);
   assert.ok(dash.body.today.orders >= 2);
+  assert.ok(dash.body.pipeline.toCall >= 0);
   assert.equal(dash.body.successRate, 50);
-  const cust = await call("GET", "/api/customers?search=Karim");
+  const cust = await call("GET", "/api/customers?search=01812345678");
   assert.equal(cust.body.rows[0].orders, 2);
   const det = await call("GET", `/api/customers/${cust.body.rows[0].id}`);
   assert.equal(det.body.history.delivered, 1);

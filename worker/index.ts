@@ -7,6 +7,8 @@ import { requireAuth, requirePerm } from "./lib/auth";
 import { HttpError, nowIso } from "./lib/util";
 import { authRoutes } from "./routes/auth";
 import { webhookRoutes } from "./routes/webhooks";
+import { dispatchRoutes } from "./routes/dispatch";
+import { expireReservations } from "./services/dispatch";
 import { orderRoutes } from "./routes/orders";
 import { consignmentRoutes } from "./routes/consignments";
 import { codRoutes, customerRoutes, dashboardRoutes, returnRoutes } from "./routes/misc";
@@ -30,6 +32,8 @@ app.onError((err, c) => {
 
 app.get("/api/health", (c) => c.json({ ok: true, time: nowIso() }));
 app.route("/webhooks", webhookRoutes);
+// External + dashboard dispatch API (API key or session). Registered before the session-only /api router.
+app.route("/api/v1/dispatch", dispatchRoutes);
 app.route("/api/auth", authRoutes);
 
 const api = new Hono<AppEnv>();
@@ -64,6 +68,7 @@ async function scheduled(controller: ScheduledController, env: Env) {
   const minute = now.getUTCMinutes();
   const hour = now.getUTCHours();
   const steps: [string, () => Promise<Record<string, unknown>>, boolean][] = [
+    ["print_reservations", () => expireReservations(db).then((r) => ({ ...r, processed: r.expired })), true],
     ["jobs", () => processJobs(env, db, { limit: 25 }), true],
     ["webhook_retry", () => retryFailedWebhooks(db, { limit: 20 }), true],
     ["courier_poll", () => pollActiveConsignments(env, db, { limit: 40, staleMinutes: 30 }), steadfastConfigured(env)],
@@ -87,7 +92,8 @@ async function scheduled(controller: ScheduledController, env: Env) {
   if (shopifyConfigured(env)) {
     const importState = await getImportState(db);
     if (importState && !importState.done) await recordRun(db, "shopify_import", "cron", () => runImportStep(env, db, 3)).catch(() => {});
-    if (minute < 5) await recordRun(db, "shopify_reconcile", "cron", () => reconcileShopify(env, db)).catch(() => {});
+    // Every 15 minutes: catch edits made in Shopify admin/mobile whose webhooks were missed.
+    if (minute % 15 < 5) await recordRun(db, "shopify_reconcile", "cron", () => reconcileShopify(env, db)).catch(() => {});
   }
   if (steadfastConfigured(env) && minute < 5 && hour % 3 === 0) {
     await recordRun(db, "payments", "cron", () => syncPayments(env, db, 2)).catch(() => {});

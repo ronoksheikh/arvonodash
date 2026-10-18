@@ -2,7 +2,9 @@ import { Hono } from "hono";
 import { and, desc, eq, inArray, lt, sql, type SQL } from "drizzle-orm";
 import type { AppEnv } from "../env";
 import { getDb } from "../db";
-import { activityLog, customStatuses, jobs, orders, sessions, users, webhookEvents } from "../db/schema";
+import { activityLog, apiKeys, customStatuses, idempotencyKeys, jobs, orders, sessions, users, webhookEvents } from "../db/schema";
+import { API_SCOPES } from "./dispatch";
+import { randomToken, sha256Hex } from "../lib/crypto";
 import { requirePerm } from "../lib/auth";
 import { hashPassword } from "../lib/crypto";
 import { nowIso } from "../lib/util";
@@ -116,6 +118,37 @@ settingsRoutes.delete("/statuses/:id{[0-9]+}", requirePerm("settings.manage"), a
   const id = Number(c.req.param("id"));
   await db.update(orders).set({ statusId: null }).where(eq(orders.statusId, id));
   await db.delete(customStatuses).where(eq(customStatuses.id, id));
+  return c.json({ ok: true });
+});
+
+// API keys for external services (label printing service)
+settingsRoutes.get("/api-keys", requirePerm("settings.manage"), async (c) => {
+  const db = getDb(c.env.DB);
+  const rows = await db.select().from(apiKeys).orderBy(desc(apiKeys.createdAt)).all();
+  return c.json({ keys: rows.map(({ keyHash: _h, ...k }) => k), scopes: API_SCOPES });
+});
+
+settingsRoutes.post("/api-keys", requirePerm("settings.manage"), async (c) => {
+  const db = getDb(c.env.DB);
+  const { name, scopes } = await c.req.json<{ name: string; scopes: string[] }>();
+  const valid = (scopes ?? []).filter((s) => s in API_SCOPES);
+  if (!name?.trim() || !valid.length) return c.json({ error: "Name and at least one scope are required" }, 400);
+  const secret = `arv_${randomToken(24)}`;
+  const row = await db
+    .insert(apiKeys)
+    .values({ name: name.trim().slice(0, 60), prefix: secret.slice(0, 10), keyHash: await sha256Hex(secret), scopes: valid, createdBy: c.get("user").id, createdAt: nowIso() })
+    .returning({ id: apiKeys.id })
+    .get();
+  await logActivity(db, c.get("user"), "apikey.created", { entityType: "api_key", entityId: row!.id, details: { name, scopes: valid } });
+  // The secret is shown exactly once.
+  return c.json({ id: row!.id, key: secret });
+});
+
+settingsRoutes.post("/api-keys/:id{[0-9]+}/revoke", requirePerm("settings.manage"), async (c) => {
+  const db = getDb(c.env.DB);
+  const id = Number(c.req.param("id"));
+  await db.update(apiKeys).set({ revokedAt: nowIso() }).where(eq(apiKeys.id, id));
+  await logActivity(db, c.get("user"), "apikey.revoked", { entityType: "api_key", entityId: id });
   return c.json({ ok: true });
 });
 
@@ -312,4 +345,5 @@ export async function pruneOldData(db: ReturnType<typeof getDb>) {
   const cutoff = new Date(Date.now() - 60 * 86_400_000).toISOString();
   await db.delete(webhookEvents).where(and(lt(webhookEvents.receivedAt, cutoff), inArray(webhookEvents.status, ["processed", "ignored"])));
   await db.delete(jobs).where(and(lt(jobs.updatedAt, cutoff), inArray(jobs.status, ["done", "cancelled"])));
+  await db.delete(idempotencyKeys).where(lt(idempotencyKeys.createdAt, new Date(Date.now() - 7 * 86_400_000).toISOString()));
 }

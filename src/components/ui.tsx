@@ -3,7 +3,7 @@ import { Alert, Badge, Button, Center, Group, Loader, Pagination, Paper, Stack, 
 import { AlertTriangle, Check, Copy, Inbox, ShieldAlert } from "lucide-react";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "../api";
-import { COURIER_STAGES, FULFILLMENT_STATES, RISK_FLAGS, STEADFAST_STATUSES, RETURN_STATUSES } from "../../shared/constants";
+import { CALLING_STATUSES, COURIER_STAGES, DISPATCH_STATUSES, FULFILLMENT_STATES, LABEL_STATUSES, RISK_FLAGS, SHOPIFY_SYNC_STATUSES, STEADFAST_STATUSES, RETURN_STATUSES } from "../../shared/constants";
 import type { CustomStatus } from "../types";
 import { titleCase } from "../format";
 
@@ -185,3 +185,20 @@ export function KeyValue({ label, children }: { label: string; children: ReactNo
     </Group>
   );
 }
+
+function MapBadge({ map, value, size = "sm", variant = "light" }: { map: Record<string, { label: string; color: string }>; value: string; size?: "xs" | "sm" | "md"; variant?: string }) {
+  const s = map[value] ?? { label: titleCase(value), color: "gray" };
+  return <Badge color={s.color} size={size} variant={variant}>{s.label}</Badge>;
+}
+
+export const CallingBadge = ({ status, size }: { status: string; size?: "xs" | "sm" | "md" }) => <MapBadge map={CALLING_STATUSES} value={status} size={size} />;
+export const LabelBadge = ({ status, size }: { status: string; size?: "xs" | "sm" | "md" }) => <MapBadge map={LABEL_STATUSES} value={status} size={size} variant="outline" />;
+export const DispatchBadge = ({ status, size }: { status: string; size?: "xs" | "sm" | "md" }) => <MapBadge map={DISPATCH_STATUSES} value={status} size={size} variant="dot" />;
+export function ShopifySyncBadge({ status, error }: { status: string; error?: string | null }) {
+  if (status === "none") return null;
+  const b = <MapBadge map={SHOPIFY_SYNC_STATUSES} value={status} size="sm" variant="outline" />;
+  return error ? <Tooltip label={error} multiline w={300}>{b}</Tooltip> : b;
+}
+
+/** Today's business date in Asia/Dhaka (UTC+6, no DST). */
+export const dhakaToday = (offsetDays = 0) => new Date(Date.now() + 6 * 3_600_000 + offsetDays * 86_400_000).toISOString().slice(0, 10);

@@ -1,27 +1,33 @@
 import { Hono } from "hono";
 import { and, asc, desc, eq, gte, inArray, isNotNull, isNull, lte, or, sql, type SQL } from "drizzle-orm";
 import type { AppEnv } from "../env";
-import { getDb, type DB } from "../db";
-import { activityLog, consignments, customers, customStatuses, orderNotes, orders, returns, trackingEvents, users, type BookingDetails } from "../db/schema";
+import { getDb, inList, pick, type DB } from "../db";
+import { activityLog, callLogs, consignments, customers, customStatuses, orderNotes, orders, returns, trackingEvents, users, type BookingDetails } from "../db/schema";
 import { requirePerm } from "../lib/auth";
 import { csvEscape, nowIso, normalizeBdPhone } from "../lib/util";
 import { getSettings } from "../services/settings";
 import { logActivity } from "../services/activity";
 import { bookOrders, defaultBooking, effectiveBooking, queueFulfillment, validateBooking } from "../services/courier";
-import { customerHistory, refreshRiskFlags, upsertOrder } from "../services/orders";
-import { fetchOrder, shopifyAdminOrderUrl } from "../services/shopify";
+import { ATTENTION_SQL, customerHistory, refreshRiskFlags, upsertOrder } from "../services/orders";
+import { CANCEL_REASONS, cancelOrder, closeOrder, deleteOrder, fetchOrder, shopifyAdminOrderUrl } from "../services/shopify";
+import { setCallingStatus } from "../services/calling";
+import { orderHistory } from "../services/dispatch";
 import { processJobs } from "../services/jobs";
 import { trackingUrl } from "../services/steadfast";
 import { NOTE_KINDS } from "../../shared/constants";
 
 export const orderRoutes = new Hono<AppEnv>();
 
-const TABS = ["all", "unbooked", "booked", "in_transit", "delivered", "returned", "cancelled", "attention"] as const;
+const TABS = ["all", "to_call", "ready", "booked", "in_transit", "delivered", "returned", "cancelled", "attention"] as const;
+
+
 
 function tabCondition(tab: string): SQL | undefined {
   switch (tab) {
-    case "unbooked":
-      return and(eq(orders.courierStage, "unbooked"), isNull(orders.cancelledAt));
+    case "to_call":
+      return and(inArray(orders.callingStatus, ["not_called", "no_answer", "call_again"]), eq(orders.courierStage, "unbooked"), isNull(orders.cancelledAt));
+    case "ready":
+      return and(eq(orders.callingStatus, "confirmed"), eq(orders.courierStage, "unbooked"), isNull(orders.cancelledAt));
     case "booked":
       return eq(orders.courierStage, "booked");
     case "in_transit":
@@ -33,12 +39,7 @@ function tabCondition(tab: string): SQL | undefined {
     case "cancelled":
       return or(isNotNull(orders.cancelledAt), eq(orders.courierStage, "cancelled"));
     case "attention":
-      return or(
-        and(sql`json_array_length(coalesce(${orders.riskFlags}, '[]')) > 0`, eq(orders.riskDismissed, false), eq(orders.courierStage, "unbooked"), isNull(orders.cancelledAt)),
-        inArray(orders.courierStage, ["issue", "on_hold"]),
-        eq(orders.fulfillmentState, "failed"),
-        and(isNotNull(orders.cancelledAt), inArray(orders.courierStage, ["booked", "in_transit", "on_hold"])),
-      );
+      return ATTENTION_SQL;
     default:
       return undefined;
   }
@@ -62,6 +63,9 @@ function filterConditions(q: Record<string, string | undefined>): SQL[] {
       )!,
     );
   }
+  if (q.calling) conds.push(inArray(orders.callingStatus, q.calling.split(",")));
+  if (q.label) conds.push(inArray(orders.labelStatus, q.label.split(",")));
+  if (q.dispatch) conds.push(inArray(orders.dispatchStatus, q.dispatch.split(",")));
   if (q.statusId) conds.push(q.statusId === "none" ? isNull(orders.statusId) : eq(orders.statusId, Number(q.statusId)));
   if (q.stage) conds.push(inArray(orders.courierStage, q.stage.split(",")));
   if (q.fulfillment) conds.push(inArray(orders.fulfillmentState, q.fulfillment.split(",")));
@@ -71,7 +75,7 @@ function filterConditions(q: Record<string, string | undefined>): SQL[] {
   if (q.from) conds.push(gte(orders.shopCreatedAt, q.from));
   if (q.to) conds.push(lte(orders.shopCreatedAt, q.to));
   if (q.customerId) conds.push(eq(orders.customerId, Number(q.customerId)));
-  if (q.ids) conds.push(inArray(orders.id, q.ids.split(",").map(Number).filter(Boolean)));
+  if (q.ids) conds.push(inList(orders.id, q.ids.split(",").map(Number).filter(Boolean)));
   return conds;
 }
 
@@ -106,6 +110,14 @@ const listColumns = {
   courierStage: orders.courierStage,
   fulfillmentState: orders.fulfillmentState,
   fulfillmentError: orders.fulfillmentError,
+  callingStatus: orders.callingStatus,
+  callAttempts: orders.callAttempts,
+  callbackAt: orders.callbackAt,
+  processingStatus: orders.processingStatus,
+  shopifySyncStatus: orders.shopifySyncStatus,
+  labelStatus: orders.labelStatus,
+  dispatchStatus: orders.dispatchStatus,
+  cancelRequestedAt: orders.cancelRequestedAt,
   itemCount: sql<number>`(select coalesce(sum(json_extract(value, '$.quantity')), 0) from json_each(${orders.lineItems}))`,
   trackingCode: consignments.trackingCode,
   consignmentStatus: consignments.status,
@@ -147,7 +159,7 @@ orderRoutes.get("/export.csv", requirePerm("export"), async (c) => {
   const where = and(...filterConditions(q), tabCondition(q.tab ?? "all"));
   const statuses = new Map((await db.select().from(customStatuses).all()).map((s) => [s.id, s.name]));
   const rows = await db
-    .select({ o: orders, c: consignments })
+    .select({ o: orders, c: pick(consignments, ["consignmentId", "trackingCode", "status", "codAmount", "collectedAmount", "deliveryCharge", "paymentId", "invoice", "note"]) })
     .from(orders)
     .leftJoin(consignments, eq(consignments.id, orders.activeConsignmentId))
     .where(where)
@@ -155,19 +167,19 @@ orderRoutes.get("/export.csv", requirePerm("export"), async (c) => {
     .limit(10_000)
     .all();
   const header = [
-    "Order", "Created", "Customer", "Phone", "Address", "City", "Items", "Total", "COD due", "Payment", "Shopify fulfillment",
+    "Order", "Created", "Calling", "Processing", "Customer", "Phone", "Address", "City", "Items", "Total", "COD due", "Payment", "Shopify fulfillment",
     "Status", "Tags", "Courier stage", "Consignment ID", "Tracking code", "Steadfast status", "COD booked", "Collected", "Delivery charge",
-    "Fulfillment", "Settled payment", "Risk flags",
+    "Fulfillment", "Label", "Dispatch", "Settled payment", "Risk flags",
   ];
   const lines = [header.join(",")];
   for (const { o, c: cn } of rows) {
     lines.push(
       [
-        o.name, o.shopCreatedAt, o.customerName, o.phone ?? o.rawPhone, [o.address1, o.address2].filter(Boolean).join(", "), o.city,
+        o.name, o.shopCreatedAt, o.callingStatus, o.processingStatus, o.customerName, o.phone ?? o.rawPhone, [o.address1, o.address2].filter(Boolean).join(", "), o.city,
         o.lineItems.map((li) => `${li.quantity}x ${li.title}${li.variantTitle ? ` (${li.variantTitle})` : ""}`).join("; "),
         o.total, o.outstanding, o.financialStatus, o.shopifyFulfillmentStatus, o.statusId ? statuses.get(o.statusId) : "",
         (o.internalTags ?? []).join("; "), o.courierStage, cn?.consignmentId, cn?.trackingCode, cn?.status, cn?.codAmount,
-        cn?.collectedAmount, cn?.deliveryCharge, o.fulfillmentState, cn?.paymentId, o.riskDismissed ? "" : (o.riskFlags ?? []).join("; "),
+        cn?.collectedAmount, cn?.deliveryCharge, o.fulfillmentState, o.labelStatus, o.dispatchStatus, cn?.paymentId, o.riskDismissed ? "" : (o.riskFlags ?? []).join("; "),
       ]
         .map(csvEscape)
         .join(","),
@@ -188,10 +200,10 @@ orderRoutes.get("/print", requirePerm("export"), async (c) => {
   const ids = (c.req.query("ids") ?? "").split(",").map(Number).filter(Boolean).slice(0, 500);
   const appSettings = await getSettings(db);
   const rows = await db
-    .select({ o: orders, c: consignments })
+    .select({ o: orders, c: pick(consignments, ["consignmentId", "trackingCode", "status", "codAmount", "collectedAmount", "deliveryCharge", "paymentId", "invoice", "note"]) })
     .from(orders)
     .leftJoin(consignments, eq(consignments.id, orders.activeConsignmentId))
-    .where(inArray(orders.id, ids))
+    .where(inList(orders.id, ids))
     .all();
   const byId = new Map(rows.map((r) => [r.o.id, r]));
   return c.json({
@@ -226,6 +238,10 @@ orderRoutes.get("/:id{[0-9]+}", async (c) => {
   const order = await loadOrder(db, Number(c.req.param("id")));
   if (!order) return c.json({ error: "Order not found" }, 404);
   const appSettings = await getSettings(db);
+  const [calls, dispatchHistory] = await Promise.all([
+    db.select().from(callLogs).where(eq(callLogs.orderId, order.id)).orderBy(desc(callLogs.createdAt), desc(callLogs.id)).all(),
+    orderHistory(db, order.id),
+  ]);
   const [customer, history, cons, events, notes, activity, rets, duplicates] = await Promise.all([
     order.customerId ? db.select().from(customers).where(eq(customers.id, order.customerId)).get() : null,
     order.customerId ? customerHistory(db, order.customerId) : null,
@@ -262,6 +278,8 @@ orderRoutes.get("/:id{[0-9]+}", async (c) => {
     notes: notes.map((n) => ({ ...n.note, userName: n.userName })),
     activity,
     returns: rets,
+    calls,
+    dispatchHistory,
     shopifyUrl: shopifyAdminOrderUrl(c.env, order.shopifyId),
   });
 });
@@ -346,12 +364,12 @@ orderRoutes.post("/bulk", requirePerm("orders.edit"), async (c) => {
   const db = getDb(c.env.DB);
   const { ids, action, value } = await c.req.json<{ ids: number[]; action: string; value?: string | number | null }>();
   if (!Array.isArray(ids) || !ids.length || ids.length > 500) return c.json({ error: "Select between 1 and 500 orders" }, 400);
-  const rows = await db.select({ id: orders.id, internalTags: orders.internalTags }).from(orders).where(inArray(orders.id, ids)).all();
+  const rows = await db.select({ id: orders.id, internalTags: orders.internalTags }).from(orders).where(inList(orders.id, ids)).all();
   const now = nowIso();
   switch (action) {
     case "set_status": {
       const statusId = value === null || value === "" ? null : Number(value);
-      await db.update(orders).set({ statusId, updatedAt: now }).where(inArray(orders.id, ids));
+      await db.update(orders).set({ statusId, updatedAt: now }).where(inList(orders.id, ids));
       break;
     }
     case "add_tag":
@@ -367,11 +385,11 @@ orderRoutes.post("/bulk", requirePerm("orders.edit"), async (c) => {
       break;
     }
     case "dismiss_risk":
-      await db.update(orders).set({ riskDismissed: true, updatedAt: now }).where(inArray(orders.id, ids));
+      await db.update(orders).set({ riskDismissed: true, updatedAt: now }).where(inList(orders.id, ids));
       break;
     case "archive":
     case "unarchive":
-      await db.update(orders).set({ archived: action === "archive", updatedAt: now }).where(inArray(orders.id, ids));
+      await db.update(orders).set({ archived: action === "archive", updatedAt: now }).where(inList(orders.id, ids));
       break;
     default:
       return c.json({ error: "Unknown action" }, 400);
@@ -421,4 +439,95 @@ orderRoutes.post("/:id{[0-9]+}/recheck-risk", requirePerm("orders.edit"), async 
   await refreshRiskFlags(db, id, await getSettings(db));
   await db.update(orders).set({ riskDismissed: false }).where(eq(orders.id, id));
   return c.json({ ok: true });
+});
+
+// ---------------------------------------------------------------------------
+// Calling / verification
+
+orderRoutes.post("/:id{[0-9]+}/calling", requirePerm("orders.call"), async (c) => {
+  const db = getDb(c.env.DB);
+  const body = await c.req.json<{ status: string; note?: string; callbackAt?: string | null }>();
+  const r = await setCallingStatus(db, c.get("user"), Number(c.req.param("id")), body);
+  c.executionCtx.waitUntil(processJobs(c.env, db, { limit: 3 }));
+  return c.json({ ok: true, ...r });
+});
+
+orderRoutes.post("/calling/bulk", requirePerm("orders.call"), async (c) => {
+  const db = getDb(c.env.DB);
+  const { ids, status, note } = await c.req.json<{ ids: number[]; status: string; note?: string }>();
+  if (!Array.isArray(ids) || !ids.length || ids.length > 200) return c.json({ error: "Select between 1 and 200 orders" }, 400);
+  const results: { orderId: number; ok: boolean; error?: string }[] = [];
+  for (const id of ids) {
+    try {
+      await setCallingStatus(db, c.get("user"), id, { status, note });
+      results.push({ orderId: id, ok: true });
+    } catch (err) {
+      results.push({ orderId: id, ok: false, error: (err as Error).message });
+    }
+  }
+  c.executionCtx.waitUntil(processJobs(c.env, db, { limit: 25 }));
+  return c.json({ results, updated: results.filter((r) => r.ok).length });
+});
+
+// ---------------------------------------------------------------------------
+// Cancel / delete in Shopify (fake orders etc.)
+
+orderRoutes.post("/:id{[0-9]+}/cancel", requirePerm("orders.cancel"), async (c) => {
+  const db = getDb(c.env.DB);
+  const id = Number(c.req.param("id"));
+  const order = await loadOrder(db, id);
+  if (!order) return c.json({ error: "Order not found" }, 404);
+  if (order.cancelledAt) return c.json({ error: "Order is already cancelled" }, 409);
+  const body = await c.req.json<{ reason: string; restock?: boolean; notifyCustomer?: boolean; staffNote?: string }>();
+  if (!CANCEL_REASONS.includes(body.reason as (typeof CANCEL_REASONS)[number])) return c.json({ error: "Invalid cancellation reason" }, 400);
+  if (order.activeConsignmentId && !["cancelled", "returned", "unbooked"].includes(order.courierStage)) {
+    return c.json({ error: "This order has an active Steadfast consignment. Stop the parcel with Steadfast first (the API cannot cancel consignments), then cancel the order." }, 409);
+  }
+  const job = await cancelOrder(c.env, db, order.shopifyId, {
+    reason: body.reason as (typeof CANCEL_REASONS)[number],
+    restock: body.restock ?? true,
+    notifyCustomer: body.notifyCustomer ?? false,
+    staffNote: body.staffNote,
+  });
+  await db.update(orders).set({ cancelRequestedAt: nowIso(), updatedAt: nowIso() }).where(eq(orders.id, id));
+  await logActivity(db, c.get("user"), "order.cancel_requested", { entityType: "order", entityId: id, orderId: id, details: { reason: body.reason, restock: body.restock ?? true, jobId: job?.id } });
+  // Shopify cancels asynchronously; the orders/cancelled webhook (or a refresh) records completion.
+  c.executionCtx.waitUntil(
+    (async () => {
+      await new Promise((r) => setTimeout(r, 3000));
+      const fresh = await fetchOrder(c.env, db, order.shopifyId).catch(() => null);
+      if (fresh) await upsertOrder(db, fresh, await getSettings(db));
+    })(),
+  );
+  return c.json({ ok: true, job });
+});
+
+/** Deletes in Shopify when allowed; otherwise archives (closes) it in Shopify and archives it here. */
+orderRoutes.post("/:id{[0-9]+}/delete", requirePerm("orders.cancel"), async (c) => {
+  const db = getDb(c.env.DB);
+  const id = Number(c.req.param("id"));
+  const order = await loadOrder(db, id);
+  if (!order) return c.json({ error: "Order not found" }, 404);
+  if (order.activeConsignmentId && !["cancelled", "returned", "delivered", "unbooked"].includes(order.courierStage)) {
+    return c.json({ error: "Orders with an active consignment cannot be deleted" }, 409);
+  }
+  const result = await deleteOrder(c.env, db, order.shopifyId);
+  let archivedInShopify = false;
+  if (!result.deleted) {
+    try {
+      await closeOrder(c.env, db, order.shopifyId);
+      archivedInShopify = true;
+    } catch (err) {
+      // Closing can also be refused (e.g. unpaid/unfulfilled rules); we still archive locally.
+      result.error = `${result.error ?? ""} ${(err as Error).message}`.trim();
+    }
+  }
+  await db.update(orders).set({ archived: true, updatedAt: nowIso() }).where(eq(orders.id, id));
+  await logActivity(db, c.get("user"), result.deleted ? "order.deleted_in_shopify" : "order.archived", {
+    entityType: "order",
+    entityId: id,
+    orderId: id,
+    details: { deleted: result.deleted, archivedInShopify, shopifyMessage: result.error },
+  });
+  return c.json({ deleted: result.deleted, archivedInShopify, archivedHere: true, message: result.error ?? null });
 });

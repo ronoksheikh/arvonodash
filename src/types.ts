@@ -53,6 +53,14 @@ export type OrderListRow = {
   trackingCode: string | null;
   consignmentStatus: string | null;
   consignmentCod: number | null;
+  callingStatus: string;
+  callAttempts: number;
+  callbackAt: string | null;
+  processingStatus: string;
+  shopifySyncStatus: string;
+  labelStatus: string;
+  dispatchStatus: string;
+  cancelRequestedAt: string | null;
 };
 
 export type Order = Omit<OrderListRow, "itemCount" | "trackingCode" | "consignmentStatus" | "consignmentCod"> & {
@@ -82,7 +90,20 @@ export type Order = Omit<OrderListRow, "itemCount" | "trackingCode" | "consignme
   shopifyFulfillmentIds: string[] | null;
   fulfilledAt: string | null;
   archived: boolean;
+  confirmedAt: string | null;
+  lastCallAt: string | null;
+  shopifySyncError: string | null;
+  bookedAt: string | null;
+  printedAt: string | null;
+  printCount: number;
+  printJobId: string | null;
+  dispatchedAt: string | null;
+  dispatchedBy: string | null;
+  courierReceivedAt: string | null;
 };
+
+export type CallLog = { id: number; outcome: string; note: string | null; callbackAt: string | null; userName: string | null; createdAt: string };
+export type DispatchEvent = { id: number; orderId: number; event: string; jobId: string | null; actor: string; note: string | null; createdAt: string };
 
 export type Consignment = {
   id: number;
@@ -184,5 +205,7 @@ export type OrderDetail = {
   notes: Note[];
   activity: Activity[];
   returns: ReturnRow[];
+  calls: CallLog[];
+  dispatchHistory: DispatchEvent[];
   shopifyUrl: string;
 };

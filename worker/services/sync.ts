@@ -1,5 +1,5 @@
-import { desc, eq, inArray, and, lte, sql } from "drizzle-orm";
-import type { DB } from "../db";
+import { desc, eq, and, lte, sql } from "drizzle-orm";
+import { inList, type DB } from "../db";
 import type { Env } from "../env";
 import { consignments, orders, payments, syncRuns, webhookEvents } from "../db/schema";
 import { fetchOrdersPage, normalizeRestOrder, shopifyConfigured } from "./shopify";
@@ -7,6 +7,7 @@ import { upsertOrder } from "./orders";
 import { getSettings, getValue, setValue } from "./settings";
 import { applyCourierUpdate, findConsignment } from "./courier";
 import { logActivity } from "./activity";
+import { enqueueJob } from "./jobs";
 import * as steadfast from "./steadfast";
 import { nowIso, toNumber } from "../lib/util";
 
@@ -114,6 +115,10 @@ export async function processShopifyEvent(db: DB, topic: string, payload: unknow
     case "orders/fulfilled":
     case "orders/partially_fulfilled": {
       const r = await upsertOrder(db, normalizeRestOrder(p), appSettings);
+      // REST payloads can't express states like "In progress"; re-read the order via GraphQL.
+      if (!r.stale && topic === "orders/updated") {
+        await enqueueJob(db, "shopify_refresh", `refresh:${p.id}:${p.updated_at}`, { shopifyOrderId: String(p.id) });
+      }
       if (topic === "orders/cancelled") {
         const order = await db.select().from(orders).where(eq(orders.id, r.id)).get();
         if (order && !["unbooked", "cancelled", "returned", "delivered"].includes(order.courierStage)) {
@@ -176,7 +181,7 @@ export async function retryFailedWebhooks(db: DB, opts: { ids?: number[]; limit?
     .from(webhookEvents)
     .where(
       opts.ids
-        ? inArray(webhookEvents.id, opts.ids)
+        ? inList(webhookEvents.id, opts.ids)
         : and(eq(webhookEvents.status, "failed"), lte(webhookEvents.attempts, 6), sql`${webhookEvents.receivedAt} > ${cutoff}`),
     )
     .limit(opts.limit ?? 20)
@@ -255,7 +260,7 @@ export async function syncPayments(env: Env, db: DB, maxPages = 2) {
         const r = await db
           .update(consignments)
           .set({ paymentId: id, settledAt: values.paidAt ?? now })
-          .where(inArray(consignments.consignmentId, cids))
+          .where(inList(consignments.consignmentId, cids))
           .returning({ id: consignments.id })
           .all();
         linked += r.length;
