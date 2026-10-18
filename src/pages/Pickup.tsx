@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { Alert, Badge, Button, Card, Checkbox, Group, Modal, Progress, ScrollArea, SimpleGrid, Stack, Table, Text, TextInput, Title, UnstyledButton } from "@mantine/core";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { AlarmClock, ArrowRight, CheckCircle2, PackageX, ScanLine, Truck, Undo2 } from "lucide-react";
+import { AlarmClock, CheckCircle2, PackageX, ScanLine, Truck, Undo2 } from "lucide-react";
 import { modals } from "@mantine/modals";
 import { useNavigate } from "react-router";
 import { api, notifyError, notifySuccess, post } from "../api";
@@ -85,7 +85,8 @@ export default function Pickup() {
   const [filter, setFilter] = useState<Stage | "not_ready" | null>(null);
   const [handoverOpen, setHandoverOpen] = useState(false);
   const [openOrder, setOpenOrder] = useState<number | null>(null);
-  const q = useQuery({ queryKey: ["pickup-plan"], queryFn: () => api<Plan>("/ops/pickup"), refetchInterval: 15_000 });
+  // Every 2 seconds, so scans made on another device (phone, second laptop) show up live.
+  const q = useQuery({ queryKey: ["pickup-plan"], queryFn: () => api<Plan>("/ops/pickup"), refetchInterval: 2_000 });
 
   const undo = useMutation({
     mutationFn: (id: number) => post<{ reverted: number[] }>("/ops/pickup/undo-handover", { orderIds: [id], reason: "Rider did not take it" }),
@@ -105,7 +106,8 @@ export default function Pickup() {
     });
 
   if (q.isLoading) return <LoadingState />;
-  if (q.error || !q.data) return <ErrorState error={q.error} onRetry={() => q.refetch()} />;
+  // A failed 2-second refresh keeps showing the last plan; only a page with no data shows the error.
+  if (!q.data) return <ErrorState error={q.error} onRetry={() => q.refetch()} />;
   const p = q.data;
   const c = p.counts;
   const cutoffLeft = left(p.cutoffAt, now);
@@ -133,8 +135,6 @@ export default function Pickup() {
           </Group>
         }
       />
-
-      <FlowGuide />
 
       <SimpleGrid cols={{ base: 1, sm: 3 }} mb="md">
         <Card padding="md">
@@ -287,37 +287,6 @@ export default function Pickup() {
       <HandoverModal plan={p} opened={handoverOpen} onClose={() => setHandoverOpen(false)} onDone={() => qc.invalidateQueries({ queryKey: ["pickup-plan"] })} />
       <OrderDrawer orderId={openOrder} onClose={() => setOpenOrder(null)} onChanged={() => q.refetch()} />
     </>
-  );
-}
-
-const FLOW = [
-  { label: "Booked", who: "you / auto-book" },
-  { label: "Label printed", who: "print queue" },
-  { label: "Scanned = packed", who: "scanner" },
-  { label: "Handed to rider", who: "you, at pickup" },
-  { label: "Picked up", who: "Steadfast, automatic" },
-];
-
-/** The five steps every parcel goes through, and who moves it to the next one. */
-function FlowGuide() {
-  return (
-    <Card padding="sm" mb="md">
-      <Group gap={6} wrap="wrap">
-        {FLOW.map((f, i) => (
-          <Group key={f.label} gap={6} wrap="nowrap">
-            {i > 0 && <ArrowRight size={14} color="var(--mantine-color-dimmed)" />}
-            <div>
-              <Text size="xs" fw={600}>{i + 1}. {f.label}</Text>
-              <Text size="xs" c="dimmed">{f.who}</Text>
-            </div>
-          </Group>
-        ))}
-      </Group>
-      <Text size="xs" c="dimmed" mt={6}>
-        Steadfast has no pickup API: "handed to rider" is our own record, and "picked up" comes from Steadfast's status (it leaves "in review") by webhook or polling.
-        A parcel handed over without the checklist is marked automatically when Steadfast picks it up.
-      </Text>
-    </Card>
   );
 }
 
