@@ -115,71 +115,58 @@ docs/API_NOTES.md  API research: endpoints, auth, scopes, limits, what is not su
 
 ## Deployment
 
-### 1. Prerequisites
-- A Cloudflare account. **Workers Paid** is recommended, for CPU time on login hashing and for
-  subrequest headroom.
-- Node 20+, then `npm install`.
-- `npx wrangler login`
+No `.env` file or secrets are needed. Every credential is entered in the app.
 
-### 2. Create the D1 database
+### 1. Deploy
 ```bash
-npx wrangler d1 create arvono-fulfillment
+npm install
+npx wrangler login
+npm run deploy
 ```
-Copy the printed `database_id` into `wrangler.jsonc` → `d1_databases[0].database_id`, then run:
-```bash
-npm run db:migrate:remote
-```
+On the first deploy, Wrangler **creates the D1 database automatically** and writes its ID into
+`wrangler.jsonc`; commit that change. Database migrations run automatically when the Worker starts.
 
-### 3. Create the Shopify app
+Alternatively, connect the GitHub repo in the Cloudflare dashboard (Workers & Pages → Create →
+Import a repository). Use `npm run build` as the build command and `npx wrangler deploy` as the
+deploy command.
+
+Webhook URLs follow whatever domain the app is served on: the `*.workers.dev` URL, or a custom
+domain added in Cloudflare.
+
+### 2. First login
+Open the URL and create the **owner** account.
+
+### 3. Create the Shopify app (Dev Dashboard)
 1. In the Shopify **Dev Dashboard**, create an app in the same organization as the store.
 2. Add the Admin API scopes: `read_orders`, `write_orders`, `read_customers`,
    `read_merchant_managed_fulfillment_orders` and `write_merchant_managed_fulfillment_orders`.
    Add `read_all_orders` if you want to import orders older than 60 days.
-3. Make sure the app user has the *fulfill and ship orders* permission, and *delete orders* if you
-   want deletions.
-4. Request **protected customer data** access for name, email, phone and address.
-5. Release a version and install the app on the store.
-6. Copy the **Client ID** and **Client secret** from the app's Settings page.
+3. Request **protected customer data** access for name, email, phone and address.
+4. Release a version and install the app on the store.
 
-If you still have a legacy admin-created custom app, you can use its `shpat_…` token as
-`SHOPIFY_ACCESS_TOKEN` instead. Set `SHOPIFY_WEBHOOK_SECRET` if its webhook signing secret
-differs from the client secret.
+### 4. Connect everything in Settings → Connections
+1. **Shopify**: enter the store domain (`yourstore.myshopify.com`), the Client ID and the Client
+   secret. Click **Save**, then **Test connection**, then **Register webhooks**.
+2. **Steadfast**: enter the API key and Secret key from the Steadfast panel. Click **Save**, then
+   **Test connection**.
+3. **Steadfast webhook**: copy the *Callback URL* and the *Auth Token (Bearer)* shown on the same
+   page into Steadfast panel → API → Webhook. The token is generated automatically.
+4. **Label service**: in Settings → API keys, create a key and give it to the label service. See
+   [docs/DISPATCH_API.md](docs/DISPATCH_API.md).
 
-### 4. Configure variables and secrets
-Edit `vars` in `wrangler.jsonc`: set `SHOPIFY_SHOP_DOMAIN` (for example `arvono.myshopify.com`).
-Then store the secrets:
-```bash
-npx wrangler secret put SHOPIFY_CLIENT_ID
-npx wrangler secret put SHOPIFY_CLIENT_SECRET
-npx wrangler secret put STEADFAST_API_KEY
-npx wrangler secret put STEADFAST_SECRET_KEY
-npx wrangler secret put STEADFAST_WEBHOOK_TOKEN   # any long random string, e.g. `openssl rand -hex 32`
-```
+### 5. Import existing orders
+Go to Sync & webhooks → *Start import*. Imported orders are never booked.
 
-### 5. Deploy
-```bash
-npm run deploy
-```
-Open the Worker URL, or attach a custom domain in the Cloudflare dashboard. The first visit asks
-you to create the **owner** account.
-
-### 6. Connect webhooks
-- **Shopify**: Settings → Connections → *Register webhooks*. This subscribes `orders/create`,
-  `orders/updated`, `orders/cancelled` and `orders/delete` to `https://<your-domain>/webhooks/shopify`.
-- **Steadfast**: in the Steadfast merchant panel's API / webhook settings, set:
-  - *Callback URL* to `https://<your-domain>/webhooks/steadfast`
-  - *Auth Token (Bearer)* to the value of `STEADFAST_WEBHOOK_TOKEN`
-
-  Use *Test connection* in Settings to verify both APIs.
-
-### 7. Connect the label service
-In Settings → API keys, create a key with `dispatch:read` and `dispatch:print`. Add
-`dispatch:dispatch` if the service should also record handover. Then follow
-[docs/DISPATCH_API.md](docs/DISPATCH_API.md).
-
-### 8. Import existing orders
-Go to Sync & webhooks → *Start import* and choose a number of days. Large imports continue
-automatically in the background. Imported orders are never booked.
+### Optional
+- **Encrypt credentials at rest**: before saving the connections, run
+  `npx wrangler secret put APP_ENCRYPTION_KEY` with a long random value, such as the output of
+  `openssl rand -hex 32`. Credentials are always kept server-side and are only ever shown masked;
+  this adds AES-GCM encryption inside D1.
+- **Worker secrets instead of the dashboard**: any of `SHOPIFY_SHOP_DOMAIN`, `SHOPIFY_CLIENT_ID`,
+  `SHOPIFY_CLIENT_SECRET`, `SHOPIFY_ACCESS_TOKEN`, `SHOPIFY_WEBHOOK_SECRET`, `STEADFAST_API_KEY`,
+  `STEADFAST_SECRET_KEY` and `STEADFAST_WEBHOOK_TOKEN` can be set with `wrangler secret put`. A
+  secret overrides the dashboard value.
+- **Plan**: Workers Paid is recommended, for CPU time on login hashing and for subrequest headroom.
 
 ### Recommended hardening
 - Put the dashboard behind **Cloudflare Access** (Zero Trust) for an extra login layer. The
@@ -190,8 +177,6 @@ automatically in the background. Imported orders are never booked.
 ## Local development
 
 ```bash
-cp .dev.vars.example .dev.vars        # fill in credentials (or use the mocks below)
-npm run db:migrate:local
 npm run dev                            # http://localhost:5173 — Worker + React with HMR
 ```
 To trigger the cron locally, open
@@ -204,9 +189,9 @@ npm test                 # unit tests (phone normalization, status mapping, HMAC
 npm run typecheck
 ```
 
-The end-to-end suite has 41 checks. It covers the following, against a mock Shopify/Steadfast
+The end-to-end suite has 42 checks. It covers the following, against a mock Shopify/Steadfast
 API:
-- setup and login
+- setup, login, and connecting Shopify and Steadfast from the dashboard
 - webhooks with HMAC and bearer auth
 - idempotency and duplicate detection
 - manual booking and duplicate-booking refusal
@@ -222,16 +207,10 @@ API:
 To run it:
 
 ```bash
-# .dev.vars for the mock run:
-#   SHOPIFY_SHOP_DOMAIN=arvono-test.myshopify.com
-#   SHOPIFY_CLIENT_ID=test-client
-#   SHOPIFY_CLIENT_SECRET=shopify-secret
+# .dev.vars for the mock run (the suite enters credentials through Settings → Connections):
 #   SHOPIFY_ADMIN_URL_OVERRIDE=http://localhost:8790
 #   STEADFAST_BASE_URL=http://localhost:8790/api/v1
-#   STEADFAST_API_KEY=sf-key
-#   STEADFAST_SECRET_KEY=sf-secret
-#   STEADFAST_WEBHOOK_TOKEN=sf-webhook-token
-rm -rf .wrangler && npm run db:migrate:local
+rm -rf .wrangler
 node test/e2e/mock-server.mjs &   # mock APIs on :8790
 npm run dev &                      # app on :5173
 npm run test:e2e
@@ -254,8 +233,8 @@ npm run test:e2e
 | Data retention | Processed webhook payloads and finished jobs are pruned after 60 days |
 
 ## Security notes
-- API credentials exist only as Worker secrets. The browser talks only to `/api/*` on the same
-  origin.
+- API credentials are stored server-side, either in D1 (entered in Settings, optionally encrypted
+  with `APP_ENCRYPTION_KEY`) or as Worker secrets. The browser only ever sees masked hints.
 - Sessions are random 256-bit tokens. Only their SHA-256 hash is stored, and they are sent in
   `HttpOnly`, `Secure`, `SameSite=Lax` cookies with a 14-day sliding expiry.
 - Passwords are hashed with PBKDF2-SHA256 (100k iterations, the Workers maximum).

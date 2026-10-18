@@ -10,7 +10,8 @@ import { hashPassword } from "../lib/crypto";
 import { nowIso } from "../lib/util";
 import { logActivity } from "../services/activity";
 import { getSettings, saveSettings, getValues } from "../services/settings";
-import { getShopInfo, listWebhookSubscriptions, registerWebhooks, shopifyConfigured } from "../services/shopify";
+import { getShopInfo, listWebhookSubscriptions, registerWebhooks, resetShopifyToken, shopifyConfigured } from "../services/shopify";
+import { CREDENTIAL_KEYS, describeCredentials, loadCredentials, normalizeShopDomain, saveCredentials, type Credentials } from "../services/credentials";
 import { getBalance, steadfastConfigured } from "../services/steadfast";
 import { getImportState, latestRuns, reconcileShopify, recordRun, retryFailedWebhooks, runImportStep, startImport, syncPayments } from "../services/sync";
 import { processJobs, enqueueJob } from "../services/jobs";
@@ -29,6 +30,9 @@ settingsRoutes.get("/", async (c) => {
   return c.json({
     settings: await getSettings(db),
     statuses: await db.select().from(customStatuses).orderBy(customStatuses.sortOrder).all(),
+    credentials: c.get("user").permissions.includes("settings.manage") ? await describeCredentials(c.env) : null,
+    steadfastWebhookToken: c.get("user").permissions.includes("settings.manage") ? c.env.STEADFAST_WEBHOOK_TOKEN ?? null : null,
+    encryptedAtRest: Boolean(c.env.APP_ENCRYPTION_KEY),
     connections: {
       shopify: {
         configured: shopifyConfigured(c.env),
@@ -47,6 +51,38 @@ settingsRoutes.get("/", async (c) => {
     },
     sync: state,
   });
+});
+
+// Connection credentials, editable from the dashboard. Values are never returned unmasked,
+// except the Steadfast webhook token which must be pasted into the Steadfast panel.
+settingsRoutes.put("/connections", requirePerm("settings.manage"), async (c) => {
+  const db = getDb(c.env.DB);
+  const body = await c.req.json<Partial<Record<keyof Credentials, string | null>>>();
+  const current = await loadCredentials(c.env, true);
+  const next: Credentials = { ...current };
+  for (const k of CREDENTIAL_KEYS) {
+    if (!(k in body)) continue;
+    const v = body[k];
+    if (v === null) delete next[k];
+    else if (typeof v === "string" && v.trim()) next[k] = k === "SHOPIFY_SHOP_DOMAIN" ? normalizeShopDomain(v) : v.trim();
+  }
+  if (next.SHOPIFY_SHOP_DOMAIN && !/^[a-z0-9][a-z0-9-]*\.myshopify\.com$/.test(next.SHOPIFY_SHOP_DOMAIN)) {
+    return c.json({ error: "Store domain must be the permanent *.myshopify.com domain (e.g. arvono.myshopify.com)" }, 400);
+  }
+  await saveCredentials(c.env, next);
+  await resetShopifyToken(db);
+  await logActivity(db, c.get("user"), "settings.connections_updated", {
+    details: { changed: CREDENTIAL_KEYS.filter((k) => k in body) },
+  });
+  return c.json({ ok: true, credentials: await describeCredentials(c.env) });
+});
+
+settingsRoutes.post("/connections/regenerate-webhook-token", requirePerm("settings.manage"), async (c) => {
+  const db = getDb(c.env.DB);
+  const current = await loadCredentials(c.env, true);
+  await saveCredentials(c.env, { ...current, STEADFAST_WEBHOOK_TOKEN: randomToken(24) });
+  await logActivity(db, c.get("user"), "settings.webhook_token_regenerated");
+  return c.json({ ok: true });
 });
 
 settingsRoutes.put("/", requirePerm("settings.manage"), async (c) => {

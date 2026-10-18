@@ -1,9 +1,9 @@
 import { useEffect, useState } from "react";
 import {
-  Alert, Badge, Button, Card, Checkbox, ColorSwatch, Group, Modal, NumberInput, PasswordInput, Radio, Select, SimpleGrid, Stack, Switch, Table, Tabs, Text, TextInput, ActionIcon, Code, Textarea, Tooltip,
+  Alert, Badge, Button, Card, SegmentedControl, Checkbox, ColorSwatch, Group, Modal, NumberInput, PasswordInput, Radio, Select, SimpleGrid, Stack, Switch, Table, Tabs, Text, TextInput, ActionIcon, Code, Textarea, Tooltip,
 } from "@mantine/core";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { CheckCircle2, Plug, Plus, Trash2, XCircle, Webhook, Star } from "lucide-react";
+import { CheckCircle2, Plug, Plus, Trash2, Webhook, Star } from "lucide-react";
 import { api, del, notifyError, notifySuccess, patch, post, put } from "../api";
 import { useAuth, useCan } from "../auth";
 import { Copyable, ErrorState, LoadingState, PageHeader } from "../components/ui";
@@ -28,6 +28,9 @@ type AppSettings = {
 };
 type SettingsData = {
   settings: AppSettings;
+  credentials: Record<string, CredInfo> | null;
+  steadfastWebhookToken: string | null;
+  encryptedAtRest: boolean;
   statuses: CustomStatus[];
   connections: {
     shopify: { configured: boolean; shopDomain: string; apiVersion: string; authMode: string; webhookSecret: boolean; webhookUrl: string };
@@ -64,25 +67,70 @@ export default function SettingsPage() {
   );
 }
 
-function Status({ ok, label }: { ok: boolean; label: string }) {
-  return (
-    <Group gap={6}>
-      {ok ? <CheckCircle2 size={15} color="var(--mantine-color-teal-6)" /> : <XCircle size={15} color="var(--mantine-color-red-6)" />}
-      <Text size="sm">{label}</Text>
-    </Group>
-  );
+
+type CredInfo = { set: boolean; source: "worker_secret" | "dashboard" | null; hint: string | null };
+
+function CredentialField({ name, label, description, info, secret, value, onChange, disabled }: {
+  name: string; label: string; description?: string; info?: CredInfo; secret?: boolean; value: string; onChange: (v: string) => void; disabled?: boolean;
+}) {
+  const fromSecret = info?.source === "worker_secret";
+  const placeholder = info?.set ? `${info.hint ?? "Saved"} — leave empty to keep` : undefined;
+  const props = {
+    label,
+    description: fromSecret ? "Set as a Cloudflare Worker secret (overrides this field)" : description,
+    placeholder,
+    value,
+    onChange: (e: React.ChangeEvent<HTMLInputElement>) => onChange(e.currentTarget.value),
+    disabled: disabled || fromSecret,
+    autoComplete: "off",
+    name,
+    rightSection: info?.set ? <CheckCircle2 size={15} color="var(--mantine-color-teal-6)" /> : undefined,
+  };
+  return secret ? <PasswordInput {...props} /> : <TextInput {...props} />;
 }
 
 function Connections({ d }: { d: SettingsData }) {
   const can = useCan();
+  const qc = useQueryClient();
   const { shopify, steadfast } = d.connections;
+  const creds = d.credentials;
+  const [form, setForm] = useState<Record<string, string>>({});
+  const [authMode, setAuthMode] = useState<string>(creds?.SHOPIFY_ACCESS_TOKEN.set ? "token" : "client");
+  const set = (k: string) => (v: string) => setForm({ ...form, [k]: v });
+  const disabled = !can("settings.manage");
   const testShopify = useMutation({ mutationFn: () => post<{ ok: boolean; error?: string; shop?: { name: string; currencyCode: string }; webhooks?: { topic: string; uri: string }[] }>("/settings/test/shopify") });
   const testSteadfast = useMutation({ mutationFn: () => post<{ ok: boolean; error?: string; balance?: number }>("/settings/test/steadfast") });
+  const save = useMutation({
+    mutationFn: (body: Record<string, string | null>) => put("/settings/connections", body),
+    onSuccess: () => {
+      setForm({});
+      notifySuccess("Connection details saved");
+      qc.invalidateQueries({ queryKey: ["settings"] });
+      testShopify.reset();
+      testSteadfast.reset();
+    },
+    onError: (e) => notifyError(e, "Could not save"),
+  });
+  const regenerate = useMutation({
+    mutationFn: () => post("/settings/connections/regenerate-webhook-token"),
+    onSuccess: () => { notifySuccess("New token generated — update it in the Steadfast panel"); qc.invalidateQueries({ queryKey: ["settings"] }); },
+    onError: (e) => notifyError(e),
+  });
   const registerHooks = useMutation({
     mutationFn: () => post<{ results: { topic: string; status: string; message?: string }[] }>("/settings/shopify/webhooks"),
     onSuccess: (r) => notifySuccess(r.results.map((x) => `${x.topic}: ${x.status}${x.message ? ` (${x.message})` : ""}`).join(", "), "Shopify webhooks"),
     onError: (e) => notifyError(e),
   });
+  const saveSection = (keys: string[], clear: string[] = []) => {
+    const body: Record<string, string | null> = {};
+    for (const k of keys) if (form[k]?.trim()) body[k] = form[k].trim();
+    for (const k of clear) body[k] = null;
+    save.mutate(body);
+  };
+  const dirty = (keys: string[]) => keys.some((k) => form[k]?.trim());
+  const shopifyKeys = ["SHOPIFY_SHOP_DOMAIN", "SHOPIFY_CLIENT_ID", "SHOPIFY_CLIENT_SECRET", "SHOPIFY_ACCESS_TOKEN", "SHOPIFY_WEBHOOK_SECRET"];
+  const steadfastKeys = ["STEADFAST_API_KEY", "STEADFAST_SECRET_KEY"];
+
   return (
     <SimpleGrid cols={{ base: 1, lg: 2 }} spacing="md">
       <Card>
@@ -90,26 +138,42 @@ function Connections({ d }: { d: SettingsData }) {
           <Text fw={600}>Shopify</Text>
           <Badge color={shopify.configured ? "teal" : "red"}>{shopify.configured ? "Configured" : "Not configured"}</Badge>
         </Group>
-        <Stack gap="xs">
-          <Status ok={shopify.configured} label={`Store ${shopify.shopDomain} · API ${shopify.apiVersion}`} />
-          <Status ok={shopify.configured} label={shopify.authMode === "access_token" ? "Admin API access token" : "Client credentials (Dev Dashboard app)"} />
-          <Status ok={shopify.webhookSecret} label="Webhook HMAC secret" />
-          <Text size="sm" c="dimmed" mt="xs">Webhook endpoint</Text>
+        <Stack gap="sm">
+          <CredentialField name="shop" label="Store domain" description="Permanent domain, e.g. arvono.myshopify.com" info={creds?.SHOPIFY_SHOP_DOMAIN} value={form.SHOPIFY_SHOP_DOMAIN ?? ""} onChange={set("SHOPIFY_SHOP_DOMAIN")} disabled={disabled} />
+          <SegmentedControl
+            size="xs"
+            value={authMode}
+            onChange={setAuthMode}
+            data={[{ value: "client", label: "Dev Dashboard app (Client ID + secret)" }, { value: "token", label: "Admin API access token" }]}
+            disabled={disabled}
+          />
+          {authMode === "client" ? (
+            <>
+              <CredentialField name="client_id" label="Client ID" info={creds?.SHOPIFY_CLIENT_ID} value={form.SHOPIFY_CLIENT_ID ?? ""} onChange={set("SHOPIFY_CLIENT_ID")} disabled={disabled} />
+              <CredentialField name="client_secret" label="Client secret" description="Also used to verify webhook signatures" secret info={creds?.SHOPIFY_CLIENT_SECRET} value={form.SHOPIFY_CLIENT_SECRET ?? ""} onChange={set("SHOPIFY_CLIENT_SECRET")} disabled={disabled} />
+            </>
+          ) : (
+            <>
+              <CredentialField name="access_token" label="Admin API access token" description="shpat_… from a legacy custom app" secret info={creds?.SHOPIFY_ACCESS_TOKEN} value={form.SHOPIFY_ACCESS_TOKEN ?? ""} onChange={set("SHOPIFY_ACCESS_TOKEN")} disabled={disabled} />
+              <CredentialField name="webhook_secret" label="Webhook signing secret" description="Shown in Shopify admin → Notifications → Webhooks" secret info={creds?.SHOPIFY_WEBHOOK_SECRET} value={form.SHOPIFY_WEBHOOK_SECRET ?? ""} onChange={set("SHOPIFY_WEBHOOK_SECRET")} disabled={disabled} />
+            </>
+          )}
+          <Text size="sm" c="dimmed">Webhook endpoint (registered automatically)</Text>
           <Copyable value={shopify.webhookUrl} />
           {testShopify.data && (
             testShopify.data.ok ? (
-              <Alert color="teal" variant="light" mt="xs">
-                Connected to <b>{testShopify.data.shop?.name}</b> ({testShopify.data.shop?.currencyCode}). Webhooks registered: {testShopify.data.webhooks?.length ? testShopify.data.webhooks.map((w) => w.topic).join(", ") : "none"}
+              <Alert color="teal" variant="light">
+                Connected to <b>{testShopify.data.shop?.name}</b> ({testShopify.data.shop?.currencyCode}). Webhooks: {testShopify.data.webhooks?.length ? testShopify.data.webhooks.map((w) => w.topic).join(", ") : "none registered yet"}
               </Alert>
-            ) : <Alert color="red" variant="light" mt="xs">{testShopify.data.error}</Alert>
+            ) : <Alert color="red" variant="light">{testShopify.data.error}</Alert>
           )}
-          {can("settings.manage") && (
-            <Group mt="sm" gap="xs">
-              <Button variant="default" size="xs" leftSection={<Plug size={14} />} loading={testShopify.isPending} onClick={() => testShopify.mutate()}>Test connection</Button>
-              <Button variant="default" size="xs" leftSection={<Webhook size={14} />} loading={registerHooks.isPending} onClick={() => registerHooks.mutate()}>Register webhooks</Button>
+          {!disabled && (
+            <Group gap="xs">
+              <Button size="xs" disabled={!dirty(shopifyKeys)} loading={save.isPending} onClick={() => saveSection(shopifyKeys, authMode === "client" ? (creds?.SHOPIFY_ACCESS_TOKEN.source === "dashboard" ? ["SHOPIFY_ACCESS_TOKEN"] : []) : [])}>Save</Button>
+              <Button variant="default" size="xs" leftSection={<Plug size={14} />} disabled={!shopify.configured} loading={testShopify.isPending} onClick={() => testShopify.mutate()}>Test connection</Button>
+              <Button variant="default" size="xs" leftSection={<Webhook size={14} />} disabled={!shopify.configured} loading={registerHooks.isPending} onClick={() => registerHooks.mutate()}>Register webhooks</Button>
             </Group>
           )}
-          <Text size="xs" c="dimmed" mt="xs">Credentials are Cloudflare Worker secrets (SHOPIFY_CLIENT_ID / SHOPIFY_CLIENT_SECRET) and are never sent to the browser.</Text>
         </Stack>
       </Card>
       <Card>
@@ -117,19 +181,32 @@ function Connections({ d }: { d: SettingsData }) {
           <Text fw={600}>Steadfast Courier</Text>
           <Badge color={steadfast.configured ? "teal" : "red"}>{steadfast.configured ? "Configured" : "Not configured"}</Badge>
         </Group>
-        <Stack gap="xs">
-          <Status ok={steadfast.configured} label={`API keys · ${steadfast.baseUrl}`} />
-          <Status ok={steadfast.webhookToken} label="Webhook bearer token" />
-          <Text size="sm" c="dimmed" mt="xs">Callback URL (paste into Steadfast panel → API → Webhook)</Text>
+        <Stack gap="sm">
+          <CredentialField name="sf_key" label="API key" description="Steadfast panel → API" secret info={creds?.STEADFAST_API_KEY} value={form.STEADFAST_API_KEY ?? ""} onChange={set("STEADFAST_API_KEY")} disabled={disabled} />
+          <CredentialField name="sf_secret" label="Secret key" secret info={creds?.STEADFAST_SECRET_KEY} value={form.STEADFAST_SECRET_KEY ?? ""} onChange={set("STEADFAST_SECRET_KEY")} disabled={disabled} />
+          {testSteadfast.data && (testSteadfast.data.ok ? <Alert color="teal" variant="light">Connected. Current balance {money(testSteadfast.data.balance, true)}</Alert> : <Alert color="red" variant="light">{testSteadfast.data.error}</Alert>)}
+          {!disabled && (
+            <Group gap="xs">
+              <Button size="xs" disabled={!dirty(steadfastKeys)} loading={save.isPending} onClick={() => saveSection(steadfastKeys)}>Save</Button>
+              <Button variant="default" size="xs" leftSection={<Plug size={14} />} disabled={!steadfast.configured} loading={testSteadfast.isPending} onClick={() => testSteadfast.mutate()}>Test connection</Button>
+            </Group>
+          )}
+          <Text fw={500} size="sm" mt="sm">Webhook — paste both into Steadfast panel → API → Webhook</Text>
+          <Text size="xs" c="dimmed">Callback URL</Text>
           <Copyable value={steadfast.webhookUrl} />
-          <Text size="xs" c="dimmed">Use the value of the STEADFAST_WEBHOOK_TOKEN secret as the “Auth Token (Bearer)”.</Text>
-          {testSteadfast.data && (testSteadfast.data.ok ? <Alert color="teal" variant="light" mt="xs">Connected. Current balance {money(testSteadfast.data.balance, true)}</Alert> : <Alert color="red" variant="light" mt="xs">{testSteadfast.data.error}</Alert>)}
-          {can("settings.manage") && <Button variant="default" size="xs" w="fit-content" mt="sm" leftSection={<Plug size={14} />} loading={testSteadfast.isPending} onClick={() => testSteadfast.mutate()}>Test connection</Button>}
+          <Text size="xs" c="dimmed">Auth Token (Bearer)</Text>
+          {d.steadfastWebhookToken ? <Copyable value={d.steadfastWebhookToken} /> : <Text size="sm" c="dimmed">Hidden</Text>}
+          {!disabled && creds?.STEADFAST_WEBHOOK_TOKEN.source !== "worker_secret" && (
+            <Button size="compact-xs" variant="subtle" color="red" w="fit-content" loading={regenerate.isPending} onClick={() => regenerate.mutate()}>Regenerate token</Button>
+          )}
         </Stack>
       </Card>
       <Card style={{ gridColumn: "1 / -1" }}>
-        <Text fw={600} mb="xs">Background sync</Text>
-        <Text size="sm" c="dimmed">Cron last ran {d.sync["cron.lastRun"] ? ago(d.sync["cron.lastRun"] as string) : "never (deploy to enable the every-5-minute schedule)"}. Shopify reconciliation watermark: <Code>{String(d.sync["shopify.reconcileWatermark"] ?? "not started")}</Code></Text>
+        <Text fw={600} mb="xs">Security & background sync</Text>
+        <Text size="sm" c="dimmed">
+          Credentials are stored server-side in D1 and never sent to the browser (only masked hints). {d.encryptedAtRest ? "They are encrypted at rest with APP_ENCRYPTION_KEY." : "Optional: set the APP_ENCRYPTION_KEY Worker secret before saving to encrypt them at rest."}
+        </Text>
+        <Text size="sm" c="dimmed" mt="xs">Cron last ran {d.sync["cron.lastRun"] ? ago(d.sync["cron.lastRun"] as string) : "never (runs every 5 minutes once deployed)"}. Shopify reconciliation watermark: <Code>{String(d.sync["shopify.reconcileWatermark"] ?? "not started")}</Code></Text>
       </Card>
     </SimpleGrid>
   );

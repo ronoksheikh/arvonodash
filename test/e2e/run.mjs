@@ -6,7 +6,7 @@ import assert from "node:assert/strict";
 const BASE = process.env.BASE ?? "http://localhost:5173";
 const MOCK = process.env.MOCK ?? "http://localhost:8790";
 const SHOPIFY_SECRET = "shopify-secret";
-const SF_TOKEN = "sf-webhook-token";
+let SF_TOKEN = "";
 let cookie = "";
 let passed = 0;
 
@@ -93,6 +93,29 @@ await step("first-run setup creates owner", async () => {
   assert.equal(again.status, 409);
   const me = await call("GET", "/api/auth/me");
   assert.equal(me.body.user.role, "owner");
+});
+
+await step("connections are configured from the dashboard (no secrets file)", async () => {
+  const before = await call("GET", "/api/settings");
+  assert.equal(before.body.connections.shopify.configured, false);
+  assert.ok(before.body.steadfastWebhookToken?.length >= 32, "webhook token auto-generated");
+  const bad = await call("PUT", "/api/settings/connections", { SHOPIFY_SHOP_DOMAIN: "arvono.com" });
+  assert.equal(bad.status, 400);
+  const r = await call("PUT", "/api/settings/connections", {
+    SHOPIFY_SHOP_DOMAIN: "https://Arvono-Test.myshopify.com/",
+    SHOPIFY_CLIENT_ID: "test-client",
+    SHOPIFY_CLIENT_SECRET: SHOPIFY_SECRET,
+    STEADFAST_API_KEY: "sf-key",
+    STEADFAST_SECRET_KEY: "sf-secret",
+  });
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  assert.equal(r.body.credentials.SHOPIFY_CLIENT_SECRET.hint, "••••cret", "secrets only returned masked");
+  const after = await call("GET", "/api/settings");
+  assert.equal(after.body.connections.shopify.configured, true);
+  assert.equal(after.body.connections.shopify.shopDomain, "arvono-test.myshopify.com");
+  assert.equal(after.body.connections.steadfast.configured, true);
+  assert.ok(!JSON.stringify(after.body).includes(SHOPIFY_SECRET), "client secret never sent to browser");
+  SF_TOKEN = after.body.steadfastWebhookToken;
 });
 
 await step("API rejects missing CSRF header and anonymous access", async () => {

@@ -32,6 +32,12 @@ export function shopifyAdminOrderUrl(env: Env, orderId: string): string {
   return `https://${env.SHOPIFY_SHOP_DOMAIN}/admin/orders/${orderId}`;
 }
 
+/** Forget cached tokens (after credentials change in Settings). */
+export async function resetShopifyToken(db: DB) {
+  memoryToken = null;
+  await setValue(db, TOKEN_KEY, null);
+}
+
 async function getAccessToken(env: Env, db: DB, forceRefresh = false): Promise<string> {
   if (env.SHOPIFY_ACCESS_TOKEN) return env.SHOPIFY_ACCESS_TOKEN;
   if (!env.SHOPIFY_CLIENT_ID || !env.SHOPIFY_CLIENT_SECRET) {

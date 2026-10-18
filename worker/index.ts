@@ -19,6 +19,8 @@ import { getImportState, reconcileShopify, recordRun, retryFailedWebhooks, runIm
 import { shopifyConfigured } from "./services/shopify";
 import { steadfastConfigured } from "./services/steadfast";
 import { setValue } from "./services/settings";
+import { ensureMigrated } from "./db/migrate";
+import { hydrateEnv } from "./services/credentials";
 
 const app = new Hono<AppEnv>();
 
@@ -102,10 +104,26 @@ async function scheduled(controller: ScheduledController, env: Env) {
   await setValue(db, "cron.lastRun", nowIso());
 }
 
+/** Every entry point: apply pending migrations, then fill in credentials saved from the dashboard. */
+async function prepare(env: Env): Promise<Env> {
+  await ensureMigrated(env.DB);
+  return hydrateEnv(env);
+}
+
 export default {
-  fetch: app.fetch,
+  fetch: async (request, env, ctx) => {
+    const url = new URL(request.url);
+    // Static assets never reach here (assets are served first except /api and /webhooks).
+    if (url.pathname === "/api/health") return app.fetch(request, env, ctx);
+    try {
+      return app.fetch(request, await prepare(env), ctx);
+    } catch (err) {
+      console.error("startup failed", err);
+      return Response.json({ error: `Startup failed: ${(err as Error).message}` }, { status: 503 });
+    }
+  },
   scheduled: (controller, env, ctx) => {
-    ctx.waitUntil(scheduled(controller, env));
+    ctx.waitUntil(prepare(env).then((e) => scheduled(controller, e)));
   },
 } satisfies ExportedHandler<Env>;
 

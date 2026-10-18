@@ -60,7 +60,7 @@ Status legend: [x] done · [~] partial / limited by API · [ ] not started
 
 ## Testing
 - [x] Unit tests (vitest): 22 passing
-- [x] End-to-end suite against mock Shopify/Steadfast: 41 checks passing
+- [x] End-to-end suite against mock Shopify/Steadfast: 42 checks passing
 - [x] Visual check (Playwright screenshots) light/dark/mobile, no console errors
 
 ## Order verification & dispatch (phase 2)
@@ -77,6 +77,11 @@ Status legend: [x] done · [~] partial / limited by API · [ ] not started
 - [x] Ready to print and Dispatch pages; API key management
 - [x] D1 100-parameter / 100-column limits handled (json_each lists, trimmed joins)
 - [x] e2e suite extended to 41 checks
+
+## Deployment
+- [x] Zero-config deploy: D1 auto-provisioned by `wrangler deploy`, migrations applied by the Worker at startup
+- [x] Connections (Shopify, Steadfast) configured from Settings; Steadfast webhook token auto-generated; optional AES-GCM at rest
+- [x] Webhook URLs derived from the serving domain
 
 ## Ideas / next
 - [ ] SMS confirmation to customers (needs a BD SMS gateway — out of scope, no external services)

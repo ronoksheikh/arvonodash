@@ -123,4 +123,8 @@ Tracking links use `https://steadfast.com.bd/t/{tracking_code}`. You can change 
   ≤5 Shopify pages) to stay well inside the limits.
 - **No Cloudflare Queues**: the background work is small and idempotent. A D1 outbox (`jobs` table)
   run via `waitUntil` plus the cron gives retries with backoff without extra infrastructure.
-- Secrets are Worker secrets (`wrangler secret put`) and are never exposed to the browser.
+- Credentials are entered in Settings → Connections and stored server-side in D1, optionally
+  AES-GCM encrypted with `APP_ENCRYPTION_KEY`. Worker secrets with the same names override them.
+  The browser only ever sees masked hints.
+- D1 is auto-provisioned on the first `wrangler deploy` (no `database_id` in config); the Worker
+  applies pending migrations at startup using Wrangler's `d1_migrations` table.

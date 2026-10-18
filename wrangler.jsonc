@@ -11,16 +11,18 @@
   "d1_databases": [
     {
       "binding": "DB",
+      // No database_id: `wrangler deploy` creates the database on first deploy (automatic provisioning).
+      // Migrations are applied automatically by the Worker on startup.
       "database_name": "arvono-fulfillment",
-      "database_id": "00000000-0000-0000-0000-000000000000",
       "migrations_dir": "migrations"
     }
   ],
   // Every 5 minutes: background jobs + courier status polling.
   // Hourly / daily work (Shopify reconciliation, COD settlements) is scheduled inside the handler.
   "triggers": { "crons": ["*/5 * * * *"] },
+  // Shopify / Steadfast credentials are entered in the dashboard (Settings → Connections).
+  // Worker secrets with the same names (wrangler secret put …) override them if you prefer.
   "vars": {
-    "SHOPIFY_SHOP_DOMAIN": "your-store.myshopify.com",
     "SHOPIFY_API_VERSION": "2026-10",
     "STEADFAST_BASE_URL": "https://portal.packzy.com/api/v1",
     "STEADFAST_TRACKING_URL": "https://steadfast.com.bd/t/",
