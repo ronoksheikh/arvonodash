@@ -160,6 +160,8 @@ export const orders = sqliteTable(
     // Auto-booking: set when an order is confirmed; the cron books it once this time passes.
     autoBookAt: text("auto_book_at"),
     autoBookNote: text("auto_book_note"), // why auto-booking was skipped/cancelled
+    // Secret token for the customer-facing tracking page (/t/<token>)
+    trackingToken: text("tracking_token"),
     // Courier & fulfillment (kept separate)
     courierStage: text("courier_stage").notNull().default("unbooked"), // unbooked|booked|in_transit|on_hold|delivered|partial_delivered|returned|cancelled|issue
     activeConsignmentId: integer("active_consignment_id"),
@@ -182,6 +184,7 @@ export const orders = sqliteTable(
     index("orders_label_idx").on(t.labelStatus, t.bookedAt),
     index("orders_print_job_idx").on(t.printJobId),
     index("orders_dispatch_idx").on(t.dispatchStatus, t.bookedAt),
+    uniqueIndex("orders_tracking_token_idx").on(t.trackingToken),
   ],
 );
 

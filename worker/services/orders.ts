@@ -5,6 +5,7 @@ import type { NormalizedOrder } from "./shopify";
 import type { AppSettings } from "./settings";
 import { cleanPhone, normalizeBdPhone, nowIso } from "../lib/util";
 import { applyShopifySideChanges } from "./calling";
+import { newTrackingToken } from "./tracking";
 
 /** Insert or update an order from Shopify. Internal workflow fields are never overwritten. */
 export async function upsertOrder(db: DB, input: NormalizedOrder, appSettings: AppSettings) {
@@ -80,6 +81,7 @@ export async function upsertOrder(db: DB, input: NormalizedOrder, appSettings: A
         ...data,
         shopifyId: o.shopifyId,
         statusId: defaultStatus?.id ?? null,
+        trackingToken: newTrackingToken(),
         fulfillmentState: o.shopifyFulfillmentStatus === "fulfilled" ? "skipped" : "none",
         createdAt: now,
       })

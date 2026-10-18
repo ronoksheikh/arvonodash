@@ -108,7 +108,7 @@ export type PrintableOrder = ReturnType<typeof toPayload>;
 
 const orderCols = pick(orders, [
   "id", "name", "orderNumber", "shopifyId", "customerName", "phone", "city", "zip", "country", "lineItems", "booking",
-  "bookedAt", "labelStatus", "printJobId", "reservedUntil", "printedAt", "printCount", "dispatchStatus", "sortedAt", "dispatchedAt", "courierReceivedAt",
+  "bookedAt", "labelStatus", "printJobId", "reservedUntil", "printedAt", "printCount", "dispatchStatus", "sortedAt", "dispatchedAt", "courierReceivedAt", "trackingToken",
 ]);
 const consignmentCols = pick(consignments, [
   "invoice", "consignmentId", "trackingCode", "recipientName", "recipientPhone", "recipientAddress", "codAmount", "deliveryType", "note", "lineItems",
@@ -146,6 +146,8 @@ function toPayload(o: OrderPart, c: ConsignmentPart | null, offset: string) {
     dispatchStatus: o.dispatchStatus,
     sortedAt: o.sortedAt,
     dispatchedAt: o.dispatchedAt,
+    // Customer tracking page; relative here, made absolute by the API route.
+    trackingUrl: o.trackingToken ? `/t/${o.trackingToken}` : null,
   };
 }
 

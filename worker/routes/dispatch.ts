@@ -158,6 +158,11 @@ const ids = (v: unknown, field: string, max = 500): number[] | undefined => {
 export const dispatchRoutes = new Hono<DispatchEnv>();
 dispatchRoutes.use("*", authenticate);
 
+function absoluteUrls(c: Context<DispatchEnv>, list: dispatch.PrintableOrder[]) {
+  const origin = new URL(c.req.url).origin;
+  return list.map((o) => ({ ...o, trackingUrl: o.trackingUrl ? origin + o.trackingUrl : null }));
+}
+
 dispatchRoutes.get("/printable", requireScope("dispatch:read"), async (c) => {
   const q = c.req.query();
   const range = rangeFrom(c, q);
@@ -166,7 +171,7 @@ dispatchRoutes.get("/printable", requireScope("dispatch:read"), async (c) => {
   const db = getDb(c.env.DB);
   await dispatch.expireReservations(db);
   const r = await dispatch.listByLabelStatus(db, { ...range, status, limit, afterId: Number(q.cursor) || undefined, offset: c.env.APP_TIMEZONE_OFFSET || "+06:00" });
-  return c.json({ range: range.label, timezone: "Asia/Dhaka", status, count: r.orders.length, nextCursor: r.nextCursor, orders: r.orders });
+  return c.json({ range: range.label, timezone: "Asia/Dhaka", status, count: r.orders.length, nextCursor: r.nextCursor, orders: absoluteUrls(c, r.orders) });
 });
 
 dispatchRoutes.post("/claim", requireScope("dispatch:print"), (c) =>
@@ -182,7 +187,7 @@ dispatchRoutes.post("/claim", requireScope("dispatch:print"), (c) =>
       offset: c.env.APP_TIMEZONE_OFFSET || "+06:00",
       filters: { range: range.label, limit, orderIds: body.orderIds ?? null },
     });
-    return { status: 200, body: { ...r, count: r.orders.length } };
+    return { status: 200, body: { ...r, orders: absoluteUrls(c, r.orders), count: r.orders.length } };
   }),
 );
 

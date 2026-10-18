@@ -15,6 +15,7 @@ import { orderHistory } from "../services/dispatch";
 import { processJobs } from "../services/jobs";
 import { trackingUrl } from "../services/steadfast";
 import { NOTE_KINDS } from "../../shared/constants";
+import { ensureTrackingToken, trackingPageUrl } from "../services/tracking";
 
 export const orderRoutes = new Hono<AppEnv>();
 
@@ -299,6 +300,7 @@ orderRoutes.get("/:id{[0-9]+}", async (c) => {
     calls,
     dispatchHistory,
     shopifyUrl: shopifyAdminOrderUrl(c.env, order.shopifyId),
+    trackingPageUrl: await ensureTrackingToken(db, order.id).then((t) => (t ? trackingPageUrl(new URL(c.req.url).origin, t) : null)),
   });
 });
 

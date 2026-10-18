@@ -1,11 +1,11 @@
 import { useEffect, useState } from "react";
 import {
-  ActionIcon, Alert, Anchor, Badge, Button, Card, Divider, Drawer, Group, Menu, NumberInput, Rating, ScrollArea, SegmentedControl, Select, SimpleGrid, Stack, Table, Tabs, TagsInput, Text, Textarea, TextInput, Timeline, Title, Tooltip, Checkbox, Modal,
+  ActionIcon, Alert, Anchor, Badge, Button, Card, Divider, Drawer, Group, Menu, NumberInput, Rating, ScrollArea, SegmentedControl, Select, SimpleGrid, Stack, Table, Tabs, TagsInput, Text, Textarea, TextInput, Timeline, Title, Tooltip, Checkbox, Modal, CopyButton,
 } from "@mantine/core";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { modals } from "@mantine/modals";
 import {
-  AlertTriangle, Ban, ExternalLink, Timer, MapPin, MoreVertical, Package, Phone, RefreshCw, Send, Trash2, Truck, User, RotateCcw, CheckCircle2, ShieldCheck, Printer, MessageSquarePlus, PackageCheck,
+  AlertTriangle, Ban, ExternalLink, Timer, MapPin, MoreVertical, Package, Phone, RefreshCw, Send, Trash2, Truck, User, RotateCcw, CheckCircle2, ShieldCheck, Printer, MessageSquarePlus, PackageCheck, Link2, Check,
 } from "lucide-react";
 import { api, del, notifyError, notifySuccess, patch, post, put } from "../api";
 import { useCan } from "../auth";
@@ -119,6 +119,17 @@ function DrawerHeader({ d, onClose, refresh }: { d: OrderDetail; onClose: () => 
           </Group>
         </div>
         <Group gap={4} wrap="nowrap">
+          {d.trackingPageUrl && (
+            <CopyButton value={d.trackingPageUrl}>
+              {({ copied, copy }) => (
+                <Tooltip label={copied ? "Copied — send it to the customer" : "Copy customer tracking link"}>
+                  <ActionIcon variant="default" size="lg" color={copied ? "teal" : undefined} onClick={copy} aria-label="Copy tracking link">
+                    {copied ? <Check size={16} /> : <Link2 size={16} />}
+                  </ActionIcon>
+                </Tooltip>
+              )}
+            </CopyButton>
+          )}
           <Tooltip label="Open in Shopify">
             <ActionIcon variant="default" size="lg" component="a" href={d.shopifyUrl} target="_blank" rel="noreferrer"><ExternalLink size={16} /></ActionIcon>
           </Tooltip>

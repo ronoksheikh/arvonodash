@@ -454,6 +454,30 @@ await step("delivered webhook records collected COD and delivery charge", async 
   assert.equal(d.body.order.courierStage, "delivered");
 });
 
+await step("customer tracking link shows the whole journey without staff details", async () => {
+  const d = await orderDetail(orderA.id);
+  assert.match(d.trackingPageUrl, /\/t\/[a-f0-9]{20}$/);
+  const token = d.trackingPageUrl.split("/t/")[1];
+  const t = await call("GET", `/api/public/track/${token}`, undefined, { auth: false, jar: false });
+  assert.equal(t.status, 200, JSON.stringify(t.body));
+  assert.equal(t.headers.get("cache-control"), "no-store");
+  assert.equal(t.body.status.key, "delivered");
+  assert.equal(t.body.order.name, "#5001");
+  assert.equal(t.body.order.codDue, 0);
+  const kinds = t.body.timeline.map((e) => e.kind);
+  for (const k of ["placed", "call_confirmed", "booked", "packed", "picked_up", "courier_update", "delivered"]) assert.ok(kinds.includes(k), `timeline has ${k}: ${kinds}`);
+  assert.equal(kinds[0], "delivered", "newest first");
+  assert.ok(t.body.steps.every((s) => s.done));
+  assert.ok(t.body.courier.trackingCode);
+  assert.ok(!t.body.customer.phone.includes(d.order.phone.slice(3, -3)), "phone is masked");
+  const raw = JSON.stringify(t.body);
+  assert.ok(!raw.includes("Booked with Steadfast by"), "no staff names or internal notes");
+  const bad = await call("GET", "/api/public/track/0123456789abcdef0123", undefined, { auth: false, jar: false });
+  assert.equal(bad.status, 404);
+  const printable = await v1("GET", `/printable?date=${today}&status=all`);
+  assert.equal(printable.body.orders[0].trackingUrl, d.trackingPageUrl, "label API carries the tracking link for QR codes");
+});
+
 await step("COD settlement sync links consignment to payment", async () => {
   const r = await call("POST", "/api/sync/payments");
   assert.equal(r.status, 200, JSON.stringify(r.body));

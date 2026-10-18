@@ -48,3 +48,32 @@ body {
   .print-page { break-after: page; page-break-after: always; box-shadow: none !important; margin: 0 !important; border: none !important; }
   .print-page:last-child { break-after: auto; page-break-after: auto; }
 }
+
+/* Scan & sort: camera in the middle, result/status panels on both sides (stacked on phones). */
+.scan-grid {
+  flex: 1;
+  min-height: 0;
+  display: grid;
+  gap: 12px;
+  padding: 12px;
+  grid-template-columns: 1fr;
+  overflow-y: auto;
+}
+.scan-grid > .scan-camera { order: 1; }
+.scan-grid > .scan-left { order: 2; }
+.scan-grid > .scan-right { order: 3; }
+@media (min-width: 900px) {
+  .scan-grid { grid-template-columns: minmax(250px, 1fr) minmax(0, 2.2fr) minmax(250px, 1fr); overflow: hidden; }
+  .scan-grid > .scan-left { order: 1; }
+  .scan-grid > .scan-camera { order: 2; }
+  .scan-grid > .scan-right { order: 3; }
+}
+.scan-side {
+  border-radius: 18px;
+  padding: 16px;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  transition: background-color 180ms ease, box-shadow 180ms ease;
+}
+.scan-side[data-flash="true"] { box-shadow: 0 0 0 4px rgba(255, 255, 255, 0.35) inset; }

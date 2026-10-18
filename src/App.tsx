@@ -18,6 +18,7 @@ const Sync = lazy(() => import("./pages/Sync"));
 const SettingsPage = lazy(() => import("./pages/Settings"));
 const Print = lazy(() => import("./pages/Print"));
 const Scan = lazy(() => import("./pages/Scan"));
+const Track = lazy(() => import("./pages/Track"));
 
 function RequireAuth({ children }: { children: React.ReactNode }) {
   const { user, loading } = useAuth();
@@ -32,6 +33,8 @@ export function App() {
     <Suspense fallback={<LoadingState />}>
       <Routes>
         <Route path="/login" element={<LoginPage />} />
+        {/* Public: customer order tracking */}
+        <Route path="/t/:token" element={<Track />} />
         <Route path="/print" element={<RequireAuth><Print /></RequireAuth>} />
         <Route path="/scan" element={<RequireAuth><Scan /></RequireAuth>} />
         <Route element={<RequireAuth><Layout /></RequireAuth>}>

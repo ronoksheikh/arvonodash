@@ -215,4 +215,5 @@ export type OrderDetail = {
   calls: CallLog[];
   dispatchHistory: DispatchEvent[];
   shopifyUrl: string;
+  trackingPageUrl: string | null;
 };

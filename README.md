@@ -58,11 +58,22 @@ dispatch. Shopify fulfillment and courier delivery are tracked on top of these.
   (flagged when the order is already booked), and archive/delete.
 - **Ready to print**: per-day (Asia/Dhaka) unprinted, reserved and printed lists, daily totals, the
   next-day backlog, print job history, release, and audited reprint requests.
-- **Scan & sort (phone)**: open `/scan` on any phone browser (iPhone Safari or Android Chrome),
-  scan the Steadfast consignment ID barcode on each label, and hear a beep. Each parcel becomes
+- **Scan & sort (laptop or phone)**: open `/scan` on a MacBook, iPhone Safari or Android Chrome,
+  scan the Steadfast consignment ID barcode on each label, and hear the result. The camera is
+  read 30 times a second (the browser's built-in barcode reader on Chrome, WebAssembly
+  elsewhere). The camera sits in the middle with a status panel on each side. Both panels turn
+  green with a rising chime when a parcel is sorted, amber with a double beep when it was already
+  sorted, and red with a low buzzer for any problem. A USB or Bluetooth scanner gun also works,
+  and you can switch cameras (including an iPhone used as a Mac webcam). Each parcel becomes
   *Sorted · awaiting pickup*. Scans go over a live WebSocket, are queued offline and resent
   automatically, and a cancelled order gives a loud STOP. It becomes *Dispatched* only when
   Steadfast picks it up (status leaves in_review).
+- **Customer tracking page** (`/t/<token>`): every order gets its own unguessable link, copied
+  from the order drawer. The customer sees the current status, a progress bar, and every step:
+  placed, the confirmation calls (including missed calls), sent to Steadfast, packed, picked up,
+  courier updates, delivered, returned or cancelled. It also shows the items, totals, COD due and
+  delivery address. The phone number is masked and no staff names or internal notes are shown.
+  The label API returns the link as `trackingUrl` for printing as a QR code. SMS is not sent yet.
 - **Dispatch**: to sort, sorted (awaiting pickup), dispatched, and exceptions
   (held, failed, returned, cancelled after booking, dispatched more than 24 h ago without a
   pickup). Includes bulk *Mark dispatched* and *Undo* with a reason.

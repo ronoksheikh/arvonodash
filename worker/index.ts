@@ -22,6 +22,7 @@ import { steadfastConfigured } from "./services/steadfast";
 import { setValue } from "./services/settings";
 import { ensureMigrated } from "./db/migrate";
 import { hydrateEnv } from "./services/credentials";
+import { buildTracking } from "./services/tracking";
 
 const app = new Hono<AppEnv>();
 
@@ -40,6 +41,14 @@ app.route("/webhooks", webhookRoutes);
 // External + dashboard dispatch API (API key or session). Registered before the session-only /api router.
 app.route("/api/v1/dispatch", dispatchRoutes);
 app.route("/api/auth", authRoutes);
+// Customer-facing tracking page data (no login; the token in the link is the secret).
+app.get("/api/public/track/:token", async (c) => {
+  const data = await buildTracking(getDb(c.env.DB), c.req.param("token"));
+  c.header("Cache-Control", "no-store");
+  c.header("X-Robots-Tag", "noindex, nofollow");
+  if (!data) return c.json({ error: "Tracking link not found" }, 404);
+  return c.json(data);
+});
 
 const api = new Hono<AppEnv>();
 api.use("*", requireAuth);

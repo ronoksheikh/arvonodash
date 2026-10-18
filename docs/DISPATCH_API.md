@@ -81,13 +81,16 @@ Query parameters: `date` | `from`+`to` | `upTo`, `status` (`unprinted` (the defa
     "totalQuantity": 1, "codAmount": 900, "deliveryType": "home_delivery", "note": "Call before delivery",
     "bookedAt": "2026-10-18T05:12:00.000Z", "bookedDate": "2026-10-18",
     "labelStatus": "unprinted", "printJobId": null, "reservedUntil": null, "printedAt": null, "printCount": 0,
-    "dispatchStatus": "pending", "dispatchedAt": null, "courierReceivedAt": null
+    "dispatchStatus": "pending", "dispatchedAt": null, "courierReceivedAt": null,
+    "trackingUrl": "https://<your-domain>/t/3f9c0a1b2d4e5f607182"
   }]
 }
 ```
 
 The `customer`, `address` and `codAmount` fields are what Steadfast holds for the consignment, so
-the label matches the courier's records. When only some items were shipped (a partial booking),
+the label matches the courier's records.
+`trackingUrl` is the customer's own ARVONO tracking page for the order; print it as a QR code on
+the label if you like. When only some items were shipped (a partial booking),
 `items` lists only the quantities in this parcel.
 
 ### `POST /claim`

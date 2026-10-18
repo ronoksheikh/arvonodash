@@ -101,6 +101,15 @@ Status legend: [x] done · [~] partial / limited by API · [ ] not started
 - [x] Scanning sessions with "still to sort" list; sorted >24h without pickup flagged as exception
 - [x] e2e: WebSocket scan, duplicate, unknown, HTTP fallback, cancelled STOP
 
+## Faster scanning + customer tracking
+- [x] Scanner reads the camera 30×/s (guide-box crop, native BarcodeDetector when available, WASM otherwise); live reads/s badge
+- [x] Laptop layout: camera in the middle, result and session panels on both sides that turn green / amber / red
+- [x] Distinct sounds: success chime, duplicate double beep, failure buzzer
+- [x] Camera picker, mirror toggle, scanner-gun input auto-focus
+- [x] Customer tracking page `/t/<token>` with status, progress steps and full timeline (calls, sent to Steadfast, packed, picked up, courier updates, delivered/returned/cancelled)
+- [x] Tracking token per order (backfilled by migration 0004), copy link in order drawer, `trackingUrl` in label API
+- [x] e2e: 47 checks
+
 ## Ideas / next
 - [ ] SMS confirmation to customers (needs a BD SMS gateway — out of scope, no external services)
 - [ ] Shopify return creation (`returnCreate`) once the team wants returns mirrored in Shopify
