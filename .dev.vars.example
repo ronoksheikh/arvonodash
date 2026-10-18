@@ -1,0 +1,8 @@
+# Nothing is required: credentials are entered in the app (Settings → Connections).
+# Optional overrides — any value here (or `wrangler secret put` in production) takes precedence over the dashboard.
+# APP_ENCRYPTION_KEY=          # encrypts dashboard-entered credentials at rest
+# SHOPIFY_SHOP_DOMAIN=
+# SHOPIFY_CLIENT_ID=
+# SHOPIFY_CLIENT_SECRET=
+# STEADFAST_API_KEY=
+# STEADFAST_SECRET_KEY=

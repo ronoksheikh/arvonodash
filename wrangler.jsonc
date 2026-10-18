@@ -1,0 +1,31 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "arvono-fulfillment-os",
+  "main": "./worker/index.ts",
+  "compatibility_date": "2026-10-01",
+  "observability": { "enabled": true },
+  "assets": {
+    "not_found_handling": "single-page-application",
+    "run_worker_first": ["/api/*", "/webhooks/*"]
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      // No database_id: `wrangler deploy` creates the database on first deploy (automatic provisioning).
+      // Migrations are applied automatically by the Worker on startup.
+      "database_name": "arvono-fulfillment",
+      "migrations_dir": "migrations"
+    }
+  ],
+  // Every 5 minutes: background jobs + courier status polling.
+  // Hourly / daily work (Shopify reconciliation, COD settlements) is scheduled inside the handler.
+  "triggers": { "crons": ["* * * * *"] },
+  // Shopify / Steadfast credentials are entered in the dashboard (Settings → Connections).
+  // Worker secrets with the same names (wrangler secret put …) override them if you prefer.
+  "vars": {
+    "SHOPIFY_API_VERSION": "2026-10",
+    "STEADFAST_BASE_URL": "https://portal.packzy.com/api/v1",
+    "STEADFAST_TRACKING_URL": "https://steadfast.com.bd/t/",
+    "APP_TIMEZONE_OFFSET": "+06:00"
+  }
+}

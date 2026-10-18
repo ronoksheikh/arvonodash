@@ -1,0 +1,402 @@
+import { and, eq, isNull, sql } from "drizzle-orm";
+import { inList, type DB } from "../db";
+import type { Env, SessionUser } from "../env";
+import { consignments, customers, customStatuses, orders, returns, trackingEvents, type BookingDetails } from "../db/schema";
+import * as steadfast from "./steadfast";
+import { enqueueJob } from "./jobs";
+import { getSettings, type AppSettings } from "./settings";
+import { logActivity, type Actor } from "./activity";
+import { buildAddress, shopifyContactKey } from "./orders";
+import { onBooked, onCourierReceived, onNotPrintable } from "./dispatch";
+import { HttpError, normalizeBdPhone, nowIso, toNumber, truncate } from "../lib/util";
+
+type OrderRow = typeof orders.$inferSelect;
+type ConsignmentRow = typeof consignments.$inferSelect;
+
+/** Booking details shown in the editor: saved edits layered over values derived from the order. */
+export function defaultBooking(order: OrderRow, appSettings: AppSettings): BookingDetails {
+  const items = order.lineItems.map((li) => `${li.quantity}x ${li.title}${li.variantTitle ? ` (${li.variantTitle})` : ""}`).join(", ");
+  return {
+    recipientName: order.customerName ?? "",
+    recipientPhone: order.phone ?? order.rawPhone ?? "",
+    recipientEmail: order.email ?? undefined,
+    recipientAddress: truncate(buildAddress(order), 250),
+    codAmount: Math.max(0, Math.round(order.outstanding)),
+    note: appSettings.defaultNote || undefined,
+    itemDescription: appSettings.includeItemsInDescription ? truncate(items, 250) : undefined,
+    totalLot: order.lineItems.reduce((s, li) => s + li.quantity, 0) || undefined,
+    deliveryType: 0,
+  };
+}
+
+export function effectiveBooking(order: OrderRow, appSettings: AppSettings): BookingDetails {
+  return { ...defaultBooking(order, appSettings), ...(order.booking ?? {}) } as BookingDetails;
+}
+
+export function validateBooking(b: BookingDetails): string[] {
+  const errors: string[] = [];
+  if (!b.recipientName?.trim()) errors.push("Recipient name is required");
+  if (b.recipientName && b.recipientName.length > 100) errors.push("Recipient name must be at most 100 characters");
+  if (!normalizeBdPhone(b.recipientPhone)) errors.push("Recipient phone must be a valid 11-digit Bangladeshi mobile number");
+  if (b.alternativePhone && !normalizeBdPhone(b.alternativePhone)) errors.push("Alternative phone must be a valid 11-digit mobile number");
+  if (!b.recipientAddress?.trim()) errors.push("Recipient address is required");
+  if (b.recipientAddress && b.recipientAddress.length > 250) errors.push("Address must be at most 250 characters");
+  if (!(toNumber(b.codAmount, -1) >= 0)) errors.push("COD amount must be 0 or more");
+  return errors;
+}
+
+function invoiceFor(order: OrderRow, appSettings: AppSettings, attempt: number): string {
+  const base = `${appSettings.invoicePrefix}${order.name.replace(/^#/, "")}`.replace(/[^A-Za-z0-9_-]/g, "-");
+  return attempt > 0 ? `${base}-R${attempt}` : base;
+}
+
+export type BookingResult = { orderId: number; name?: string; ok: boolean; error?: string; trackingCode?: string; consignmentId?: string };
+
+/**
+ * Creates Steadfast consignments for the given orders. Only ever called from an explicit staff action.
+ * Duplicate bookings are prevented by (1) refusing orders with an active consignment and
+ * (2) a unique invoice per attempt, enforced both in D1 and by Steadfast.
+ */
+export async function bookOrders(
+  env: Env,
+  db: DB,
+  user: SessionUser,
+  orderIds: number[],
+  opts: { override?: Partial<BookingDetails>; allowRisky?: boolean } = {},
+  waitUntil?: (p: Promise<unknown>) => void,
+): Promise<BookingResult[]> {
+  const appSettings = await getSettings(db);
+  const blockingStatuses = new Set(
+    (await db.select({ id: customStatuses.id }).from(customStatuses).where(eq(customStatuses.blocksBooking, true)).all()).map((s) => s.id),
+  );
+  const rows = await db.select().from(orders).where(inList(orders.id, orderIds)).all();
+  const results: BookingResult[] = orderIds.filter((id) => !rows.some((r) => r.id === id)).map((id) => ({ orderId: id, ok: false, error: "Order not found" }));
+
+  const queue = [...rows];
+  const worker = async () => {
+    for (let order = queue.shift(); order; order = queue.shift()) {
+      results.push(await bookOne(env, db, user, order, appSettings, blockingStatuses, opts));
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(5, rows.length) }, worker));
+
+  const booked = results.filter((r) => r.ok).length;
+  if (booked) waitUntil?.(import("./jobs").then((m) => m.processJobs(env, db, { limit: booked * 2 })));
+  return results;
+}
+
+async function bookOne(
+  env: Env,
+  db: DB,
+  user: SessionUser,
+  order: OrderRow,
+  appSettings: AppSettings,
+  blockingStatuses: Set<number>,
+  opts: { override?: Partial<BookingDetails>; allowRisky?: boolean },
+): Promise<BookingResult> {
+  const base = { orderId: order.id, name: order.name };
+  if (order.cancelledAt) return { ...base, ok: false, error: "Order is cancelled in Shopify" };
+  if (order.callingStatus !== "confirmed") return { ...base, ok: false, error: "Order is not confirmed yet — call the customer first" };
+  if (order.statusId && blockingStatuses.has(order.statusId)) return { ...base, ok: false, error: "Order status blocks booking" };
+  if (order.shopifyFulfillmentStatus === "fulfilled" && order.fulfillmentState !== "fulfilled")
+    return { ...base, ok: false, error: "Order is already fulfilled in Shopify" };
+
+  const existing = await db
+    .select()
+    .from(consignments)
+    .where(and(eq(consignments.orderId, order.id), eq(consignments.superseded, false)))
+    .all();
+  if (existing.some((c) => c.stage !== "cancelled")) return { ...base, ok: false, error: "Order already has an active consignment" };
+
+  if (!opts.allowRisky && order.customerId) {
+    const customer = await db.select({ flag: customers.flag }).from(customers).where(eq(customers.id, order.customerId)).get();
+    if (customer?.flag === "blocked") return { ...base, ok: false, error: "Customer is blocked" };
+  }
+
+  const booking = { ...effectiveBooking(order, appSettings), ...(opts.override ?? {}) };
+  booking.recipientPhone = normalizeBdPhone(booking.recipientPhone) ?? booking.recipientPhone;
+  if (booking.alternativePhone) booking.alternativePhone = normalizeBdPhone(booking.alternativePhone) ?? booking.alternativePhone;
+  const errors = validateBooking(booking);
+  if (errors.length) return { ...base, ok: false, error: errors.join("; ") };
+
+  const attempt = (await db.select({ n: sql<number>`count(*)` }).from(consignments).where(eq(consignments.orderId, order.id)).get())?.n ?? 0;
+  const invoice = invoiceFor(order, appSettings, attempt);
+  const now = nowIso();
+
+  // Reserve the invoice first; the unique index stops concurrent double-booking.
+  const reserved = await db
+    .insert(consignments)
+    .values({
+      orderId: order.id,
+      invoice,
+      status: "creating",
+      stage: "booked",
+      recipientName: booking.recipientName,
+      recipientPhone: booking.recipientPhone,
+      recipientAddress: booking.recipientAddress,
+      codAmount: toNumber(booking.codAmount),
+      note: booking.note ?? null,
+      deliveryType: booking.deliveryType ?? 0,
+      lineItems: booking.lineItems?.length ? booking.lineItems : null,
+      createdBy: user.id,
+      createdAt: now,
+      updatedAt: now,
+    })
+    .onConflictDoNothing()
+    .returning()
+    .get();
+  if (!reserved) return { ...base, ok: false, error: "A booking for this order is already in progress" };
+
+  let created: steadfast.CreatedConsignment;
+  try {
+    created = await steadfast.createOrder(env, {
+      invoice,
+      recipient_name: booking.recipientName.trim(),
+      recipient_phone: booking.recipientPhone,
+      alternative_phone: booking.alternativePhone || undefined,
+      recipient_email: booking.recipientEmail || undefined,
+      recipient_address: booking.recipientAddress.trim(),
+      cod_amount: toNumber(booking.codAmount),
+      note: booking.note || undefined,
+      item_description: booking.itemDescription || undefined,
+      total_lot: booking.totalLot || undefined,
+      delivery_type: booking.deliveryType ?? 0,
+    });
+  } catch (err) {
+    const definite = err instanceof HttpError && (err.status === 422 || err.status === 502 || err.status === 503 && /not configured/.test(err.message));
+    if (definite) {
+      await db.delete(consignments).where(eq(consignments.id, reserved.id));
+    } else {
+      // Outcome unknown (timeout etc.): keep the reservation so the poller can reconcile by invoice.
+      await db.update(consignments).set({ status: "unconfirmed", stage: "issue", lastMessage: (err as Error).message }).where(eq(consignments.id, reserved.id));
+      await db.update(orders).set({ courierStage: "issue", activeConsignmentId: reserved.id }).where(eq(orders.id, order.id));
+    }
+    await logActivity(db, user, "courier.booking_failed", { entityType: "order", entityId: order.id, orderId: order.id, details: { invoice, error: (err as Error).message } });
+    return { ...base, ok: false, error: (err as Error).message };
+  }
+
+  const consignmentId = String(created.consignment_id);
+  await db
+    .update(consignments)
+    .set({ consignmentId, trackingCode: created.tracking_code, status: created.status || "in_review", lastStatusAt: now, updatedAt: nowIso() })
+    .where(eq(consignments.id, reserved.id));
+  for (const c of existing) await db.update(consignments).set({ superseded: true }).where(eq(consignments.id, c.id));
+  await db
+    .update(orders)
+    .set({ courierStage: "booked", activeConsignmentId: reserved.id, booking: booking, bookedSource: shopifyContactKey(order), autoBookAt: null, autoBookNote: null, updatedAt: nowIso() })
+    .where(eq(orders.id, order.id));
+  await onBooked(db, order.id, reserved.id, user);
+  await db.insert(trackingEvents).values({
+    consignmentRowId: reserved.id,
+    orderId: order.id,
+    kind: "system",
+    status: created.status || "in_review",
+    message: `Booked with Steadfast by ${user.name} (invoice ${invoice}, COD ৳${toNumber(booking.codAmount)})`,
+    source: "api",
+    occurredAt: now,
+    createdAt: now,
+  });
+  await logActivity(db, user, "courier.booked", {
+    entityType: "consignment",
+    entityId: consignmentId,
+    orderId: order.id,
+    details: { invoice, trackingCode: created.tracking_code, cod: booking.codAmount },
+  });
+
+  if (appSettings.shopifyBookedTag) {
+    await enqueueJob(db, "shopify_tag", `tag:${order.id}:${reserved.id}`, { shopifyOrderId: order.shopifyId, tags: [appSettings.shopifyBookedTag] });
+  }
+  if (appSettings.fulfillmentTrigger === "on_booking") await queueFulfillment(db, order.id, reserved.id);
+
+  return { ...base, ok: true, trackingCode: created.tracking_code, consignmentId };
+}
+
+export async function queueFulfillment(db: DB, orderId: number, consignmentRowId: number, reset = false) {
+  await db.update(orders).set({ fulfillmentState: "pending", fulfillmentError: null }).where(and(eq(orders.id, orderId), sql`${orders.fulfillmentState} != 'fulfilled'`));
+  return enqueueJob(db, "fulfill_order", `fulfill:${orderId}:${consignmentRowId}`, { orderId, consignmentRowId }, { reset });
+}
+
+/**
+ * Applies a status/tracking update for a consignment from a webhook, poll or manual refresh.
+ * Returns true when anything changed.
+ */
+export async function applyCourierUpdate(
+  db: DB,
+  c: ConsignmentRow,
+  update: { status?: string | null; message?: string | null; codAmount?: number | null; deliveryCharge?: number | null; occurredAt?: string | null; source: "webhook" | "poll" | "manual" },
+  actor: Actor = "steadfast",
+): Promise<boolean> {
+  const now = nowIso();
+  const occurredAt = update.occurredAt && !Number.isNaN(Date.parse(update.occurredAt)) ? new Date(update.occurredAt).toISOString() : now;
+  const newStatus = update.status?.toLowerCase().trim() || null;
+  const statusChanged = Boolean(newStatus && newStatus !== c.status);
+
+  if (!statusChanged && !update.message) {
+    await db.update(consignments).set({ lastPolledAt: now }).where(eq(consignments.id, c.id));
+    return false;
+  }
+
+  // Ignore a late webhook carrying an older status than what we already have.
+  if (statusChanged && c.lastStatusAt && occurredAt < c.lastStatusAt && update.source === "webhook" && c.isFinal) {
+    await db.insert(trackingEvents).values({ consignmentRowId: c.id, orderId: c.orderId, kind: "status", status: newStatus, message: "Out-of-order update ignored", source: update.source, occurredAt, createdAt: now });
+    return false;
+  }
+
+  const patch: Partial<ConsignmentRow> = { updatedAt: now, lastPolledAt: now };
+  if (update.message) patch.lastMessage = update.message;
+  if (update.deliveryCharge !== null && update.deliveryCharge !== undefined) patch.deliveryCharge = update.deliveryCharge;
+
+  let stage = c.stage;
+  const firstPickup = Boolean(statusChanged && !c.pickedUpAt && steadfast.isPickedUpStatus(newStatus!));
+  if (statusChanged) {
+    const pickedUp = Boolean(c.pickedUpAt) || steadfast.isPickedUpStatus(newStatus!);
+    stage = steadfast.stageForStatus(newStatus!, pickedUp);
+    Object.assign(patch, { status: newStatus!, stage, lastStatusAt: occurredAt, isFinal: steadfast.isFinalStatus(newStatus!) });
+    if (firstPickup) patch.pickedUpAt = occurredAt;
+    if ((stage === "delivered" || stage === "partial_delivered") && !c.deliveredAt) patch.deliveredAt = occurredAt;
+    if (stage === "returned" && !c.returnedAt) patch.returnedAt = occurredAt;
+    if (stage === "delivered" || stage === "partial_delivered") {
+      patch.collectedAmount = update.codAmount ?? (stage === "delivered" ? c.codAmount : c.collectedAmount);
+    }
+    if (stage === "returned" || stage === "cancelled") patch.collectedAmount = update.codAmount ?? 0;
+  }
+  await db.update(consignments).set(patch).where(eq(consignments.id, c.id));
+
+  await db.insert(trackingEvents).values({
+    consignmentRowId: c.id,
+    orderId: c.orderId,
+    kind: statusChanged ? "status" : "tracking",
+    status: statusChanged ? newStatus : null,
+    message: update.message ?? null,
+    source: update.source,
+    occurredAt,
+    createdAt: now,
+  });
+
+  if (!statusChanged) return true;
+
+  const order = await db.select().from(orders).where(eq(orders.id, c.orderId)).get();
+  if (!order) return true;
+  if (order.activeConsignmentId === c.id || (order.activeConsignmentId === null && !c.superseded)) {
+    await db.update(orders).set({ courierStage: stage, activeConsignmentId: c.id, updatedAt: now }).where(eq(orders.id, order.id));
+  }
+  await logActivity(db, actor, "courier.status", {
+    entityType: "consignment",
+    entityId: c.consignmentId ?? c.invoice,
+    orderId: c.orderId,
+    details: { from: c.status, to: newStatus, source: update.source },
+  });
+
+  if (firstPickup) await onCourierReceived(db, order.id, c.id, occurredAt);
+  if (stage === "cancelled") await onNotPrintable(db, order.id, "Consignment cancelled before pickup", { name: "steadfast" });
+
+  const appSettings = await getSettings(db);
+  const trigger = appSettings.fulfillmentTrigger;
+  const shouldFulfill =
+    order.fulfillmentState !== "fulfilled" &&
+    order.fulfillmentState !== "skipped" &&
+    ((trigger === "on_pickup" && (firstPickup || (steadfast.isPickedUpStatus(newStatus!) && order.fulfillmentState === "none"))) ||
+      (trigger === "on_delivery" && (stage === "delivered" || stage === "partial_delivered")));
+  if (shouldFulfill && c.trackingCode) await queueFulfillment(db, order.id, c.id);
+
+  if (appSettings.autoCreateReturns && (stage === "returned" || stage === "partial_delivered")) {
+    const existingReturn = await db.select({ id: returns.id }).from(returns).where(eq(returns.consignmentRowId, c.id)).get();
+    if (!existingReturn) {
+      await db.insert(returns).values({
+        orderId: c.orderId,
+        consignmentRowId: c.id,
+        type: stage === "returned" ? "courier_return" : "partial_return",
+        reason: update.message ?? (stage === "returned" ? "Delivery failed / cancelled by courier" : "Partially delivered"),
+        status: "expected",
+        followUpAction: "call_customer",
+        createdAt: now,
+        updatedAt: now,
+      });
+      await logActivity(db, "system", "return.created", { entityType: "order", entityId: c.orderId, orderId: c.orderId, details: { stage } });
+    }
+  }
+  return true;
+}
+
+/** Polls Steadfast for consignments that are not final. Fallback for missed webhooks. */
+export async function pollActiveConsignments(env: Env, db: DB, opts: { limit?: number; ids?: number[]; staleMinutes?: number } = {}) {
+  const staleBefore = new Date(Date.now() - (opts.staleMinutes ?? 30) * 60_000).toISOString();
+  const rows = await db
+    .select()
+    .from(consignments)
+    .where(
+      opts.ids
+        ? inList(consignments.id, opts.ids)
+        : and(
+            eq(consignments.isFinal, false),
+            eq(consignments.superseded, false),
+            sql`(${consignments.lastPolledAt} is null or ${consignments.lastPolledAt} < ${staleBefore})`,
+          ),
+    )
+    .orderBy(sql`${consignments.lastPolledAt} asc nulls first`)
+    .limit(opts.limit ?? 40)
+    .all();
+
+  let changed = 0;
+  let errors = 0;
+  for (const c of rows) {
+    try {
+      let status: string | null;
+      if (c.consignmentId) status = await steadfast.getStatusByConsignmentId(env, c.consignmentId);
+      else if (c.trackingCode) status = await steadfast.getStatusByTrackingCode(env, c.trackingCode);
+      else if (c.status === "creating") continue; // booking in flight
+      else status = await steadfast.getStatusByInvoice(env, c.invoice);
+      if (!status) {
+        await db.update(consignments).set({ lastPolledAt: nowIso() }).where(eq(consignments.id, c.id));
+        continue;
+      }
+      if (await applyCourierUpdate(db, c, { status, source: "poll" })) changed++;
+    } catch (err) {
+      errors++;
+      await db.update(consignments).set({ lastPolledAt: nowIso(), lastMessage: `Poll failed: ${(err as Error).message}` }).where(eq(consignments.id, c.id));
+    }
+  }
+  return { checked: rows.length, changed, errors };
+}
+
+export async function findConsignment(db: DB, ref: { consignmentId?: string | null; invoice?: string | null; trackingCode?: string | null }) {
+  if (ref.consignmentId) {
+    const row = await db.select().from(consignments).where(eq(consignments.consignmentId, ref.consignmentId)).get();
+    if (row) return row;
+  }
+  if (ref.invoice) {
+    const row = await db.select().from(consignments).where(eq(consignments.invoice, ref.invoice)).get();
+    if (row) {
+      // Reconcile a reservation whose create_order response was lost.
+      if (!row.consignmentId && ref.consignmentId) {
+        await db.update(consignments).set({ consignmentId: ref.consignmentId, status: "in_review" }).where(eq(consignments.id, row.id));
+        return { ...row, consignmentId: ref.consignmentId, status: "in_review" };
+      }
+      return row;
+    }
+  }
+  if (ref.trackingCode) {
+    const row = await db.select().from(consignments).where(eq(consignments.trackingCode, ref.trackingCode)).get();
+    if (row) return row;
+  }
+  if (ref.invoice) {
+    // Parcels booked before ARVONO use the order number as invoice.
+    const order = await db
+      .select({ active: orders.activeConsignmentId })
+      .from(orders)
+      .where(sql`${orders.name} in (${ref.invoice}, ${"#" + ref.invoice.replace(/^#/, "")})`)
+      .get();
+    if (order?.active) {
+      const row = await db.select().from(consignments).where(eq(consignments.id, order.active)).get();
+      if (row && !row.consignmentId) {
+        if (ref.consignmentId) await db.update(consignments).set({ consignmentId: ref.consignmentId }).where(eq(consignments.id, row.id));
+        return { ...row, consignmentId: ref.consignmentId ?? null };
+      }
+    }
+  }
+  return null;
+}
+
+export async function unbookedCount(db: DB) {
+  return (await db.select({ n: sql<number>`count(*)` }).from(orders).where(and(eq(orders.courierStage, "unbooked"), isNull(orders.cancelledAt))).get())?.n ?? 0;
+}
