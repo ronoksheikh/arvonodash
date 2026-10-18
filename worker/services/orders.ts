@@ -177,8 +177,9 @@ export async function refreshRiskFlags(db: DB, orderId: number, appSettings: App
     if (others.length) {
       flags.push("duplicate_recent");
       duplicateOf = others.find((x) => x.shopCreatedAt < order.shopCreatedAt)?.id ?? null;
-      const key = (items: { variantId?: string | null; title: string }[]) =>
-        items.map((i) => i.variantId ?? i.title).sort().join("|");
+      // Same key for webhook (REST) and imported (GraphQL) orders.
+      const key = (items: { title: string; variantTitle?: string | null; sku?: string | null }[]) =>
+        items.map((i) => `${i.title}|${i.variantTitle ?? ""}|${i.sku ?? ""}`).sort().join("||");
       const mine = key(order.lineItems);
       if (others.some((x) => key(x.lineItems) === mine)) flags.push("duplicate_items");
     }

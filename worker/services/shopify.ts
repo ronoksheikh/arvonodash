@@ -246,7 +246,6 @@ const ORDER_FIELDS = /* GraphQL */ `
     nodes {
       id title variantTitle sku quantity currentQuantity unfulfilledQuantity
       originalUnitPriceSet { shopMoney { amount } }
-      product { id } variant { id }
     }
   }
 `;
@@ -295,8 +294,9 @@ export function normalizeGraphqlOrder(o: any): NormalizedOrder {
       quantity: li.currentQuantity ?? li.quantity,
       fulfillableQuantity: li.unfulfilledQuantity ?? null,
       price: money(li.originalUnitPriceSet),
-      productId: gidToId(li.product?.id),
-      variantId: gidToId(li.variant?.id),
+      // product/variant ids would need read_products; titles + SKU are enough here.
+      productId: null,
+      variantId: null,
     })),
     shopifyTags: o.tags ?? [],
     shopifyNote: o.note ?? null,
