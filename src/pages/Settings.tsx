@@ -35,6 +35,15 @@ type AppSettings = {
   transitDaysDhaka: number;
   transitDaysOutside: number;
   handoverConfirmHours: number;
+  markPaidOnDelivery: boolean;
+  fraudCheckEnabled: boolean;
+  fraudMinDeliveryRatio: number;
+  fraudHoldOnReports: boolean;
+  fraudHoldNewCustomers: boolean;
+  fraudHoldAutoBook: boolean;
+  fraudCacheHours: number;
+  fraudMaxPerMinute: number;
+  autoCombine: boolean;
 };
 type SettingsData = {
   settings: AppSettings;
@@ -299,6 +308,7 @@ function Workflow({ d }: { d: SettingsData }) {
           <TextInput label="Tracking company name" description="Shown to customers in Shopify" value={s.trackingCompany} onChange={(e) => setS({ ...s, trackingCompany: e.currentTarget.value })} disabled={disabled} />
           <Switch mt={30} label="Send Shopify shipping confirmation to customer" checked={s.notifyCustomer} onChange={(e) => setS({ ...s, notifyCustomer: e.currentTarget.checked })} disabled={disabled} />
         </SimpleGrid>
+        <Switch mt="md" label="Mark COD orders paid in Shopify when Steadfast confirms the delivery" checked={s.markPaidOnDelivery} onChange={(e) => setS({ ...s, markPaidOnDelivery: e.currentTarget.checked })} disabled={disabled} />
       </Card>
       <Card>
         <Text fw={600} mb={4}>Auto-booking after confirmation</Text>
@@ -308,6 +318,24 @@ function Workflow({ d }: { d: SettingsData }) {
           <NumberInput label="Delay (minutes)" min={0} max={1440} value={s.autoBookDelayMinutes} onChange={(v) => setS({ ...s, autoBookDelayMinutes: Number(v) || 0 })} disabled={disabled || !s.autoBookEnabled} />
           <Switch mt={30} label="Skip orders with risk flags (book them manually)" checked={s.autoBookSkipFlagged} onChange={(e) => setS({ ...s, autoBookSkipFlagged: e.currentTarget.checked })} disabled={disabled || !s.autoBookEnabled} />
         </SimpleGrid>
+        <Switch mt="md" label="Send a customer's confirmed orders as one parcel (waits for the last timer)" checked={s.autoCombine} onChange={(e) => setS({ ...s, autoCombine: e.currentTarget.checked })} disabled={disabled || !s.autoBookEnabled} />
+      </Card>
+      <Card>
+        <Text fw={600} mb={4}>Steadfast fraud check</Text>
+        <Text size="sm" c="dimmed" mb="md">
+          Every new order's phone is looked up in Steadfast's fraud check (delivery record across all merchants). Results are cached per phone and lookups are capped per minute, so Steadfast's limits are respected.
+        </Text>
+        <Switch label="Check every new order" checked={s.fraudCheckEnabled} onChange={(e) => setS({ ...s, fraudCheckEnabled: e.currentTarget.checked })} disabled={disabled} />
+        <SimpleGrid cols={{ base: 1, sm: 2 }} mt="sm">
+          <NumberInput label="Risky below this delivery rate (%)" min={0} max={100} value={s.fraudMinDeliveryRatio} onChange={(v) => setS({ ...s, fraudMinDeliveryRatio: Number(v) || 0 })} disabled={disabled || !s.fraudCheckEnabled} />
+          <NumberInput label="Re-use a result for (hours)" min={1} max={720} value={s.fraudCacheHours} onChange={(v) => setS({ ...s, fraudCacheHours: Number(v) || 24 })} disabled={disabled || !s.fraudCheckEnabled} />
+          <NumberInput label="Max lookups per minute" min={1} max={300} value={s.fraudMaxPerMinute} onChange={(v) => setS({ ...s, fraudMaxPerMinute: Number(v) || 30 })} disabled={disabled || !s.fraudCheckEnabled} />
+        </SimpleGrid>
+        <Stack gap="xs" mt="md">
+          <Switch label="Any merchant fraud report makes the customer risky" checked={s.fraudHoldOnReports} onChange={(e) => setS({ ...s, fraudHoldOnReports: e.currentTarget.checked })} disabled={disabled || !s.fraudCheckEnabled} />
+          <Switch label="Customers with no Steadfast history count as risky" checked={s.fraudHoldNewCustomers} onChange={(e) => setS({ ...s, fraudHoldNewCustomers: e.currentTarget.checked })} disabled={disabled || !s.fraudCheckEnabled} />
+          <Switch label='Never auto-book risky customers (they wait in "Call first")' checked={s.fraudHoldAutoBook} onChange={(e) => setS({ ...s, fraudHoldAutoBook: e.currentTarget.checked })} disabled={disabled || !s.fraudCheckEnabled} />
+        </Stack>
       </Card>
       <Card>
         <Text fw={600} mb={4}>Same-day dispatch</Text>

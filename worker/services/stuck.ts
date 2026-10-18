@@ -13,7 +13,7 @@ import type { AppSettings } from "./settings";
  * "Normal" is learned from our own delivered parcels per district; too little history → defaults.
  */
 
-export type StuckReason = "not_received" | "waiting_pickup" | "on_hold" | "no_update" | "slow_transit";
+export type StuckReason = "exceptional" | "not_received" | "waiting_pickup" | "on_hold" | "unconfirmed" | "no_update" | "slow_transit";
 const DAY = 86_400_000;
 const PHONE_RE = /(?:\+?88)?01[3-9]\d{8}/g;
 
@@ -119,11 +119,16 @@ export async function stuckParcels(db: DB, settings: AppSettings, opts: { includ
         reasons.push({ code: "waiting_pickup", text: "Scanned and ready more than a day ago, but not collected" });
       }
     }
+    if (r.status === "exceptional") reasons.push({ code: "exceptional", text: "Steadfast marked it exceptional (lost or damaged). Contact Steadfast support to claim the COD." });
     if (r.stage === "on_hold") reasons.push({ code: "on_hold", text: `On hold${r.lastMessage ? `: ${r.lastMessage}` : ""}` });
+    if (r.stage === "awaiting_confirmation" && r.lastStatusAt && now.getTime() - Date.parse(r.lastStatusAt) > 2 * DAY) {
+      const what = r.status.replace("_approval_pending", "").replace(/_/g, " ");
+      reasons.push({ code: "unconfirmed", text: `Rider marked it ${what} ${Math.floor((now.getTime() - Date.parse(r.lastStatusAt)) / DAY)} days ago; Steadfast hasn't confirmed yet` });
+    }
     if (r.pickedUpAt && silentDays !== null && silentDays >= settings.stuckNoUpdateDays) {
       reasons.push({ code: "no_update", text: `No update from Steadfast for ${Math.floor(silentDays)} days` });
     }
-    if (transitDays !== null && transitDays > exp.days && r.stage !== "on_hold") {
+    if (transitDays !== null && transitDays > exp.days && r.stage === "in_transit") {
       reasons.push({ code: "slow_transit", text: `${Math.floor(transitDays)} days with the courier; ${r.city ?? "this area"} usually takes ${exp.days} (${exp.basis})` });
     }
     if (!reasons.length) continue;
@@ -153,7 +158,7 @@ export async function stuckParcels(db: DB, settings: AppSettings, opts: { includ
         .limit(10_000)
         .all()
     : [];
-  const severity: Record<StuckReason, number> = { not_received: 0, on_hold: 1, no_update: 2, slow_transit: 3, waiting_pickup: 4 };
+  const severity: Record<StuckReason, number> = { exceptional: 0, not_received: 1, on_hold: 2, unconfirmed: 3, no_update: 4, slow_transit: 5, waiting_pickup: 6 };
   const parcels = out
     .map((p) => {
       const customer = (p.phone ?? "").replace(/\D/g, "").slice(-11);

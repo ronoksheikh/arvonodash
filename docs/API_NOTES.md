@@ -38,6 +38,7 @@ access for those fields in the Dev Dashboard. Without it, the API returns `null`
 | Cancel fake/rejected orders | `orderCancel(orderId, reason: FRAUD\|CUSTOMER\|INVENTORY\|DECLINED\|STAFF\|OTHER, restock, notifyCustomer, staffNote, refundMethod: {originalPaymentMethodsRefund: false})`. It runs asynchronously; completion is confirmed by the `orders/cancelled` webhook or a GraphQL refresh. We never refund from here |
 | Delete orders | `orderDelete(orderId)`. Only some order types can be deleted; when Shopify refuses, we fall back to `orderClose` (shown as **Archived** in Shopify admin) and archive locally |
 | Health check | `shop { name currencyCode … }` |
+| Mark COD paid | `orderMarkAsPaid(input: { id })` (needs `write_orders`) once Steadfast confirms the delivery; skipped when the collected cash is less than the Shopify balance |
 | Webhooks | `webhookSubscriptions`, `webhookSubscriptionCreate(topic, webhookSubscription: {uri})` |
 
 Customer contact fields come from `Customer.defaultPhoneNumber.phoneNumber` and
@@ -88,26 +89,53 @@ Laravel package (`steadfast-it/SteadFast-Courier-Laravel-Package`).
 | `POST /create_return_request` | `consignment_id` \| `invoice` \| `tracking_code`, `reason`. Statuses: pending, approved, processing, completed, cancelled |
 | `GET /get_return_request/{id}`, `/get_return_requests` | Return requests |
 | `GET /payments`, `/payments/{id}` | Payouts. **The response shape is not documented**, so it is parsed defensively (any `consignment_id` found in the details links a parcel) |
+| `GET /fraud_check/score/{phone}` | A phone's delivery record across all merchants: `delivery_ratio`, `cancellation_ratio` (whole %, `null` when nothing finished), `volume_band` (`none`…`very_high`), `total_reports`, `fraud_categories`, `doubtful_reports`; `score`/`level` stay `null` while Steadfast has scoring disabled, so ARVONO judges risk from the numbers. Parsed defensively (also accepts a `data` wrapper and older count fields) |
+| `GET /trackings_by_invoice/{invoice}` | Every step of a parcel: `[{ consignment_id, tracking_type, text, created_at }]`. Used to fill timeline gaps when a webhook was missed (only when a poll finds a change, or on a manual refresh) |
 
 **Delivery statuses**: `in_review`, `pending`, `hold`, `delivered_approval_pending`,
 `partial_delivered_approval_pending`, `cancelled_approval_pending`, `unknown_approval_pending`,
-`delivered`, `partial_delivered`, `cancelled`, `unknown`.
+`delivered`, `partial_delivered`, `cancelled`, `exceptional`, `unknown`.
+
+- `*_approval_pending` is the rider's word only. ARVONO shows it as **Awaiting Steadfast
+  confirmation** and counts no money until Steadfast confirms `delivered` (the COD is then owed to
+  us, and the Shopify order is marked paid).
+- `partial_delivered` with a collected amount below the cheapest item means the customer paid only
+  the delivery charge and returned the product; it is shown that way and a return is expected.
+- `exceptional` (lost / damaged) appears in Stuck parcels.
+
+**Times**: Steadfast timestamps such as `2025-03-02 12:45:30` carry no time zone and are read as
+Bangladesh time (UTC+6).
+
+**Rate limits**: 1,000 requests a minute (6,000 for booking); status answers are cached for 60 s.
+Ten failed logins in five minutes lock *every* request out for 60 minutes. ARVONO therefore never
+retries a 429 (all Steadfast calls pause for the `Retry-After` time) and pauses calls after a 401
+until the keys change, showing a banner either way. Fraud checks are cached per phone (24 h by
+default) and capped per minute.
 
 **Webhook**: in the Steadfast panel you set a callback URL and an "Auth Token (Bearer)". Requests
-carry `Authorization: Bearer <token>`. The documented payload fields are `consignment_id`,
-`invoice`, `status`, `cod_amount`, `updated_at`. Newer deliveries add `notification_type`
-(`delivery_status` | `tracking_update`), `delivery_charge` and `tracking_message`. A payload
-without `notification_type` is treated as `delivery_status`. Other notification types are stored
-and ignored. We reply `200 {"status":"success"}`.
+carry `Authorization: Bearer <token>`, and `X-Signature` = hex HMAC-SHA256 of the raw body keyed
+with the same token (verified when present). `Idempotency-Key` is repeated on retries and used to
+drop duplicates. A payload without `notification_type` is treated as `delivery_status`.
+
+| `notification_type` | What ARVONO does |
+|---|---|
+| `delivery_status` | Status change (`consignment_id`, `invoice`, `status`, `cod_amount`, `delivery_charge`, `tracking_message`, `updated_at`) |
+| `tracking_update` | Adds the tracking message to the timeline |
+| `consignment_update` | Someone edited the parcel in the Steadfast portal (`changed`, `values`): our copy is updated, and a changed COD that no longer matches Shopify is flagged |
+| `cancel_request`, `return_request` | Who asked and why goes on the order (timeline + note); return requests update the return record |
+| `return_list_accepted` | The listed parcels' returns are marked received |
+| `payment_request` | Pulls the payout from the API straight away |
+| `pickup_request`, `user_update` | Stored for the log |
+
+Steadfast retries after 30 s and 2 min on 5xx; a 4xx is not retried. We reply `200 {"status":"success"}`.
 
 **Not available through the API** (handled manually in the dashboard): cancelling a consignment,
 requesting redelivery, editing a booked consignment. The dashboard handles these as follows:
 - Redelivery is a rebooking with a new invoice (`#1001-R1`).
 - A cancellation after booking is flagged for staff to call Steadfast.
 
-**Deliberately not used**: endpoints that only appear in unofficial SDKs and are not in Steadfast's
-own documentation, such as `fraud_check`, `trackings_by_invoice` and `create_pickup_request`. Risk
-scoring uses our own delivery history instead.
+**Not used yet**: `create_pickup_request` (pickups are arranged with the rider directly),
+`status_with_return_status_by_cid`, `police_stations`.
 
 Tracking links use `https://steadfast.com.bd/t/{tracking_code}`. You can change this with
 `STEADFAST_TRACKING_URL`.

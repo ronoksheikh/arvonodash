@@ -345,7 +345,8 @@ dispatchRoutes.get("/board", requireScope("dispatch:read"), async (c) => {
   const q = c.req.query();
   const view = q.view ?? "ready";
   const range = q.date || q.from || q.upTo ? rangeFrom(c, q) : null;
-  const conds = [eq(orders.archived, false), sql`${orders.activeConsignmentId} is not null`];
+  // Orders combined into another order's parcel have no label or scan of their own.
+  const conds = [eq(orders.archived, false), sql`${orders.activeConsignmentId} is not null and ${orders.combinedIntoOrderId} is null`];
   if (range) conds.push(sql`${orders.bookedAt} >= ${range.from} and ${orders.bookedAt} < ${range.to}`);
   const staleCutoff = new Date(Date.now() - 24 * 3_600_000).toISOString();
   switch (view) {
@@ -361,7 +362,7 @@ dispatchRoutes.get("/board", requireScope("dispatch:read"), async (c) => {
     case "exceptions":
       conds.push(sql`(
         ${orders.courierStage} in ('on_hold', 'issue', 'returned', 'partial_delivered')
-        or (${orders.cancelledAt} is not null and ${orders.courierStage} in ('booked', 'in_transit', 'on_hold'))
+        or (${orders.cancelledAt} is not null and ${orders.courierStage} in ('booked', 'in_transit', 'on_hold', 'awaiting_confirmation'))
         or (${orders.dispatchStatus} = 'sorted' and ${orders.sortedAt} < ${staleCutoff})
       )`);
       break;

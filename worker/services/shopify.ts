@@ -585,6 +585,24 @@ export async function cancelOrder(
   return data.orderCancel.job;
 }
 
+/**
+ * Records the cash-on-delivery payment in Shopify (orderMarkAsPaid), so the order stops showing
+ * "Payment pending" and Shopify's sales reports are right. Shopify marks the whole balance paid.
+ */
+export async function markOrderAsPaid(env: Env, db: DB, shopifyOrderId: string) {
+  const data = await shopifyGraphql<{ orderMarkAsPaid: { order: { displayFinancialStatus: string } | null; userErrors: { message: string }[] } }>(
+    env,
+    db,
+    `mutation MarkPaid($input: OrderMarkAsPaidInput!) {
+      orderMarkAsPaid(input: $input) { order { id displayFinancialStatus } userErrors { field message } }
+    }`,
+    { input: { id: `gid://shopify/Order/${shopifyOrderId}` } },
+  );
+  const errs = data.orderMarkAsPaid.userErrors;
+  if (errs.length) throw new Error(errs.map((e) => e.message).join("; "));
+  return { financialStatus: data.orderMarkAsPaid.order?.displayFinancialStatus?.toLowerCase() ?? null };
+}
+
 /** Deletes an order where Shopify allows it; returns the Shopify error message otherwise. */
 export async function deleteOrder(env: Env, db: DB, shopifyOrderId: string): Promise<{ deleted: boolean; error?: string }> {
   const data = await shopifyGraphql<{ orderDelete: { deletedId: string | null; userErrors: { message: string }[] } }>(

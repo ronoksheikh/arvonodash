@@ -33,10 +33,17 @@ export function timingSafeEqual(a: string, b: string): boolean {
   return diff === 0;
 }
 
-export async function hmacSha256Base64(secret: string, body: ArrayBuffer | string): Promise<string> {
+async function hmacSha256(secret: string, body: ArrayBuffer | string): Promise<ArrayBuffer> {
   const key = await crypto.subtle.importKey("raw", enc.encode(secret), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
-  const data = typeof body === "string" ? enc.encode(body) : body;
-  return bytesToBase64(await crypto.subtle.sign("HMAC", key, data));
+  return crypto.subtle.sign("HMAC", key, typeof body === "string" ? enc.encode(body) : body);
+}
+
+export async function hmacSha256Base64(secret: string, body: ArrayBuffer | string): Promise<string> {
+  return bytesToBase64(await hmacSha256(secret, body));
+}
+
+export async function hmacSha256Hex(secret: string, body: ArrayBuffer | string): Promise<string> {
+  return bytesToHex(await hmacSha256(secret, body));
 }
 
 // PBKDF2-SHA256. Workers cap iterations at 100,000.

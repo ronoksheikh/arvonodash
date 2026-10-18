@@ -43,6 +43,13 @@
       "when": 1792347789489,
       "tag": "0005_pickups_followups",
       "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "6",
+      "when": 1792357615204,
+      "tag": "0006_fraud_combined_paid",
+      "breakpoints": true
     }
   ]
 }

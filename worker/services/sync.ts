@@ -1,14 +1,14 @@
-import { desc, eq, and, lte, sql } from "drizzle-orm";
+import { desc, eq, and, inArray, lte, or, sql } from "drizzle-orm";
 import { inList, type DB } from "../db";
 import type { Env } from "../env";
-import { consignments, orders, payments, syncRuns, webhookEvents } from "../db/schema";
+import { consignments, orderNotes, orders, payments, returns, syncRuns, trackingEvents, webhookEvents } from "../db/schema";
 import { fetchOrdersPage, normalizeRestOrder, shopifyConfigured } from "./shopify";
-import { upsertOrder } from "./orders";
+import { refreshRiskFlags, upsertOrder } from "./orders";
 import { getSettings, getValue, setValue } from "./settings";
 import { applyCourierUpdate, findConsignment } from "./courier";
 import { logActivity } from "./activity";
 import { matchByInvoice } from "./legacy";
-import { steadfastConfigured } from "./steadfast";
+import { parseSteadfastTime, steadfastConfigured } from "./steadfast";
 import { enqueueJob } from "./jobs";
 import * as steadfast from "./steadfast";
 import { nowIso, toNumber } from "../lib/util";
@@ -152,35 +152,180 @@ export type SteadfastWebhook = {
   consignment_id?: number | string;
   invoice?: string;
   tracking_code?: string;
+  tracking_id?: string;
   status?: string;
   cod_amount?: number | string | null;
   delivery_charge?: number | string | null;
   tracking_message?: string;
   updated_at?: string;
+  // consignment_update
+  changed?: string[];
+  values?: Record<string, unknown>;
+  // cancel_request / return_request
+  cancel_request_id?: number | string;
+  return_request_id?: number | string;
+  reason?: string;
+  reason_id?: number | string;
+  note?: string;
+  verify_status?: string;
+  // return_list_accepted / payment_request
+  return_list_id?: number | string;
+  item_count?: number;
+  consignments?: unknown[];
+  payment_request_id?: number | string;
+  amount?: number | string;
 };
+
+/** Events about one parcel (they must carry its consignment id, invoice or tracking code). */
+export const STEADFAST_PARCEL_EVENTS = new Set(["delivery_status", "tracking_update", "consignment_update", "cancel_request", "return_request"]);
+
+/** Steadfast field names in consignment_update → our consignment columns. */
+const PORTAL_FIELDS: Record<string, { column: "recipientAddress" | "recipientName" | "recipientPhone" | "codAmount" | "note"; label: string }> = {
+  cus_address: { column: "recipientAddress", label: "address" },
+  recipient_address: { column: "recipientAddress", label: "address" },
+  cus_name: { column: "recipientName", label: "name" },
+  recipient_name: { column: "recipientName", label: "name" },
+  cus_phone: { column: "recipientPhone", label: "phone" },
+  recipient_phone: { column: "recipientPhone", label: "phone" },
+  cod_amount: { column: "codAmount", label: "COD" },
+  cod: { column: "codAmount", label: "COD" },
+  note: { column: "note", label: "note" },
+};
+
+const str = (v: unknown) => (v === undefined || v === null ? null : String(v));
 
 export async function processSteadfastEvent(db: DB, payload: SteadfastWebhook) {
   const type = payload.notification_type ?? "delivery_status";
-  if (type !== "delivery_status" && type !== "tracking_update") return "ignored";
+  if (type === "return_list_accepted") return returnListAccepted(db, payload);
+  if (type === "payment_request") return "processed"; // the route pulls the payout from the API
+  if (!STEADFAST_PARCEL_EVENTS.has(type)) return "ignored"; // pickup_request, user_update: stored for the log
+
   const c = await findConsignment(db, {
-    consignmentId: payload.consignment_id !== undefined && payload.consignment_id !== null ? String(payload.consignment_id) : null,
+    consignmentId: str(payload.consignment_id),
     invoice: payload.invoice ?? null,
-    trackingCode: payload.tracking_code ?? null,
+    trackingCode: payload.tracking_code ?? payload.tracking_id ?? null,
   });
   if (!c) throw new Error(`Unknown consignment ${payload.consignment_id ?? payload.invoice}`);
-  await applyCourierUpdate(
-    db,
-    c,
-    {
-      status: type === "delivery_status" ? payload.status : null,
-      message: payload.tracking_message ?? null,
-      codAmount: payload.cod_amount === undefined || payload.cod_amount === null ? null : toNumber(payload.cod_amount),
-      deliveryCharge: payload.delivery_charge === undefined || payload.delivery_charge === null ? null : toNumber(payload.delivery_charge),
-      occurredAt: payload.updated_at ?? null,
-      source: "webhook",
-    },
-    "steadfast",
-  );
+  const at = parseSteadfastTime(payload.updated_at) ?? nowIso();
+
+  switch (type) {
+    case "consignment_update":
+      return portalChange(db, c, payload, at);
+    case "cancel_request":
+    case "return_request":
+      return parcelRequest(db, c, type, payload, at);
+    default:
+      await applyCourierUpdate(
+        db,
+        c,
+        {
+          status: type === "delivery_status" ? payload.status : null,
+          message: payload.tracking_message ?? null,
+          codAmount: payload.cod_amount === undefined || payload.cod_amount === null ? null : toNumber(payload.cod_amount),
+          deliveryCharge: payload.delivery_charge === undefined || payload.delivery_charge === null ? null : toNumber(payload.delivery_charge),
+          occurredAt: payload.updated_at ?? null,
+          source: "webhook",
+        },
+        "steadfast",
+      );
+      return "processed";
+  }
+}
+
+type ConsignmentRow = typeof consignments.$inferSelect;
+
+async function addParcelEvent(db: DB, c: ConsignmentRow, message: string, at: string) {
+  await db.insert(trackingEvents).values({ consignmentRowId: c.id, orderId: c.orderId, kind: "system", status: null, message, source: "webhook", occurredAt: at, createdAt: nowIso() });
+}
+
+/** Someone edited the parcel in the Steadfast portal: keep our copy in step and flag a changed COD. */
+async function portalChange(db: DB, c: ConsignmentRow, p: SteadfastWebhook, at: string) {
+  const values = p.values ?? {};
+  const patch: Partial<ConsignmentRow> = { updatedAt: nowIso() };
+  const changes: string[] = [];
+  for (const [key, raw] of Object.entries(values)) {
+    const field = PORTAL_FIELDS[key];
+    if (!field || raw === undefined || raw === null) continue;
+    if (field.column === "codAmount") {
+      const cod = toNumber(raw, NaN);
+      if (Number.isNaN(cod) || cod === c.codAmount) continue;
+      patch.codAmount = cod;
+      if (c.codChangedFrom === null) patch.codChangedFrom = c.codAmount;
+      changes.push(`COD ৳${c.codAmount} → ৳${cod}`);
+    } else {
+      patch[field.column] = String(raw);
+      changes.push(`${field.label} → "${String(raw)}"`);
+    }
+  }
+  const unknown = (p.changed ?? []).filter((k) => !PORTAL_FIELDS[k]);
+  if (unknown.length) changes.push(`also changed: ${unknown.join(", ")}`);
+  if (!changes.length) return "ignored";
+  await db.update(consignments).set(patch).where(eq(consignments.id, c.id));
+  await addParcelEvent(db, c, `Changed in the Steadfast portal: ${changes.join("; ")}`, at);
+  await logActivity(db, "steadfast", "courier.portal_change", { entityType: "consignment", entityId: c.consignmentId ?? c.invoice, orderId: c.orderId, details: { changes } });
+  await refreshRiskFlags(db, c.orderId, await getSettings(db));
+  return "processed";
+}
+
+/** A cancellation or return was requested for the parcel: show who asked and why on the order. */
+async function parcelRequest(db: DB, c: ConsignmentRow, type: "cancel_request" | "return_request", p: SteadfastWebhook, at: string) {
+  const reason = [p.reason, p.note].filter(Boolean).join(" — ") || "no reason given";
+  const status = p.verify_status ?? p.status ?? null;
+  const what = type === "cancel_request" ? "Cancellation requested" : "Return requested";
+  await addParcelEvent(db, c, `${what} in Steadfast: ${reason}${status ? ` (status: ${status})` : ""}`, at);
+  await db.insert(orderNotes).values({ orderId: c.orderId, kind: "internal", body: `Steadfast ${what.toLowerCase()}: ${reason}${status ? ` (${status})` : ""}`, createdAt: nowIso() });
+
+  if (type === "return_request") {
+    const id = str(p.return_request_id);
+    const existing = await db
+      .select({ id: returns.id })
+      .from(returns)
+      .where(id ? or(eq(returns.steadfastReturnId, id), eq(returns.consignmentRowId, c.id)) : eq(returns.consignmentRowId, c.id))
+      .get();
+    if (existing) {
+      await db.update(returns).set({ steadfastReturnId: id, steadfastReturnStatus: status, updatedAt: nowIso() }).where(eq(returns.id, existing.id));
+    } else {
+      await db.insert(returns).values({
+        orderId: c.orderId,
+        consignmentRowId: c.id,
+        type: "courier_return",
+        reason: `Return requested in Steadfast: ${reason}`,
+        status: "expected",
+        steadfastReturnId: id,
+        steadfastReturnStatus: status,
+        followUpAction: "call_customer",
+        createdAt: nowIso(),
+        updatedAt: nowIso(),
+      });
+    }
+  }
+  await logActivity(db, "steadfast", `courier.${type}`, { entityType: "consignment", entityId: c.consignmentId ?? c.invoice, orderId: c.orderId, details: { reason, status } });
+  return "processed";
+}
+
+/** We confirmed receipt of a Steadfast return list: those returns are physically back with us. */
+async function returnListAccepted(db: DB, p: SteadfastWebhook) {
+  const refs = (p.consignments ?? []).map((x) => {
+    if (x && typeof x === "object") {
+      const o = x as Record<string, unknown>;
+      return { consignmentId: str(o.consignment_id ?? o.id ?? o.cid), invoice: str(o.invoice), trackingCode: str(o.tracking_code ?? o.tracking_id) };
+    }
+    return { consignmentId: str(x), invoice: null, trackingCode: null };
+  });
+  const now = nowIso();
+  let received = 0;
+  for (const ref of refs) {
+    const c = await findConsignment(db, ref);
+    if (!c) continue;
+    const open = await db.select().from(returns).where(and(eq(returns.consignmentRowId, c.id), inArray(returns.status, ["expected", "in_transit"]))).all();
+    for (const r of open) {
+      await db.update(returns).set({ status: "received", receivedAt: now, updatedAt: now }).where(eq(returns.id, r.id));
+      received++;
+    }
+    if (!c.returnedAt && (c.stage === "returned" || c.stage === "partial_delivered")) await db.update(consignments).set({ returnedAt: now }).where(eq(consignments.id, c.id));
+    await addParcelEvent(db, c, `Returned parcel received back (Steadfast return list ${str(p.return_list_id) ?? ""})`.trim(), now);
+  }
+  await logActivity(db, "steadfast", "return.list_accepted", { entityType: "return_list", entityId: str(p.return_list_id) ?? "", details: { items: refs.length, received } });
   return "processed";
 }
 

@@ -11,6 +11,8 @@ import { api, del, notifyError, notifySuccess, patch, post, put } from "../api";
 import { useCan } from "../auth";
 import { useCountdown, CallingBadge, Copyable, CustomStatusBadge, DispatchBadge, ErrorState, FulfillmentBadge, KeyValue, LabelBadge, LoadingState, RiskBadge, ShopifySyncBadge, StageBadge, SteadfastStatusBadge, useStatuses, ReturnStatusBadge } from "./ui";
 import { CallingPanel } from "./Calling";
+import { FraudCard } from "./Fraud";
+import { PARTIAL_OUTCOME_LABEL } from "../../shared/delivery";
 import { ago, dateTime, money, titleCase } from "../format";
 import { DISPATCH_EVENTS, NOTE_KINDS, RISK_FLAGS, STEADFAST_STATUSES } from "../../shared/constants";
 import type { Booking, OrderDetail } from "../types";
@@ -174,6 +176,7 @@ function OverviewTab({ d, refresh, goBooking }: { d: OrderDetail; refresh: () =>
 
   return (
     <Stack gap="lg">
+      {o.courierStage === "unbooked" && !o.cancelledAt && <FraudCard orderId={o.id} fraud={d.fraud} onChecked={refresh} />}
       {!o.cancelledAt && (
         <CallingPanel orderId={o.id} status={o.callingStatus} attempts={o.callAttempts} callbackAt={o.callbackAt} locked={o.courierStage !== "unbooked"} calls={d.calls} onDone={refresh} />
       )}
@@ -324,6 +327,11 @@ function BookingTab({ d, refresh, goCourier }: { d: OrderDetail; refresh: () => 
     setPartial(Boolean(d.booking.lineItems?.length));
   }, [d.booking]);
   const dirty = JSON.stringify(form) !== JSON.stringify(d.booking);
+  // Same customer's other confirmed orders: send them in this parcel (one delivery charge).
+  const [together, setTogether] = useState<Set<number>>(new Set(d.combineCandidates.map((x) => x.id)));
+  useEffect(() => setTogether(new Set(d.combineCandidates.map((x) => x.id))), [d.combineCandidates]);
+  const combineIds = partial ? [] : d.combineCandidates.filter((x) => together.has(x.id)).map((x) => x.id);
+  const parcelCod = (Number(form.codAmount) || 0) + d.combineCandidates.filter((x) => combineIds.includes(x.id)).reduce((sum, x) => sum + x.outstanding, 0);
 
   const save = useMutation({
     mutationFn: () => put(`/orders/${o.id}/booking`, { booking: { ...form, lineItems: partial ? form.lineItems ?? [] : [] } }),
@@ -334,7 +342,7 @@ function BookingTab({ d, refresh, goCourier }: { d: OrderDetail; refresh: () => 
   const book = useMutation({
     mutationFn: async (allowRisky: boolean) => {
       if (dirty) await put(`/orders/${o.id}/booking`, { booking: { ...form, lineItems: partial ? form.lineItems ?? [] : [] } });
-      return post<{ results: { ok: boolean; error?: string; trackingCode?: string }[] }>("/orders/book", { ids: [o.id], allowRisky });
+      return post<{ results: { ok: boolean; error?: string; trackingCode?: string }[] }>("/orders/book", { ids: [o.id, ...combineIds], allowRisky, combine: combineIds.length > 0 });
     },
     onSuccess: (r) => {
       const res = r.results[0];
@@ -355,7 +363,9 @@ function BookingTab({ d, refresh, goCourier }: { d: OrderDetail; refresh: () => 
         <Stack gap={4}>
           <Text size="sm">{form.recipientName} · {form.recipientPhone}</Text>
           <Text size="sm" c="dimmed">{form.recipientAddress}</Text>
-          <Text size="sm" mt="xs">COD amount: <b>{money(form.codAmount)}</b> · {form.deliveryType === 1 ? "Point delivery" : "Home delivery"}</Text>
+          <Text size="sm" mt="xs">COD amount: <b>{money(parcelCod)}</b> · {form.deliveryType === 1 ? "Point delivery" : "Home delivery"}</Text>
+          {combineIds.length > 0 && <Text size="sm">One parcel with {d.combineCandidates.filter((x) => combineIds.includes(x.id)).map((x) => x.name).join(", ")}</Text>}
+          {d.fraud?.verdict === "risky" && <Alert color="red" mt="sm" variant="light">Steadfast fraud check: {d.fraud.reasons.join(", ")}. Book only after a confirming call.</Alert>}
           {o.riskFlags?.length && !o.riskDismissed ? <Alert color="orange" mt="sm" variant="light">This order has unreviewed risk flags.</Alert> : null}
         </Stack>
       ),
@@ -371,9 +381,15 @@ function BookingTab({ d, refresh, goCourier }: { d: OrderDetail; refresh: () => 
 
   if (o.courierStage !== "unbooked") {
     const active = d.consignments.find((c) => c.id === o.activeConsignmentId);
+    const others = d.parcelOrders.filter((x) => x.id !== o.id);
     return (
       <Alert color="blue" variant="light" icon={<Truck size={18} />} title="Already booked">
         <Text size="sm">This order was booked{active ? ` as ${active.invoice} (tracking ${active.trackingCode ?? "pending"})` : ""}. Booking details can no longer be edited.</Text>
+        {others.length > 0 && (
+          <Text size="sm" mt={6}>
+            <b>One parcel</b> with {others.map((x) => `${x.name}${x.cancelledAt ? " (cancelled!)" : ""}`).join(", ")} · parcel COD {money(active?.codAmount ?? 0)}
+          </Text>
+        )}
         <Button size="xs" variant="white" mt="sm" onClick={goCourier}>View courier tracking</Button>
       </Alert>
     );
@@ -403,6 +419,36 @@ function BookingTab({ d, refresh, goCourier }: { d: OrderDetail; refresh: () => 
       </SimpleGrid>
       <TextInput label="Item description" maxLength={250} value={form.itemDescription ?? ""} onChange={(e) => setForm({ ...form, itemDescription: e.currentTarget.value || undefined })} disabled={!editable} />
       <Textarea label="Rider instructions / note" description="Sent to Steadfast as the consignment note" autosize minRows={2} value={form.note ?? ""} onChange={(e) => setForm({ ...form, note: e.currentTarget.value || undefined })} disabled={!editable} />
+
+      {d.combineCandidates.length > 0 && (
+        <Card padding="md" style={{ borderLeft: "4px solid var(--mantine-color-grape-5)" }}>
+          <Group gap={8} mb={6}>
+            <Package size={16} />
+            <Text fw={600} size="sm">Same customer has {d.combineCandidates.length} more confirmed order{d.combineCandidates.length > 1 ? "s" : ""}</Text>
+          </Group>
+          <Text size="xs" c="dimmed" mb="xs">Send them in this parcel: one delivery charge and one return risk instead of several. Each order is still fulfilled and marked paid in Shopify on its own.</Text>
+          <Stack gap={4}>
+            {d.combineCandidates.map((x) => (
+              <Checkbox
+                key={x.id}
+                disabled={partial || !can("courier.book")}
+                checked={together.has(x.id) && !partial}
+                onChange={() => {
+                  const n = new Set(together);
+                  n.has(x.id) ? n.delete(x.id) : n.add(x.id);
+                  setTogether(n);
+                }}
+                label={<Text size="sm">{x.name} · {x.items} item{x.items === 1 ? "" : "s"} · COD {money(x.outstanding)}</Text>}
+              />
+            ))}
+          </Stack>
+          {partial ? (
+            <Text size="xs" c="orange" mt={6}>A partial shipment can't be combined.</Text>
+          ) : combineIds.length > 0 ? (
+            <Text size="sm" mt="xs">Parcel COD: <b>{money(parcelCod)}</b></Text>
+          ) : null}
+        </Card>
+      )}
 
       <Card padding="md">
         <Checkbox
@@ -435,7 +481,7 @@ function BookingTab({ d, refresh, goCourier }: { d: OrderDetail; refresh: () => 
           {editable && <Button variant="default" disabled={!dirty} loading={save.isPending} onClick={() => save.mutate()}>Save</Button>}
           {can("courier.book") && (
             <Button leftSection={<Send size={15} />} disabled={Boolean(o.cancelledAt) || o.callingStatus !== "confirmed"} loading={book.isPending} onClick={confirmBook}>
-              Book with Steadfast
+              {combineIds.length ? `Send ${combineIds.length + 1} orders as one parcel` : "Send to Steadfast"}
             </Button>
           )}
         </Group>
@@ -570,6 +616,19 @@ function CourierTab({ d, refresh }: { d: OrderDetail; refresh: () => void }) {
               <div><Text size="xs" c="dimmed">Delivery charge</Text><Text size="sm" fw={500}>{money(c.deliveryCharge)}</Text></div>
               <div><Text size="xs" c="dimmed">Settlement</Text><Text size="sm" fw={500}>{c.paymentId ? `Paid #${c.paymentId}` : ["delivered", "partial_delivered"].includes(c.stage) ? "Awaiting payout" : "—"}</Text></div>
             </SimpleGrid>
+            {c.partialOutcome && (
+              <Alert mt="sm" variant="light" color={c.partialOutcome === "charge_only" ? "orange" : "lime"} p="xs">
+                <Text size="sm">{PARTIAL_OUTCOME_LABEL[c.partialOutcome]}{c.partialOutcome === "charge_only" ? " — the product is coming back to you" : ""}.</Text>
+              </Alert>
+            )}
+            {c.stage === "awaiting_confirmation" && (
+              <Alert mt="sm" variant="light" color="cyan" p="xs">
+                <Text size="sm">The rider reported "{STEADFAST_STATUSES[c.status] ?? c.status}". Steadfast hasn't confirmed it yet, so the COD isn't counted until they do.</Text>
+              </Alert>
+            )}
+            {c.codChangedFrom !== null && c.codChangedFrom !== undefined && (
+              <Text size="xs" c="orange" mt="sm">COD was changed in the Steadfast portal (was {money(c.codChangedFrom)}).</Text>
+            )}
             {c.note && <Text size="xs" c="dimmed" mt="sm">Note: {c.note}</Text>}
             {ret && <Group gap={6} mt="sm"><Text size="xs" c="dimmed">Return:</Text><ReturnStatusBadge status={ret.status} />{ret.steadfastReturnStatus && <Badge size="xs" variant="outline">Steadfast: {ret.steadfastReturnStatus}</Badge>}</Group>}
             <Divider my="md" />

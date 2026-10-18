@@ -2,7 +2,7 @@ import { Hono } from "hono";
 import { and, asc, desc, eq, gte, inArray, isNotNull, isNull, lte, or, sql, type SQL } from "drizzle-orm";
 import type { AppEnv } from "../env";
 import { getDb, inList, pick, type DB } from "../db";
-import { activityLog, callLogs, consignments, customers, customStatuses, orderNotes, orders, returns, trackingEvents, users, type BookingDetails } from "../db/schema";
+import { activityLog, callLogs, consignments, customers, customStatuses, fraudChecks, orderNotes, orders, returns, trackingEvents, users, type BookingDetails } from "../db/schema";
 import { requirePerm } from "../lib/auth";
 import { csvEscape, nowIso, normalizeBdPhone } from "../lib/util";
 import { getSettings } from "../services/settings";
@@ -15,11 +15,14 @@ import { orderHistory } from "../services/dispatch";
 import { processJobs } from "../services/jobs";
 import { trackingUrl } from "../services/steadfast";
 import { NOTE_KINDS } from "../../shared/constants";
+import { partialOutcome } from "../../shared/delivery";
 import { ensureTrackingToken, trackingPageUrl } from "../services/tracking";
+import { ensureFraudCheck, fraudSummary, getFraudCheck, RISKY_FRAUD_SQL, type FraudRow } from "../services/fraud";
+import { openSiblings } from "../services/autobook";
 
 export const orderRoutes = new Hono<AppEnv>();
 
-const TABS = ["all", "to_call", "ready", "booked", "in_transit", "delivered", "returned", "cancelled", "attention"] as const;
+const TABS = ["all", "call_first", "to_call", "ready", "booked", "in_transit", "delivered", "returned", "cancelled", "attention"] as const;
 
 
 
@@ -28,6 +31,8 @@ const NOT_FULFILLED = sql`coalesce(${orders.shopifyFulfillmentStatus}, '') not i
 
 function tabCondition(tab: string): SQL | undefined {
   switch (tab) {
+    case "call_first": // Steadfast fraud check says risky: call before anything is booked
+      return and(eq(orders.courierStage, "unbooked"), isNull(orders.cancelledAt), eq(orders.riskDismissed, false), NOT_FULFILLED, RISKY_FRAUD_SQL);
     case "to_call":
       return and(inArray(orders.callingStatus, ["not_called", "no_answer", "call_again"]), eq(orders.courierStage, "unbooked"), isNull(orders.cancelledAt), NOT_FULFILLED);
     case "ready":
@@ -35,7 +40,7 @@ function tabCondition(tab: string): SQL | undefined {
     case "booked":
       return eq(orders.courierStage, "booked");
     case "in_transit":
-      return inArray(orders.courierStage, ["in_transit", "on_hold"]);
+      return inArray(orders.courierStage, ["in_transit", "on_hold", "awaiting_confirmation"]);
     case "delivered":
       return inArray(orders.courierStage, ["delivered", "partial_delivered"]);
     case "returned":
@@ -124,7 +129,12 @@ const listColumns = {
   cancelRequestedAt: orders.cancelRequestedAt,
   autoBookAt: orders.autoBookAt,
   autoBookNote: orders.autoBookNote,
+  combinedIntoOrderId: orders.combinedIntoOrderId,
   customerId: orders.customerId,
+  // Same customer's other confirmed orders still waiting for a parcel (can travel together).
+  combinableWith: sql<string | null>`(select group_concat(o3.name, ', ') from orders o3 where o3.phone = ${orders.phone} and o3.id != ${orders.id}
+    and o3.courier_stage = 'unbooked' and o3.calling_status = 'confirmed' and o3.cancelled_at is null and o3.archived = 0
+    and o3.active_consignment_id is null and o3.combined_into_order_id is null)`,
   // Customer history (all their orders, by phone), for "new vs returning" at a glance.
   customerOrders: sql<number>`(select count(*) from orders o2 where o2.customer_id = ${orders.customerId} and o2.id != ${orders.id})`,
   customerDelivered: sql<number>`(select count(*) from orders o2 where o2.customer_id = ${orders.customerId} and o2.id != ${orders.id} and o2.courier_stage in ('delivered','partial_delivered'))`,
@@ -162,7 +172,15 @@ orderRoutes.get("/", async (c) => {
       TABS.map(async (t) => [t, (await db.select({ n: sql<number>`count(*)` }).from(orders).where(and(...base, tabCondition(t))).get())?.n ?? 0] as const),
     ),
   ]);
-  return c.json({ rows, total: total?.n ?? 0, page, pageSize, tabCounts: Object.fromEntries(tabCounts) });
+  const appSettings = await getSettings(db);
+  const fraud = await fraudByPhone(db, rows.map((r) => r.phone));
+  return c.json({
+    rows: rows.map((r) => ({ ...r, fraud: r.phone ? fraudSummary(fraud.get(r.phone) ?? null, appSettings) : null })),
+    total: total?.n ?? 0,
+    page,
+    pageSize,
+    tabCounts: Object.fromEntries(tabCounts),
+  });
 });
 
 orderRoutes.get("/export.csv", requirePerm("export"), async (c) => {
@@ -239,6 +257,12 @@ orderRoutes.get("/print", requirePerm("export"), async (c) => {
   });
 });
 
+async function fraudByPhone(db: DB, phones: (string | null)[]) {
+  const list = [...new Set(phones.filter((p): p is string => Boolean(p)))];
+  const rows: FraudRow[] = list.length ? await db.select().from(fraudChecks).where(inList(fraudChecks.phone, list)).all() : [];
+  return new Map(rows.map((r) => [r.phone, r]));
+}
+
 async function loadOrder(db: DB, id: number) {
   const order = await db.select().from(orders).where(eq(orders.id, id)).get();
   if (!order) return null;
@@ -264,8 +288,19 @@ orderRoutes.get("/:id{[0-9]+}", async (c) => {
   const [customer, history, cons, events, notes, activity, rets, duplicates] = await Promise.all([
     order.customerId ? db.select().from(customers).where(eq(customers.id, order.customerId)).get() : null,
     order.customerId ? customerHistory(db, order.customerId) : null,
-    db.select().from(consignments).where(eq(consignments.orderId, order.id)).orderBy(desc(consignments.createdAt)).all(),
-    db.select().from(trackingEvents).where(eq(trackingEvents.orderId, order.id)).orderBy(desc(trackingEvents.occurredAt), desc(trackingEvents.id)).all(),
+    // Include the parcel this order travels in when it was combined into another order's booking.
+    db
+      .select()
+      .from(consignments)
+      .where(or(eq(consignments.orderId, order.id), order.activeConsignmentId ? eq(consignments.id, order.activeConsignmentId) : undefined))
+      .orderBy(desc(consignments.createdAt))
+      .all(),
+    db
+      .select()
+      .from(trackingEvents)
+      .where(or(eq(trackingEvents.orderId, order.id), order.activeConsignmentId ? eq(trackingEvents.consignmentRowId, order.activeConsignmentId) : undefined))
+      .orderBy(desc(trackingEvents.occurredAt), desc(trackingEvents.id))
+      .all(),
     db
       .select({ note: orderNotes, userName: users.name })
       .from(orderNotes)
@@ -292,7 +327,24 @@ orderRoutes.get("/:id{[0-9]+}", async (c) => {
     customer,
     history,
     otherOrders: duplicates,
-    consignments: cons.map((x) => ({ ...x, trackingUrl: x.trackingCode ? trackingUrl(c.env, x.trackingCode) : null })),
+    consignments: cons.map((x) => ({
+      ...x,
+      trackingUrl: x.trackingCode ? trackingUrl(c.env, x.trackingCode) : null,
+      partialOutcome: x.stage === "partial_delivered" ? partialOutcome(x.collectedAmount, order.lineItems) : null,
+    })),
+    fraud: fraudSummary(await getFraudCheck(db, order.phone), appSettings),
+    // Orders sharing this order's parcel (combined booking), and confirmed orders that could join it.
+    parcelOrders: order.activeConsignmentId
+      ? await db
+          .select({ id: orders.id, name: orders.name, total: orders.total, outstanding: orders.outstanding, combinedIntoOrderId: orders.combinedIntoOrderId, cancelledAt: orders.cancelledAt })
+          .from(orders)
+          .where(eq(orders.activeConsignmentId, order.activeConsignmentId))
+          .all()
+      : [],
+    combineCandidates:
+      order.courierStage === "unbooked" && order.callingStatus === "confirmed" && !order.cancelledAt
+        ? (await openSiblings(db, order)).map((x) => ({ id: x.id, name: x.name, total: x.total, outstanding: x.outstanding, shopCreatedAt: x.shopCreatedAt, items: x.lineItems.length }))
+        : [],
     events,
     notes: notes.map((n) => ({ ...n.note, userName: n.userName })),
     activity,
@@ -421,12 +473,28 @@ orderRoutes.post("/bulk", requirePerm("orders.edit"), async (c) => {
 /** Manual booking only: orders are sent to Steadfast exclusively through this staff action. */
 orderRoutes.post("/book", requirePerm("courier.book"), async (c) => {
   const db = getDb(c.env.DB);
-  const { ids, override, allowRisky } = await c.req.json<{ ids: number[]; override?: Partial<BookingDetails>; allowRisky?: boolean }>();
+  const { ids, override, allowRisky, combine } = await c.req.json<{ ids: number[]; override?: Partial<BookingDetails>; allowRisky?: boolean; combine?: boolean }>();
   if (!Array.isArray(ids) || !ids.length) return c.json({ error: "No orders selected" }, 400);
   if (ids.length > 100) return c.json({ error: "Book at most 100 orders per request" }, 400);
-  if (override && ids.length > 1) return c.json({ error: "Booking overrides apply to a single order" }, 400);
-  const results = await bookOrders(c.env, db, c.get("user"), ids, { override, allowRisky }, (p) => c.executionCtx.waitUntil(p));
+  // Overrides edit one parcel: a single order, or one order plus the orders combined into it.
+  if (override && ids.length > 1 && !combine) return c.json({ error: "Booking overrides apply to a single order" }, 400);
+  if (override && combine) {
+    const phones = new Set((await db.select({ phone: orders.phone }).from(orders).where(inList(orders.id, ids)).all()).map((r) => r.phone));
+    if (phones.size !== 1) return c.json({ error: "Booking overrides apply to one parcel (one customer)" }, 400);
+  }
+  const results = await bookOrders(c.env, db, c.get("user"), ids, { override, allowRisky, combine: Boolean(combine) }, (p) => c.executionCtx.waitUntil(p));
   return c.json({ results, booked: results.filter((r) => r.ok).length, failed: results.filter((r) => !r.ok).length });
+});
+
+/** Look the customer up in Steadfast's fraud check now (cached per phone; limits apply). */
+orderRoutes.post("/:id{[0-9]+}/fraud-check", requirePerm("orders.view"), async (c) => {
+  const db = getDb(c.env.DB);
+  const order = await loadOrder(db, Number(c.req.param("id")));
+  if (!order) return c.json({ error: "Order not found" }, 404);
+  if (!order.phone) return c.json({ error: "This order has no valid phone number to check" }, 400);
+  const r = await ensureFraudCheck(c.env, db, order.phone, { force: true });
+  const updated = await loadOrder(db, order.id);
+  return c.json({ fraud: fraudSummary(r.row, await getSettings(db)), deferred: r.deferred, riskFlags: updated?.riskFlags ?? [] });
 });
 
 orderRoutes.post("/:id{[0-9]+}/fulfill", requirePerm("fulfillment.manage"), async (c) => {

@@ -111,7 +111,7 @@ settingsRoutes.post("/test/shopify", requirePerm("settings.manage"), async (c) =
 
 settingsRoutes.post("/test/steadfast", requirePerm("settings.manage"), async (c) => {
   try {
-    return c.json({ ok: true, balance: await getBalance(c.env) });
+    return c.json({ ok: true, balance: await getBalance(c.env, { force: true }) });
   } catch (err) {
     return c.json({ ok: false, error: (err as Error).message });
   }

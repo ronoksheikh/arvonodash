@@ -52,6 +52,7 @@ export const COURIER_STAGES = {
   booked: { label: "Booked", color: "blue" },
   in_transit: { label: "In transit", color: "indigo" },
   on_hold: { label: "On hold", color: "yellow" },
+  awaiting_confirmation: { label: "Awaiting Steadfast confirmation", color: "cyan" },
   delivered: { label: "Delivered", color: "teal" },
   partial_delivered: { label: "Partial delivered", color: "lime" },
   returned: { label: "Returned", color: "red" },
@@ -73,6 +74,7 @@ export const STEADFAST_STATUSES: Record<string, string> = {
   partial_delivered: "Partial delivered",
   cancelled: "Cancelled",
   unknown: "Unknown",
+  exceptional: "Exceptional (lost / damaged)",
 };
 
 export const FULFILLMENT_STATES = {
@@ -131,6 +133,9 @@ export const RISK_FLAGS: Record<string, string> = {
   test_order: "Looks like a test order",
   large_quantity: "Unusually large quantity",
   changed_after_booking: "Phone or address changed in Shopify after booking — update Steadfast",
+  courier_fraud: "Steadfast fraud check: poor delivery record or merchant reports — call first",
+  cod_mismatch: "COD in Steadfast no longer matches the Shopify balance",
+  combined_order_cancelled: "An order travelling in this parcel was cancelled — COD is now wrong",
 };
 
 export const CALLING_STATUSES = {

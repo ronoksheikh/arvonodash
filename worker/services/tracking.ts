@@ -1,7 +1,8 @@
-import { and, asc, eq, isNull } from "drizzle-orm";
+import { and, asc, eq, isNull, or } from "drizzle-orm";
 import type { DB } from "../db";
 import { callLogs, consignments, orders, trackingEvents } from "../db/schema";
 import { getSettings } from "./settings";
+import { partialOutcome } from "../../shared/delivery";
 
 /**
  * Customer-facing order tracking (/t/<token>). The token is 80 random bits, so the link can't be
@@ -51,8 +52,19 @@ export async function buildTracking(db: DB, token: string) {
   if (!order) return null;
   const [calls, cons, events, appSettings] = await Promise.all([
     db.select().from(callLogs).where(eq(callLogs.orderId, order.id)).orderBy(asc(callLogs.createdAt), asc(callLogs.id)).all(),
-    db.select().from(consignments).where(eq(consignments.orderId, order.id)).orderBy(asc(consignments.createdAt)).all(),
-    db.select().from(trackingEvents).where(eq(trackingEvents.orderId, order.id)).orderBy(asc(trackingEvents.occurredAt), asc(trackingEvents.id)).all(),
+    // An order combined into another order's booking shares that parcel.
+    db
+      .select()
+      .from(consignments)
+      .where(or(eq(consignments.orderId, order.id), order.activeConsignmentId ? eq(consignments.id, order.activeConsignmentId) : undefined))
+      .orderBy(asc(consignments.createdAt))
+      .all(),
+    db
+      .select()
+      .from(trackingEvents)
+      .where(or(eq(trackingEvents.orderId, order.id), order.activeConsignmentId ? eq(trackingEvents.consignmentRowId, order.activeConsignmentId) : undefined))
+      .orderBy(asc(trackingEvents.occurredAt), asc(trackingEvents.id))
+      .all(),
     getSettings(db),
   ]);
 
@@ -78,16 +90,30 @@ export async function buildTracking(db: DB, token: string) {
       tone: "info",
     });
     if (c.pickedUpAt) timeline.push({ at: c.pickedUpAt, kind: "picked_up", title: "Picked up by Steadfast — on the way", tone: "info" });
-    if (c.deliveredAt) {
-      const partial = c.stage === "partial_delivered";
-      timeline.push({ at: c.deliveredAt, kind: "delivered", title: partial ? "Partially delivered" : "Delivered", tone: "good" });
+    // The rider's report reaches the customer first; Steadfast's later confirmation adds nothing new for them.
+    const riderReport = events.find((e) => e.consignmentRowId === c.id && e.kind === "status" && e.status?.endsWith("_approval_pending"));
+    const outcomeAt = c.deliveredAt ?? (riderReport?.status?.startsWith("delivered") || riderReport?.status?.startsWith("partial") ? riderReport.occurredAt : null);
+    if (outcomeAt) {
+      const partial = c.stage === "partial_delivered" || riderReport?.status?.startsWith("partial");
+      const chargeOnly = partial && c.stage === "partial_delivered" && partialOutcome(c.collectedAmount, order.lineItems) === "charge_only";
+      timeline.push({
+        at: riderReport?.occurredAt && riderReport.occurredAt < outcomeAt ? riderReport.occurredAt : outcomeAt,
+        kind: chargeOnly ? "returned" : "delivered",
+        title: chargeOnly ? "Product returned — delivery charge paid" : partial ? "Partially delivered" : "Delivered",
+        tone: chargeOnly ? "warn" : "good",
+      });
     }
-    if (c.returnedAt) timeline.push({ at: c.returnedAt, kind: "returned", title: "Delivery failed — parcel returned", tone: "bad" });
+    if (c.returnedAt) {
+      // After a partial delivery only the refused items come back; that's not a failed delivery.
+      const partialReturn = c.stage === "partial_delivered";
+      timeline.push({ at: c.returnedAt, kind: "returned", title: partialReturn ? "Returned items received back by us" : "Delivery failed — parcel returned", tone: partialReturn ? "info" : "bad" });
+    }
   }
   if (order.sortedAt) timeline.push({ at: order.sortedAt, kind: "packed", title: "Packed and ready for courier pickup", tone: "info" });
 
   for (const e of events) {
-    if (e.kind === "tracking" && e.message) {
+    // Steadfast's own "created" step repeats our "Sent to Steadfast" entry.
+    if (e.kind === "tracking" && e.message && !/^consignment created/i.test(e.message)) {
       timeline.push({ at: e.occurredAt, kind: "courier_update", title: e.message, tone: "info" });
     } else if (e.kind === "status" && e.status === "hold") {
       timeline.push({ at: e.occurredAt, kind: "on_hold", title: "Delivery on hold", detail: e.message, tone: "warn" });
@@ -100,10 +126,11 @@ export async function buildTracking(db: DB, token: string) {
   timeline.sort((a, b) => (a.at < b.at ? -1 : a.at > b.at ? 1 : 0));
 
   const active = cons.find((c) => c.id === order.activeConsignmentId) ?? cons.filter((c) => !c.superseded).at(-1) ?? null;
+  const riderSays = active?.stage === "awaiting_confirmation" ? active.status : null; // e.g. delivered_approval_pending
   const booked = Boolean(active?.consignmentId || active?.trackingCode);
   const stage = order.courierStage;
-  const delivered = stage === "delivered" || stage === "partial_delivered";
-  const pickedUp = Boolean(active?.pickedUpAt) || ["in_transit", "on_hold", "returned"].includes(stage) || delivered;
+  const delivered = stage === "delivered" || stage === "partial_delivered" || Boolean(riderSays?.startsWith("delivered") || riderSays?.startsWith("partial"));
+  const pickedUp = Boolean(active?.pickedUpAt) || ["in_transit", "on_hold", "awaiting_confirmation", "returned"].includes(stage) || delivered;
 
   const steps: TrackingStep[] = [
     { key: "placed", label: "Placed", done: true, at: order.shopCreatedAt },
@@ -117,8 +144,11 @@ export async function buildTracking(db: DB, token: string) {
   if (order.cancelledAt || order.callingStatus === "rejected") status = { key: "cancelled", title: "Order cancelled", tone: "bad" };
   else if (stage === "returned") status = { key: "returned", title: "Parcel returned", tone: "bad" };
   else if (stage === "cancelled") status = { key: "cancelled", title: "Delivery cancelled", tone: "bad" };
-  else if (stage === "delivered") status = { key: "delivered", title: "Delivered", tone: "good" };
-  else if (stage === "partial_delivered") status = { key: "delivered", title: "Partially delivered", tone: "good" };
+  else if (stage === "delivered" || riderSays?.startsWith("delivered")) status = { key: "delivered", title: "Delivered", tone: "good" };
+  else if (stage === "partial_delivered" && active && partialOutcome(active.collectedAmount, order.lineItems) === "charge_only")
+    status = { key: "returned", title: "Product returned — delivery charge paid", tone: "warn" };
+  else if (stage === "partial_delivered" || riderSays?.startsWith("partial")) status = { key: "delivered", title: "Partially delivered", tone: "good" };
+  else if (riderSays?.startsWith("cancelled")) status = { key: "cancelled", title: "Delivery cancelled", tone: "bad" };
   else if (stage === "on_hold") status = { key: "on_hold", title: "Delivery on hold", tone: "warn" };
   else if (pickedUp) status = { key: "shipped", title: "On the way with Steadfast", tone: "info" };
   else if (order.sortedAt) status = { key: "packed", title: "Packed — waiting for courier pickup", tone: "info" };
@@ -128,6 +158,10 @@ export async function buildTracking(db: DB, token: string) {
     status = { key: "awaiting_call", title: "Waiting for confirmation — please pick up our call", tone: "warn" };
   else status = { key: "placed", title: "Order received — we'll call you to confirm", tone: "info" };
 
+  // A combined parcel collects for every order in it, so the customer pays the parcel's COD once.
+  const together = active
+    ? (await db.select({ id: orders.id, name: orders.name }).from(orders).where(eq(orders.activeConsignmentId, active.id)).all()).filter((o) => o.id !== order.id).map((o) => o.name)
+    : [];
   const codDue = active?.codAmount ?? order.outstanding;
 
   return {
@@ -142,6 +176,7 @@ export async function buildTracking(db: DB, token: string) {
       discount: order.discountTotal,
       total: order.total,
       codDue: delivered ? 0 : codDue,
+      shipsWith: together,
     },
     customer: {
       name: order.customerName,

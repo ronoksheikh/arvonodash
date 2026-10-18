@@ -47,7 +47,7 @@ export function businessDate(iso: string | Date, offset: string): string {
 
 /** Orders that can appear in a print run: booked, not yet picked up, not cancelled/archived. */
 const printableBase = sql`${orders.courierStage} = 'booked' and ${orders.cancelledAt} is null and ${orders.archived} = 0
-  and ${orders.activeConsignmentId} is not null`;
+  and ${orders.activeConsignmentId} is not null and ${orders.combinedIntoOrderId} is null`;
 
 export async function addEvents(db: DB, rows: { orderId: number; event: string; jobId?: string | null; note?: string | null; consignmentRowId?: number | null }[], actor: Actor) {
   const now = nowIso();
@@ -398,8 +398,17 @@ export async function scanParcel(db: DB, actor: Actor, code: string, batchId: st
     return { kind: "old_label", ok: false, message: "Old label — this order was rebooked. Use the new label.", order: info };
   }
   if (o.cancelledAt) return { kind: "cancelled", ok: false, message: "STOP — order cancelled in Shopify. Keep this parcel.", order: info };
+  // A combined parcel: one of the other orders inside it was cancelled, so the contents and COD are wrong.
+  const cancelledInside = await db
+    .select({ name: orders.name })
+    .from(orders)
+    .where(and(eq(orders.activeConsignmentId, c.id), sql`${orders.combinedIntoOrderId} is not null and ${orders.cancelledAt} is not null`))
+    .all();
+  if (cancelledInside.length) {
+    return { kind: "cancelled", ok: false, message: `STOP — ${cancelledInside.map((x) => x.name).join(", ")} in this parcel was cancelled. Repack and fix the COD.`, order: info };
+  }
   if (o.dispatchStatus === "dispatched" || !["booked"].includes(o.courierStage)) {
-    if (["in_transit", "on_hold", "delivered", "partial_delivered", "returned"].includes(o.courierStage) || o.dispatchStatus === "dispatched") {
+    if (["in_transit", "on_hold", "awaiting_confirmation", "delivered", "partial_delivered", "returned"].includes(o.courierStage) || o.dispatchStatus === "dispatched") {
       return { kind: "already_dispatched", ok: false, message: "Already picked up by Steadfast", order: info };
     }
     return { kind: "not_booked", ok: false, message: `Not bookable state (${o.courierStage})`, order: info };
@@ -455,7 +464,7 @@ export async function unsort(db: DB, actor: Actor, orderIds: number[], reason: s
   return { reverted: rows.map((r) => r.id) };
 }
 
-const toSortSql = sql`${orders.courierStage} = 'booked' and ${orders.cancelledAt} is null and ${orders.archived} = 0 and ${orders.dispatchStatus} = 'pending' and ${orders.activeConsignmentId} is not null`;
+const toSortSql = sql`${orders.courierStage} = 'booked' and ${orders.cancelledAt} is null and ${orders.archived} = 0 and ${orders.dispatchStatus} = 'pending' and ${orders.activeConsignmentId} is not null and ${orders.combinedIntoOrderId} is null`;
 
 export async function startBatch(db: DB, actor: Actor, name?: string) {
   const id = crypto.randomUUID();
@@ -508,7 +517,7 @@ export async function summary(db: DB, range: { from: string; to: string }) {
       cancelledAfterBooking: sql<number>`sum(case when ${orders.cancelledAt} is not null then 1 else 0 end)`,
     })
     .from(orders)
-    .where(and(inDay(orders.bookedAt), sql`${orders.activeConsignmentId} is not null`))
+    .where(and(inDay(orders.bookedAt), sql`${orders.activeConsignmentId} is not null and ${orders.combinedIntoOrderId} is null`))
     .get();
   const confirmed = (await db.select({ n: sql<number>`count(*)` }).from(orders).where(inDay(orders.confirmedAt)).get())?.n ?? 0;
   const printedThatDay = (await db.select({ n: sql<number>`count(*)` }).from(orders).where(inDay(orders.printedAt)).get())?.n ?? 0;

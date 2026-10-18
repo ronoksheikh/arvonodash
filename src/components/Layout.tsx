@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { AppShell, Avatar, Burger, Group, Menu, NavLink, ScrollArea, Stack, Text, TextInput, ActionIcon, useMantineColorScheme, useComputedColorScheme, Tooltip, Badge, Box, UnstyledButton } from "@mantine/core";
+import { Alert, AppShell, Avatar, Burger, Group, Menu, NavLink, ScrollArea, Stack, Text, TextInput, ActionIcon, useMantineColorScheme, useComputedColorScheme, Tooltip, Badge, Box, UnstyledButton } from "@mantine/core";
 import { useDisclosure, useHotkeys } from "@mantine/hooks";
 import { NavLink as RouterLink, Outlet, useLocation, useNavigate } from "react-router";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
@@ -66,7 +66,8 @@ export function Layout() {
 
   const counts = useQuery({
     queryKey: ["nav-counts"],
-    queryFn: () => api<{ pipeline: { toCall: number; readyToBook: number; attention: number; stuck: number } }>("/dashboard?days=7"),
+    queryFn: () =>
+      api<{ pipeline: { toCall: number; readyToBook: number; attention: number; stuck: number }; steadfastPause: { until: string; reason: string; message: string } | null }>("/dashboard?days=7"),
     refetchInterval: 60_000,
     enabled: Boolean(user?.permissions.includes("orders.view")),
   });
@@ -207,6 +208,12 @@ export function Layout() {
       </AppShell.Navbar>
       <AppShell.Main>
         <Box maw={1480} mx="auto">
+          {counts.data?.steadfastPause && (
+            <Alert color="red" variant="filled" mb="md" title="Steadfast calls are paused">
+              {counts.data.steadfastPause.message} Paused until {new Date(counts.data.steadfastPause.until).toLocaleTimeString()} so Steadfast doesn't lock the account.
+              {counts.data.steadfastPause.reason === "auth_failed" && " Changing the keys in Settings → Connections resumes immediately."}
+            </Alert>
+          )}
           <Outlet />
         </Box>
       </AppShell.Main>

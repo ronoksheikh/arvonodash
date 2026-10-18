@@ -12,8 +12,49 @@ export function steadfastConfigured(env: Env): boolean {
   return Boolean(env.STEADFAST_API_KEY && env.STEADFAST_SECRET_KEY);
 }
 
-async function request<T>(env: Env, method: "GET" | "POST", path: string, body?: unknown): Promise<T> {
+// ---------------------------------------------------------------------------
+// Lockout guard. Steadfast answers 429 for rate limits, and after 10 failed logins in 5 minutes it
+// refuses *every* request for 60 minutes. So: one 429 pauses all calls for the time it asks, and a
+// rejected key pauses calls until the keys are changed (or 15 minutes pass, or someone presses Test).
+
+const GUARD_KEY = "steadfast.guard";
+const AUTH_PAUSE_MS = 15 * 60_000;
+type Guard = { until: string; reason: "rate_limited" | "auth_failed"; key: string; message: string };
+let guardCache: { at: number; guard: Guard | null } | null = null;
+
+const keyFingerprint = (env: Env) => (env.STEADFAST_API_KEY ?? "").slice(-6);
+
+async function readGuard(env: Env): Promise<Guard | null> {
+  if (guardCache && Date.now() - guardCache.at < 5_000) return guardCache.guard;
+  const row = await env.DB.prepare("SELECT value FROM settings WHERE key = ?").bind(GUARD_KEY).first<{ value: string }>();
+  const guard = row?.value ? (JSON.parse(row.value) as Guard | null) : null;
+  guardCache = { at: Date.now(), guard };
+  return guard;
+}
+
+async function writeGuard(env: Env, guard: Guard | null) {
+  guardCache = { at: Date.now(), guard };
+  await env.DB.prepare("INSERT INTO settings (key, value, updated_at) VALUES (?1, ?2, ?3) ON CONFLICT(key) DO UPDATE SET value = ?2, updated_at = ?3")
+    .bind(GUARD_KEY, JSON.stringify(guard), new Date().toISOString())
+    .run();
+}
+
+/** Current pause, if any (shown as a banner in the dashboard). Changing the keys lifts an auth pause. */
+export async function steadfastPause(env: Env): Promise<Guard | null> {
+  const g = await readGuard(env);
+  if (!g || g.until <= new Date().toISOString()) return null;
+  if (g.reason === "auth_failed" && g.key !== keyFingerprint(env)) return null;
+  return g;
+}
+
+export async function clearSteadfastPause(env: Env) {
+  if (await readGuard(env)) await writeGuard(env, null);
+}
+
+async function request<T>(env: Env, method: "GET" | "POST", path: string, body?: unknown, opts: { force?: boolean } = {}): Promise<T> {
   if (!steadfastConfigured(env)) throw new HttpError(503, "Steadfast credentials are not configured");
+  const paused = opts.force ? null : await steadfastPause(env);
+  if (paused) throw new HttpError(503, `Steadfast calls are paused until ${paused.until}: ${paused.message}`);
   const url = `${env.STEADFAST_BASE_URL.replace(/\/$/, "")}${path}`;
   let lastError = "";
   for (let attempt = 0; attempt < 4; attempt++) {
@@ -34,10 +75,16 @@ async function request<T>(env: Env, method: "GET" | "POST", path: string, body?:
       await sleep(500 * 2 ** attempt);
       continue;
     }
-    if (res.status === 429 || res.status >= 500) {
+    if (res.status === 429) {
+      // Never hammer a rate limit: pause every Steadfast call for as long as it asks (default 60s).
+      const seconds = Math.min(3600, toNumber(res.headers.get("Retry-After"), 60) || 60);
+      const until = new Date(Date.now() + seconds * 1000).toISOString();
+      await writeGuard(env, { until, reason: "rate_limited", key: keyFingerprint(env), message: "Steadfast asked us to slow down (429)" });
+      throw new HttpError(503, `Steadfast is rate-limiting requests; paused until ${until}`);
+    }
+    if (res.status >= 500) {
       lastError = `HTTP ${res.status}`;
-      const retryAfter = toNumber(res.headers.get("Retry-After"), 0);
-      await sleep(retryAfter ? retryAfter * 1000 : 750 * 2 ** attempt);
+      await sleep(750 * 2 ** attempt);
       continue;
     }
     const text = await res.text();
@@ -47,7 +94,13 @@ async function request<T>(env: Env, method: "GET" | "POST", path: string, body?:
     } catch {
       throw new HttpError(502, `Steadfast returned a non-JSON response (${res.status})`);
     }
-    if (res.status === 401 || res.status === 403) throw new HttpError(502, "Steadfast rejected the API credentials");
+    if (res.status === 401) {
+      const until = new Date(Date.now() + AUTH_PAUSE_MS).toISOString();
+      await writeGuard(env, { until, reason: "auth_failed", key: keyFingerprint(env), message: "Steadfast rejected the API keys. Update them in Settings → Connections." });
+      throw new HttpError(502, "Steadfast rejected the API credentials");
+    }
+    if (res.status === 403) throw new HttpError(502, "Steadfast refused the request: the account is inactive or its ownership (KYC) details need resubmitting");
+    if (opts.force && (await readGuard(env))) await writeGuard(env, null);
     if (!res.ok) throw new HttpError(422, extractError(json) ?? `Steadfast error ${res.status}`, json);
     return json as T;
   }
@@ -144,8 +197,9 @@ export async function getStatusByTrackingCode(env: Env, code: string): Promise<s
   }
 }
 
-export async function getBalance(env: Env): Promise<number> {
-  const res = await request<{ status: number; current_balance: number }>(env, "GET", "/get_balance");
+/** `force` = a person pressed "Test connection": try even while paused. */
+export async function getBalance(env: Env, opts: { force?: boolean } = {}): Promise<number> {
+  const res = await request<{ status: number; current_balance: number }>(env, "GET", "/get_balance", undefined, opts);
   return toNumber(res.current_balance);
 }
 
@@ -166,6 +220,95 @@ export async function listPayments(env: Env, page = 1): Promise<unknown> {
 
 export async function getPayment(env: Env, id: string): Promise<unknown> {
   return request<unknown>(env, "GET", `/payments/${encodeURIComponent(id)}`);
+}
+
+// ---------------------------------------------------------------------------
+// Fraud check: a phone number's delivery record across all Steadfast merchants.
+
+export type FraudScore = {
+  deliveryRatio: number | null; // % of finished parcels delivered; null when nothing finished
+  cancellationRatio: number | null;
+  volumeBand: string; // none | low | medium | high | very_high
+  totalParcels: number | null; // only if Steadfast reports counts
+  totalReports: number;
+  categories: string[];
+  doubtfulReports: boolean;
+  score: number | null; // Steadfast's own score; null while they have scoring disabled
+  level: string | null;
+};
+
+const num = (v: unknown): number | null => (v === null || v === undefined || v === "" || Number.isNaN(Number(v)) ? null : Number(v));
+
+/** Accepts the documented shape and older count-based shapes, with or without a `data` wrapper. */
+export function normalizeFraudScore(json: unknown): FraudScore {
+  const root = (json && typeof json === "object" ? json : {}) as Record<string, unknown>;
+  const d = (root.data && typeof root.data === "object" && !Array.isArray(root.data) ? root.data : root) as Record<string, unknown>;
+  const delivered = num(d.total_delivered ?? d.delivered);
+  const cancelled = num(d.total_cancelled ?? d.cancelled);
+  const parcels = num(d.total_parcels ?? d.total) ?? (delivered !== null || cancelled !== null ? (delivered ?? 0) + (cancelled ?? 0) : null);
+  const finished = (delivered ?? 0) + (cancelled ?? 0);
+  const ratio = (v: number | null) => (v === null ? null : Math.round(v * 10) / 10);
+  let deliveryRatio = ratio(num(d.delivery_ratio ?? d.success_ratio));
+  let cancellationRatio = ratio(num(d.cancellation_ratio ?? d.cancel_ratio));
+  if (deliveryRatio === null && finished > 0) deliveryRatio = ratio(((delivered ?? 0) / finished) * 100);
+  if (cancellationRatio === null && finished > 0) cancellationRatio = ratio(((cancelled ?? 0) / finished) * 100);
+  const reportsField = d.total_reports ?? d.total_fraud_reports ?? d.fraud_reports;
+  const categories = (Array.isArray(d.fraud_categories) ? d.fraud_categories : [])
+    .map((c) => (typeof c === "string" ? c : c && typeof c === "object" ? String((c as Record<string, unknown>).name ?? (c as Record<string, unknown>).category ?? "") : ""))
+    .filter(Boolean);
+  return {
+    deliveryRatio,
+    cancellationRatio,
+    volumeBand: typeof d.volume_band === "string" ? d.volume_band : parcels === null ? "none" : parcels === 0 ? "none" : parcels < 5 ? "low" : parcels < 20 ? "medium" : "high",
+    totalParcels: parcels,
+    totalReports: Array.isArray(reportsField) ? reportsField.length : (num(reportsField) ?? 0),
+    categories,
+    doubtfulReports: Boolean(d.doubtful_reports),
+    score: num(d.score),
+    level: typeof d.level === "string" ? d.level : null,
+  };
+}
+
+export async function getFraudScore(env: Env, phone: string): Promise<{ score: FraudScore; raw: unknown }> {
+  const raw = await request<unknown>(env, "GET", `/fraud_check/score/${encodeURIComponent(phone)}`);
+  return { score: normalizeFraudScore(raw), raw };
+}
+
+// ---------------------------------------------------------------------------
+// Full tracking history of a parcel (every step, not just the current status).
+
+export type TrackingStep = { consignmentId: string | null; text: string; at: string | null; type: number | null };
+
+export async function getTrackingHistory(env: Env, invoice: string): Promise<TrackingStep[]> {
+  let raw: unknown;
+  try {
+    raw = await request<unknown>(env, "GET", `/trackings_by_invoice/${encodeURIComponent(invoice)}`);
+  } catch (err) {
+    if (err instanceof HttpError && err.status === 422) return [];
+    throw err;
+  }
+  const root = raw as Record<string, unknown>;
+  const list = Array.isArray(raw) ? raw : Array.isArray(root?.data) ? root.data : Array.isArray(root?.trackings) ? root.trackings : [];
+  return (list as Record<string, unknown>[])
+    .map((t) => ({
+      consignmentId: t.consignment_id !== undefined && t.consignment_id !== null ? String(t.consignment_id) : null,
+      text: String(t.text ?? t.message ?? t.tracking_message ?? "").trim(),
+      at: parseSteadfastTime(t.created_at ?? t.updated_at ?? t.date),
+      type: num(t.tracking_type),
+    }))
+    .filter((t) => t.text);
+}
+
+/**
+ * Steadfast timestamps such as "2025-03-02 12:45:30" carry no time zone; they are Bangladesh time.
+ * ISO strings with a zone are used as they are.
+ */
+export function parseSteadfastTime(v: unknown): string | null {
+  if (typeof v !== "string" || !v.trim()) return null;
+  const s = v.trim();
+  const zoned = /([zZ]|[+-]\d{2}:?\d{2})$/.test(s);
+  const t = Date.parse(zoned ? s : `${s.replace(" ", "T")}+06:00`);
+  return Number.isNaN(t) ? null : new Date(t).toISOString();
 }
 
 export function trackingUrl(env: Env, trackingCode: string): string {
@@ -194,14 +337,17 @@ export function stageForStatus(status: string, wasPickedUp: boolean): CourierSta
       return "in_transit";
     case "hold":
       return "on_hold";
-    case "delivered":
+    // "_approval_pending" is the rider's word only; money and final outcomes wait for Steadfast.
     case "delivered_approval_pending":
+    case "partial_delivered_approval_pending":
+    case "cancelled_approval_pending":
+    case "unknown_approval_pending":
+      return "awaiting_confirmation";
+    case "delivered":
       return "delivered";
     case "partial_delivered":
-    case "partial_delivered_approval_pending":
       return "partial_delivered";
     case "cancelled":
-    case "cancelled_approval_pending":
       return wasPickedUp ? "returned" : "cancelled";
     default:
       return "issue";

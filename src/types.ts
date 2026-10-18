@@ -68,9 +68,29 @@ export type OrderListRow = {
   customerDelivered: number;
   customerReturned: number;
   customerFlag: string | null;
+  combinedIntoOrderId: number | null;
+  /** Same customer's other confirmed orders still waiting for a parcel ("#1002, #1003"). */
+  combinableWith: string | null;
+  fraud: FraudSummary | null;
 };
 
-export type Order = Omit<OrderListRow, "itemCount" | "trackingCode" | "consignmentStatus" | "consignmentCod" | "customerOrders" | "customerDelivered" | "customerReturned" | "customerFlag"> & {
+/** Steadfast fraud check: the customer's delivery record across all merchants. */
+export type FraudSummary = {
+  status: "ok" | "error";
+  verdict: "good" | "new" | "watch" | "risky" | "unknown";
+  reasons: string[];
+  deliveryRatio: number | null;
+  cancellationRatio: number | null;
+  volumeBand: string | null;
+  totalParcels: number | null;
+  totalReports: number;
+  doubtfulReports: boolean;
+  categories: string[];
+  error: string | null;
+  checkedAt: string;
+};
+
+export type Order = Omit<OrderListRow, "itemCount" | "trackingCode" | "consignmentStatus" | "consignmentCod" | "customerOrders" | "customerDelivered" | "customerReturned" | "customerFlag" | "combinableWith" | "fraud"> & {
   orderNumber: number | null;
   shopUpdatedAt: string;
   cancelReason: string | null;
@@ -121,6 +141,7 @@ export type Consignment = {
   trackingUrl?: string | null;
   status: string;
   stage: string;
+  codChangedFrom: number | null;
   recipientName: string;
   recipientPhone: string;
   recipientAddress: string;
@@ -207,7 +228,10 @@ export type OrderDetail = {
   customer: Customer | null;
   history: History | null;
   otherOrders: { id: number; name: string; shopCreatedAt: string; total: number; courierStage: string; cancelledAt: string | null }[];
-  consignments: Consignment[];
+  consignments: (Consignment & { partialOutcome: "charge_only" | "some_items" | null })[];
+  fraud: FraudSummary | null;
+  parcelOrders: { id: number; name: string; total: number; outstanding: number; combinedIntoOrderId: number | null; cancelledAt: string | null }[];
+  combineCandidates: { id: number; name: string; total: number; outstanding: number; shopCreatedAt: string; items: number }[];
   events: TrackingEvent[];
   notes: Note[];
   activity: Activity[];
