@@ -1,0 +1,11 @@
+# Copy to .dev.vars for local development. In production use `wrangler secret put <NAME>`.
+SHOPIFY_CLIENT_ID=
+SHOPIFY_CLIENT_SECRET=
+# Optional: legacy admin-created custom app token (shpat_...). If set, used instead of client credentials.
+SHOPIFY_ACCESS_TOKEN=
+# Optional: webhook signing secret if it differs from SHOPIFY_CLIENT_SECRET (legacy custom apps).
+SHOPIFY_WEBHOOK_SECRET=
+STEADFAST_API_KEY=
+STEADFAST_SECRET_KEY=
+# The "Auth Token (Bearer)" you enter in the Steadfast panel webhook settings.
+STEADFAST_WEBHOOK_TOKEN=
