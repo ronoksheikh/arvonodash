@@ -17,7 +17,7 @@ Authorization: Bearer arv_…
 |---|---|
 | `dispatch:read` | `GET /printable`, `GET /summary`, `GET /jobs`, `GET /jobs/{id}` |
 | `dispatch:print` | `POST /claim`, `POST /printed`, `POST /release` |
-| `dispatch:dispatch` | `POST /mark-dispatched` |
+| `dispatch:dispatch` | `POST /scan`, `GET /scan/ws`, `POST /mark-sorted`, batches |
 
 Signed-in dashboard staff can call the same endpoints with their session.
 
@@ -137,8 +137,8 @@ Returns reserved orders to the pool, for example after a printer failure.
 {
   "date": "2026-10-18", "timezone": "Asia/Dhaka",
   "confirmedOrders": 40, "bookedConsignments": 38, "unprinted": 3, "reserved": 0, "printed": 35, "printedOnDate": 36,
-  "awaitingDispatch": 5, "dispatched": 20, "courierReceived": 10, "cancelledAfterBooking": 1,
-  "backlog": { "unprinted": 4, "reserved": 0, "awaitingDispatch": 6, "awaitingCourierReceipt": 20 }
+  "awaitingSort": 5, "sorted": 20, "dispatched": 10, "cancelledAfterBooking": 1,
+  "backlog": { "unprinted": 4, "reserved": 0, "awaitingSort": 6, "awaitingPickup": 20 }
 }
 ```
 
@@ -149,15 +149,47 @@ These figures mean:
 - `printedOnDate`: labels printed on that day, whatever day they were booked.
 - `backlog`: open work across all days.
 
-### `POST /mark-dispatched`
-Records the physical handover to Steadfast: `{ "orderIds": [12, 13] }`. It requires a printed
-label and an order that is not cancelled and not yet picked up.
+### Sorting & dispatch
+Dispatch states: `pending` → `sorted` (label scanned at the packing table) → `dispatched` (set
+**only** by Steadfast, when the parcel's status leaves `in_review`, i.e. the courier picked it up).
+The `dispatched` transition also triggers Shopify fulfillment with tracking.
 
-Possible results per order: `dispatched`, `already_dispatched`, `already_courier_received`,
-`label_not_printed`, `order_cancelled`, `not_dispatchable_<stage>`, `not_found`.
+#### `POST /scan`
+`{ "code": "1424107", "batchId": "optional" }`. `code` is the **Steadfast consignment ID**, the
+barcode on the label. The tracking code, invoice or order number are also accepted.
 
-This is an **internal** status. Steadfast's pickup webhook later moves the order to
-`courier_received` and, by default, fulfills the order in Shopify with tracking.
+Response: `{ kind, ok, message, order }`. The possible `kind` values:
+
+| `kind` | Meaning |
+|---|---|
+| `sorted` | Marked sorted. Also marks the label printed |
+| `duplicate` | Already sorted; nothing changes |
+| `cancelled` | **Stop**: the order was cancelled in Shopify |
+| `already_dispatched` | Steadfast has already picked it up |
+| `old_label` | The order was rebooked; this label is no longer valid |
+| `not_booked` | The order isn't booked with Steadfast |
+| `unknown` | No matching parcel |
+
+#### `GET /scan/ws` (WebSocket)
+The fast path, used by the phone scanner page (`/scan` in the dashboard).
+
+| Direction | Message |
+|---|---|
+| Send | `{"t":"scan","id":"<client id>","code":"1424107","batchId":"…"}` |
+| Receive | `{"t":"result","id":"<client id>", …same shape as POST /scan}` |
+| Send | `{"t":"summary","batchId":"…"}` |
+| Receive | `{"t":"summary","scanned":[…],"remaining":[…],"totals":{…}}` |
+
+Authenticate with the dashboard session or `Authorization: Bearer <key>` (scope
+`dispatch:dispatch`).
+
+#### `POST /batches`, `GET /batches/{id}`, `POST /batches/{id}/close`
+Scanning sessions (one courier pickup). The summary lists the parcels scanned in the session and
+the booked parcels **still not sorted**, so nothing is left behind.
+
+#### `POST /mark-sorted`
+`{ "orderIds": [12, 13] }`. Marks parcels sorted without scanning them, for labels that can't be
+scanned. `POST /mark-dispatched` is kept as an alias for older clients.
 
 ### `GET /jobs`, `GET /jobs/{id}`
 Print job history (`reserved | completed | partial | released | expired`) and the per-order event
@@ -166,7 +198,7 @@ log of a job.
 ### Dashboard-only (session)
 - `POST /reprint` with `{ orderIds, reason }`. Needs the `labels.reprint` permission and a reason.
   It puts printed labels back in the unprinted pool and records an audit entry.
-- `POST /undo-dispatch` with `{ orderIds, reason }`. Undoes a dispatch recorded by mistake.
+- `POST /undo-sort` with `{ orderIds, reason }`. Undoes a scan recorded by mistake.
 - `GET /board?view=ready|dispatched|received|exceptions` returns the dispatch board.
 
 ## Recommended label-service loop

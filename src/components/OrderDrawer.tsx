@@ -483,7 +483,7 @@ function CourierTab({ d, refresh }: { d: OrderDetail; refresh: () => void }) {
         <Group justify="space-between">
           <div>
             <Text fw={600} size="sm">Label & dispatch</Text>
-            <Text size="xs" c="dimmed">Labels are printed by the label service; dispatch is recorded by staff</Text>
+            <Text size="xs" c="dimmed">Label printed → scanned &amp; sorted → dispatched when Steadfast picks it up</Text>
           </div>
           <Group gap="xs">
             <LabelBadge status={o.labelStatus} />
@@ -493,8 +493,8 @@ function CourierTab({ d, refresh }: { d: OrderDetail; refresh: () => void }) {
         <SimpleGrid cols={{ base: 2, sm: 4 }} mt="sm" spacing="xs">
           <div><Text size="xs" c="dimmed">Booked</Text><Text size="sm">{o.bookedAt ? dateTime(o.bookedAt) : "—"}</Text></div>
           <div><Text size="xs" c="dimmed">Printed</Text><Text size="sm">{o.printedAt ? `${dateTime(o.printedAt)}${o.printCount > 1 ? ` (×${o.printCount})` : ""}` : "—"}</Text></div>
-          <div><Text size="xs" c="dimmed">Dispatched</Text><Text size="sm">{o.dispatchedAt ? `${dateTime(o.dispatchedAt)}` : "—"}</Text>{o.dispatchedBy && <Text size="xs" c="dimmed">{o.dispatchedBy}</Text>}</div>
-          <div><Text size="xs" c="dimmed">Courier received</Text><Text size="sm">{o.courierReceivedAt ? dateTime(o.courierReceivedAt) : "—"}</Text></div>
+          <div><Text size="xs" c="dimmed">Sorted (scanned)</Text><Text size="sm">{o.sortedAt ? dateTime(o.sortedAt) : "—"}</Text>{o.sortedBy && <Text size="xs" c="dimmed">{o.sortedBy}</Text>}</div>
+          <div><Text size="xs" c="dimmed">Dispatched (Steadfast)</Text><Text size="sm">{o.dispatchedAt ? dateTime(o.dispatchedAt) : "—"}</Text></div>
         </SimpleGrid>
         {d.dispatchHistory.length > 0 && (
           <Timeline bulletSize={12} lineWidth={2} mt="md">

@@ -307,9 +307,7 @@ await step("concurrent claims never hand out the same order", async () => {
   assert.equal(reserved.body.count, 1);
 });
 
-await step("dispatch requires a printed label; release returns order to the pool", async () => {
-  const early = await v1("POST", "/mark-dispatched", { orderIds: [orderA.id] });
-  assert.equal(early.body.results[0].result, "label_not_printed");
+await step("release returns a reserved order to the pool", async () => {
   const rel = await v1("POST", "/release", { jobId: jobA, reason: "printer jam" });
   assert.equal(rel.body.released, 1);
   const c = await v1("POST", "/claim", { date: today, limit: 10 });
@@ -355,22 +353,57 @@ await step("manual reprint needs a reason and is audited", async () => {
   assert.ok(d.dispatchHistory.some((e) => e.event === "reprint_requested" && e.note === "Label smudged"));
 });
 
-await step("summary reports daily totals; mark-dispatched records handover", async () => {
+await step("scanning the Steadfast consignment ID (WebSocket) marks the parcel sorted, once", async () => {
   const s1 = await v1("GET", `/summary?date=${today}`);
   assert.equal(s1.body.bookedConsignments, 1);
   assert.equal(s1.body.printed, 1);
-  assert.equal(s1.body.awaitingDispatch, 1);
+  assert.equal(s1.body.awaitingSort, 1);
   assert.equal(s1.body.confirmedOrders, 1);
-  const m = await v1("POST", "/mark-dispatched", { orderIds: [orderA.id, 999999] });
-  assert.equal(m.body.dispatched, 1);
-  assert.equal(m.body.results[1].result, "not_found");
-  const again = await v1("POST", "/mark-dispatched", { orderIds: [orderA.id] });
-  assert.equal(again.body.results[0].result, "already_dispatched");
+  const batch = await v1("POST", "/batches", { name: "Evening pickup" });
+  assert.ok(batch.body.id);
+  const ws = new WebSocket(`${BASE.replace("http", "ws")}/api/v1/dispatch/scan/ws`, { headers: { Authorization: `Bearer ${apiKey}` } });
+  const replies = [];
+  const waitFor = (pred) =>
+    new Promise((resolve, reject) => {
+      const t = setTimeout(() => reject(new Error("WebSocket timeout")), 10_000);
+      const check = () => {
+        const hit = replies.find(pred);
+        if (hit) {
+          clearTimeout(t);
+          resolve(hit);
+        } else setTimeout(check, 20);
+      };
+      check();
+    });
+  ws.onmessage = (e) => replies.push(JSON.parse(e.data));
+  await new Promise((resolve, reject) => {
+    ws.onopen = resolve;
+    ws.onerror = () => reject(new Error("WebSocket failed to open"));
+  });
+  const send = (id, code) => ws.send(JSON.stringify({ t: "scan", id, code, batchId: batch.body.id }));
+  send("a1", consignmentA.consignmentId);
+  const first = await waitFor((m) => m.id === "a1");
+  assert.equal(first.kind, "sorted", JSON.stringify(first));
+  assert.equal(first.order.name, "#5001");
+  send("a2", consignmentA.consignmentId);
+  assert.equal((await waitFor((m) => m.id === "a2")).kind, "duplicate");
+  send("a3", consignmentA.trackingCode.toLowerCase());
+  assert.equal((await waitFor((m) => m.id === "a3")).kind, "duplicate", "tracking code also resolves");
+  send("a4", "99999999");
+  assert.equal((await waitFor((m) => m.id === "a4")).kind, "unknown");
+  ws.send(JSON.stringify({ t: "summary", batchId: batch.body.id }));
+  const sum = await waitFor((m) => m.t === "summary");
+  assert.equal(sum.scanned.length, 1);
+  ws.close();
   const s2 = await v1("GET", `/summary?date=${today}`);
-  assert.equal(s2.body.dispatched, 1);
-  assert.equal(s2.body.awaitingDispatch, 0);
+  assert.equal(s2.body.sorted, 1);
+  assert.equal(s2.body.awaitingSort, 0);
+  assert.equal(s2.body.dispatched, 0, "scanning never marks dispatched");
   const d = await orderDetail(orderA.id);
-  assert.equal(d.order.fulfillmentState, "none", "dispatch alone never fulfills");
+  assert.equal(d.order.dispatchStatus, "sorted");
+  assert.equal(d.order.fulfillmentState, "none", "sorting alone never fulfills");
+  const http = await call("POST", "/api/v1/dispatch/scan", { code: consignmentA.consignmentId });
+  assert.equal(http.body.kind, "duplicate", "HTTP fallback works too");
 });
 
 await step("Steadfast webhook rejects wrong bearer token", async () => {
@@ -392,7 +425,7 @@ await step("pickup webhook triggers Shopify fulfillment with tracking (partial i
   const d = await call("GET", `/api/orders/${orderA.id}`);
   assert.equal(d.body.order.fulfillmentState, "fulfilled");
   assert.equal(d.body.order.courierStage, "in_transit");
-  assert.equal(d.body.order.dispatchStatus, "courier_received");
+  assert.equal(d.body.order.dispatchStatus, "dispatched", "dispatched only when Steadfast leaves in_review");
   assert.ok(s.tags.some((t) => t.tags.includes("steadfast-booked")), "booked tag job ran");
 });
 
@@ -498,6 +531,9 @@ await step("Shopify-side cancellation removes order from printing", async () => 
   await shopifyWebhook("orders/cancelled", restOrder(5003, { cancelled_at: new Date().toISOString(), updated_at: new Date(Date.now() + 1000).toISOString(), shipping_address: { name: "Rafi", address1: "Flat 3B, Uttara Sector 7", city: "Dhaka", phone: "01911222333" } }));
   r = await v1("GET", `/printable?date=${today}`);
   assert.ok(!r.body.orders.some((o) => o.orderId === c.id), "cancelled orders are never printable");
+  const cd = await orderDetail(c.id);
+  const stop = await call("POST", "/api/v1/dispatch/scan", { code: cd.consignments[0].consignmentId });
+  assert.equal(stop.body.kind, "cancelled", "scanner says STOP for parcels cancelled in Shopify");
   const att = await call("GET", "/api/orders?tab=attention");
   assert.ok(att.body.rows.some((o) => o.id === c.id), "cancelled-after-booking needs attention");
 });

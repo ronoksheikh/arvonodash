@@ -93,6 +93,14 @@ Status legend: [x] done · [~] partial / limited by API · [ ] not started
 - [x] Work queues exclude orders already fulfilled in Shopify
 - [x] e2e: 46 checks
 
+## Scan & sort
+- [x] Phone scanner page (/scan): camera barcode reading via WebAssembly ZXing (works on iOS Safari + Android), manual/hardware-scanner input
+- [x] WebSocket scanning with HTTP fallback, offline queue + resend, beep/vibration per result
+- [x] Scan = sorted (ready for pickup); dispatched only when Steadfast leaves in_review
+- [x] Resolves consignment ID (primary), tracking code, invoice or order number; STOP on cancelled / old label
+- [x] Scanning sessions with "still to sort" list; sorted >24h without pickup flagged as exception
+- [x] e2e: WebSocket scan, duplicate, unknown, HTTP fallback, cancelled STOP
+
 ## Ideas / next
 - [ ] SMS confirmation to customers (needs a BD SMS gateway — out of scope, no external services)
 - [ ] Shopify return creation (`returnCreate`) once the team wants returns mirrored in Shopify

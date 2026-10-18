@@ -188,7 +188,7 @@ consignmentRoutes.post("/:id{[0-9]+}/release", requirePerm("courier.manage"), as
   await db.update(consignments).set({ superseded: true, updatedAt: nowIso() }).where(eq(consignments.id, row.id));
   await db.update(orders).set({ courierStage: "unbooked", activeConsignmentId: null, updatedAt: nowIso() }).where(eq(orders.id, row.orderId));
   await onNotPrintable(db, row.orderId, "Released for rebooking", c.get("user"));
-  await db.update(orders).set({ dispatchStatus: "pending", dispatchedAt: null, dispatchedBy: null, courierReceivedAt: null }).where(eq(orders.id, row.orderId));
+  await db.update(orders).set({ dispatchStatus: "pending", sortedAt: null, sortedBy: null, sortBatchId: null, dispatchedAt: null, dispatchedBy: null, courierReceivedAt: null }).where(eq(orders.id, row.orderId));
   await logActivity(db, c.get("user"), "courier.released_for_rebooking", { entityType: "consignment", entityId: row.consignmentId ?? row.invoice, orderId: row.orderId });
   return c.json({ ok: true });
 });

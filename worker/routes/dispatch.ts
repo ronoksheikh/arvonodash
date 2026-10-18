@@ -1,6 +1,7 @@
 import { Hono, type Context } from "hono";
 import { and, desc, eq, sql } from "drizzle-orm";
 import { createMiddleware } from "hono/factory";
+import { upgradeWebSocket } from "hono/cloudflare-workers";
 import type { Env, SessionUser } from "../env";
 import { getDb, pick } from "../db";
 import { apiKeys, consignments, dispatchEvents, idempotencyKeys, orders, printJobs } from "../db/schema";
@@ -214,25 +215,94 @@ dispatchRoutes.get("/summary", requireScope("dispatch:read"), async (c) => {
   return c.json({ date: range.label, timezone: "Asia/Dhaka", ...(await dispatch.summary(db, { from: range.from!, to: range.to! })) });
 });
 
-dispatchRoutes.post("/mark-dispatched", requireScope("dispatch:dispatch"), (c) =>
+// Sorting = label scanned at the packing table. Dispatch is recorded only by Steadfast's pickup.
+const markSortedHandler = (c: Context<DispatchEnv>) =>
   idempotent(c, async (body) => {
     const orderIds = ids(body.orderIds, "orderIds");
     if (!orderIds?.length) throw new HttpError(400, "orderIds is required");
-    const r = await dispatch.markDispatched(getDb(c.env.DB), actorOf(c), orderIds);
+    const r = await dispatch.markSorted(getDb(c.env.DB), actorOf(c), orderIds);
     return { status: 200, body: r };
+  });
+dispatchRoutes.post("/mark-sorted", requireScope("dispatch:dispatch"), markSortedHandler);
+dispatchRoutes.post("/mark-dispatched", requireScope("dispatch:dispatch"), markSortedHandler); // legacy alias
+
+/** One scan (HTTP fallback for the WebSocket). */
+dispatchRoutes.post("/scan", requireScope("dispatch:dispatch"), async (c) => {
+  const body = await c.req.json<{ code: string; batchId?: string | null }>();
+  if (!body.code?.trim()) return c.json({ error: "code is required" }, 400);
+  return c.json(await dispatch.scanParcel(getDb(c.env.DB), actorOf(c), body.code, body.batchId ?? null));
+});
+
+/**
+ * Live scanning over a WebSocket (fast path for phones). Messages:
+ *   → { t: "scan", id, code, batchId }        ← { t: "result", id, ...ScanResult }
+ *   → { t: "summary", batchId }               ← { t: "summary", ...batchSummary }
+ *   → { t: "ping" }                           ← { t: "pong" }
+ */
+dispatchRoutes.get(
+  "/scan/ws",
+  async (c, next) => {
+    // Browsers always send Origin on WebSocket handshakes; refuse cross-site sockets.
+    const origin = c.req.header("Origin");
+    if (c.get("caller").kind === "user" && origin && new URL(origin).host !== new URL(c.req.url).host) return c.json({ error: "Bad origin" }, 403);
+    if (c.req.header("Upgrade")?.toLowerCase() !== "websocket") return c.json({ error: "Expected a WebSocket upgrade" }, 426);
+    await next();
+  },
+  requireScope("dispatch:dispatch"),
+  upgradeWebSocket((c) => {
+    const db = getDb(c.env.DB);
+    const actor = actorOf(c);
+    return {
+      async onMessage(evt, ws) {
+        let msg: { t?: string; id?: string; code?: string; batchId?: string | null };
+        try {
+          msg = JSON.parse(String(evt.data));
+        } catch {
+          return;
+        }
+        try {
+          if (msg.t === "scan" && msg.code) {
+            const r = await dispatch.scanParcel(db, actor, msg.code, msg.batchId ?? null);
+            ws.send(JSON.stringify({ t: "result", id: msg.id, code: msg.code, ...r }));
+          } else if (msg.t === "summary") {
+            ws.send(JSON.stringify({ t: "summary", ...(await dispatch.batchSummary(db, msg.batchId ?? null)) }));
+          } else if (msg.t === "ping") {
+            ws.send(JSON.stringify({ t: "pong" }));
+          }
+        } catch (err) {
+          ws.send(JSON.stringify({ t: "error", id: msg.id, message: (err as Error).message }));
+        }
+      },
+    };
   }),
 );
+
+dispatchRoutes.post("/batches", requireScope("dispatch:dispatch"), async (c) => {
+  const body = await c.req.json<{ name?: string }>().catch(() => ({}) as { name?: string });
+  const id = await dispatch.startBatch(getDb(c.env.DB), actorOf(c), body.name);
+  return c.json({ id });
+});
+
+dispatchRoutes.get("/batches/:id", requireScope("dispatch:read"), async (c) => {
+  return c.json(await dispatch.batchSummary(getDb(c.env.DB), c.req.param("id")));
+});
+
+dispatchRoutes.post("/batches/:id/close", requireScope("dispatch:dispatch"), async (c) => {
+  await dispatch.closeBatch(getDb(c.env.DB), c.req.param("id"));
+  return c.json({ ok: true });
+});
 
 // ---- Dashboard-only actions ---------------------------------------------
 
-dispatchRoutes.post("/undo-dispatch", sessionOnly("dispatch.manage"), (c) =>
+const undoSortHandler = (c: Context<DispatchEnv>) =>
   idempotent(c, async (body) => {
     const orderIds = ids(body.orderIds, "orderIds");
     if (!orderIds?.length || typeof body.reason !== "string" || !body.reason.trim()) throw new HttpError(400, "orderIds and a reason are required");
-    const r = await dispatch.undoDispatch(getDb(c.env.DB), actorOf(c), orderIds, body.reason.trim());
+    const r = await dispatch.unsort(getDb(c.env.DB), actorOf(c), orderIds, body.reason.trim());
     return { status: 200, body: r };
-  }),
-);
+  });
+dispatchRoutes.post("/undo-sort", sessionOnly("dispatch.manage"), undoSortHandler);
+dispatchRoutes.post("/undo-dispatch", sessionOnly("dispatch.manage"), undoSortHandler); // legacy alias
 
 dispatchRoutes.post("/reprint", sessionOnly("labels.reprint"), (c) =>
   idempotent(c, async (body) => {
@@ -274,20 +344,20 @@ dispatchRoutes.get("/board", requireScope("dispatch:read"), async (c) => {
   if (range) conds.push(sql`${orders.bookedAt} >= ${range.from} and ${orders.bookedAt} < ${range.to}`);
   const staleCutoff = new Date(Date.now() - 24 * 3_600_000).toISOString();
   switch (view) {
-    case "ready":
-      conds.push(sql`${orders.labelStatus} = 'printed' and ${orders.dispatchStatus} = 'pending' and ${orders.courierStage} = 'booked' and ${orders.cancelledAt} is null`);
+    case "ready": // booked, waiting to be scanned at packing
+      conds.push(sql`${orders.dispatchStatus} = 'pending' and ${orders.courierStage} = 'booked' and ${orders.cancelledAt} is null`);
       break;
-    case "dispatched":
+    case "sorted": // scanned, waiting for Steadfast pickup
+      conds.push(sql`${orders.dispatchStatus} = 'sorted'`);
+      break;
+    case "dispatched": // Steadfast picked it up
       conds.push(sql`${orders.dispatchStatus} = 'dispatched'`);
-      break;
-    case "received":
-      conds.push(sql`${orders.dispatchStatus} = 'courier_received'`);
       break;
     case "exceptions":
       conds.push(sql`(
         ${orders.courierStage} in ('on_hold', 'issue', 'returned', 'partial_delivered')
         or (${orders.cancelledAt} is not null and ${orders.courierStage} in ('booked', 'in_transit', 'on_hold'))
-        or (${orders.dispatchStatus} = 'dispatched' and ${orders.dispatchedAt} < ${staleCutoff})
+        or (${orders.dispatchStatus} = 'sorted' and ${orders.sortedAt} < ${staleCutoff})
       )`);
       break;
     default:
@@ -295,7 +365,7 @@ dispatchRoutes.get("/board", requireScope("dispatch:read"), async (c) => {
   }
   const rows = await db
     .select({
-      o: pick(orders, ["id", "name", "customerName", "phone", "city", "courierStage", "cancelledAt", "bookedAt", "labelStatus", "printedAt", "dispatchStatus", "dispatchedAt", "dispatchedBy", "courierReceivedAt", "fulfillmentState"]),
+      o: pick(orders, ["id", "name", "customerName", "phone", "city", "courierStage", "cancelledAt", "bookedAt", "labelStatus", "printedAt", "dispatchStatus", "sortedAt", "sortedBy", "dispatchedAt", "fulfillmentState"]),
       c: pick(consignments, ["recipientName", "recipientPhone", "codAmount", "trackingCode", "consignmentId", "status", "lastMessage"]),
     })
     .from(orders)
@@ -306,15 +376,15 @@ dispatchRoutes.get("/board", requireScope("dispatch:read"), async (c) => {
     .all();
   const counts = await db
     .select({
-      ready: sql<number>`sum(case when ${orders.labelStatus} = 'printed' and ${orders.dispatchStatus} = 'pending' and ${orders.courierStage} = 'booked' and ${orders.cancelledAt} is null then 1 else 0 end)`,
-      dispatched: sql<number>`sum(case when ${orders.dispatchStatus} = 'dispatched' then 1 else 0 end)`,
+      ready: sql<number>`sum(case when ${orders.dispatchStatus} = 'pending' and ${orders.courierStage} = 'booked' and ${orders.cancelledAt} is null then 1 else 0 end)`,
+      sorted: sql<number>`sum(case when ${orders.dispatchStatus} = 'sorted' then 1 else 0 end)`,
     })
     .from(orders)
     .where(and(eq(orders.archived, false), range ? sql`${orders.bookedAt} >= ${range.from} and ${orders.bookedAt} < ${range.to}` : undefined))
     .get();
   return c.json({
     view,
-    counts: { ready: Number(counts?.ready ?? 0), dispatched: Number(counts?.dispatched ?? 0) },
+    counts: { ready: Number(counts?.ready ?? 0), sorted: Number(counts?.sorted ?? 0) },
     orders: rows.map((r) => ({
       orderId: r.o.id,
       orderName: r.o.name,
@@ -332,9 +402,9 @@ dispatchRoutes.get("/board", requireScope("dispatch:read"), async (c) => {
       labelStatus: r.o.labelStatus,
       printedAt: r.o.printedAt,
       dispatchStatus: r.o.dispatchStatus,
+      sortedAt: r.o.sortedAt,
+      sortedBy: r.o.sortedBy,
       dispatchedAt: r.o.dispatchedAt,
-      dispatchedBy: r.o.dispatchedBy,
-      courierReceivedAt: r.o.courierReceivedAt,
       fulfillmentState: r.o.fulfillmentState,
     })),
   });

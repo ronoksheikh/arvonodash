@@ -4,7 +4,7 @@ import { useDisclosure, useHotkeys } from "@mantine/hooks";
 import { NavLink as RouterLink, Outlet, useLocation, useNavigate } from "react-router";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
-  LayoutDashboard, Printer, PackageCheck, ShoppingBag, Truck, Undo2, Users, Wallet, History, RefreshCw, Settings, Moon, Sun, Search, LogOut, ChevronDown,
+  LayoutDashboard, Printer, PackageCheck, ScanLine, ShoppingBag, Truck, Undo2, Users, Wallet, History, RefreshCw, Settings, Moon, Sun, Search, LogOut, ChevronDown,
 } from "lucide-react";
 import { api, post } from "../api";
 import { useAuth } from "../auth";
@@ -15,6 +15,7 @@ const NAV: { to: string; label: string; icon: typeof LayoutDashboard; perm?: Per
   { to: "/orders", label: "Orders", icon: ShoppingBag, perm: "orders.view", badgeKey: "unbooked" },
   { to: "/print-queue", label: "Ready to print", icon: Printer, perm: "orders.view" },
   { to: "/dispatch", label: "Dispatch", icon: PackageCheck, perm: "orders.view" },
+  { to: "/scan", label: "Scan & sort", icon: ScanLine, perm: "dispatch.manage" },
   { to: "/consignments", label: "Consignments", icon: Truck, perm: "orders.view" },
   { to: "/returns", label: "Returns", icon: Undo2, perm: "orders.view" },
   { to: "/customers", label: "Customers", icon: Users, perm: "orders.view" },

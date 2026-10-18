@@ -64,7 +64,8 @@ async function linkConsignment(
       bookedAt: order.shopCreatedAt,
       // Already shipped: never offer these to the label printer.
       labelStatus: data.pickedUp ? "printed" : "not_ready",
-      dispatchStatus: data.pickedUp ? "courier_received" : "pending",
+      dispatchStatus: data.pickedUp ? "dispatched" : "pending",
+      dispatchedAt: data.pickedUp ? order.shopUpdatedAt : null,
       courierReceivedAt: data.pickedUp ? order.shopUpdatedAt : null,
       updatedAt: now,
     })

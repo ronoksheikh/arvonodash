@@ -104,9 +104,9 @@ export type Order = Omit<OrderListRow, "itemCount" | "trackingCode" | "consignme
   printedAt: string | null;
   printCount: number;
   printJobId: string | null;
+  sortedAt: string | null;
+  sortedBy: string | null;
   dispatchedAt: string | null;
-  dispatchedBy: string | null;
-  courierReceivedAt: string | null;
 };
 
 export type CallLog = { id: number; outcome: string; note: string | null; callbackAt: string | null; userName: string | null; createdAt: string };

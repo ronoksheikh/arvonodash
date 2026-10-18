@@ -35,11 +35,11 @@ type Summary = {
   reserved: number;
   printed: number;
   printedOnDate: number;
-  awaitingDispatch: number;
+  awaitingSort: number;
+  sorted: number;
   dispatched: number;
-  courierReceived: number;
   cancelledAfterBooking: number;
-  backlog: { unprinted: number; reserved: number; awaitingDispatch: number; awaitingCourierReceipt: number };
+  backlog: { unprinted: number; reserved: number; awaitingSort: number; awaitingPickup: number };
 };
 type Job = { id: string; source: string; status: string; orderCount: number; printedCount: number; expiresAt: string; createdAt: string; completedAt: string | null };
 
@@ -92,9 +92,9 @@ export default function PrintQueue() {
       { label: "Unprinted", value: s?.unprinted, color: "blue", hint: s?.backlog.unprinted ? `${s.backlog.unprinted} in total incl. other days` : undefined },
       { label: "Reserved", value: s?.reserved, color: "yellow", hint: "Claimed by a print job" },
       { label: "Printed", value: s?.printed, color: "teal" },
-      { label: "Awaiting dispatch", value: s?.awaitingDispatch, color: "indigo" },
-      { label: "Dispatched", value: s?.dispatched },
-      { label: "Courier received", value: s?.courierReceived, color: "teal" },
+      { label: "To sort", value: s?.awaitingSort, color: "indigo" },
+      { label: "Sorted", value: s?.sorted },
+      { label: "Dispatched", value: s?.dispatched, color: "teal", hint: "Picked up by Steadfast" },
     ],
     [s],
   );

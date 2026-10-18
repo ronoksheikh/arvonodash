@@ -25,7 +25,9 @@ import { hydrateEnv } from "./services/credentials";
 
 const app = new Hono<AppEnv>();
 
-app.use("*", secureHeaders());
+const security = secureHeaders();
+// WebSocket upgrade responses are immutable, so the scan socket skips header middleware.
+app.use("*", (c, next) => (c.req.path.endsWith("/scan/ws") ? next() : security(c, next)));
 
 app.onError((err, c) => {
   if (err instanceof HttpError) return c.json({ error: err.message, details: err.details }, err.status as 400);

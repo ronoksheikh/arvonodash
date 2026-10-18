@@ -155,9 +155,9 @@ export const LABEL_STATUSES = {
 } as const;
 
 export const DISPATCH_STATUSES = {
-  pending: { label: "Not dispatched", color: "gray" },
-  dispatched: { label: "Dispatched", color: "indigo" },
-  courier_received: { label: "Courier received", color: "teal" },
+  pending: { label: "Not sorted", color: "gray" },
+  sorted: { label: "Sorted · awaiting pickup", color: "indigo" },
+  dispatched: { label: "Dispatched", color: "teal" },
 } as const;
 
 export const SHOPIFY_SYNC_STATUSES = {
@@ -174,7 +174,9 @@ export const DISPATCH_EVENTS: Record<string, string> = {
   released: "Reservation released",
   expired: "Reservation expired",
   reprint_requested: "Reprint requested",
-  dispatched: "Dispatched",
+  sorted: "Scanned & sorted",
+  unsorted: "Sorting undone",
+  dispatched: "Dispatched (picked up by Steadfast)",
   dispatch_undone: "Dispatch undone",
   courier_received: "Received by courier",
 };

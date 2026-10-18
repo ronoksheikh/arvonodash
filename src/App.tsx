@@ -17,6 +17,7 @@ const ActivityPage = lazy(() => import("./pages/Activity"));
 const Sync = lazy(() => import("./pages/Sync"));
 const SettingsPage = lazy(() => import("./pages/Settings"));
 const Print = lazy(() => import("./pages/Print"));
+const Scan = lazy(() => import("./pages/Scan"));
 
 function RequireAuth({ children }: { children: React.ReactNode }) {
   const { user, loading } = useAuth();
@@ -32,6 +33,7 @@ export function App() {
       <Routes>
         <Route path="/login" element={<LoginPage />} />
         <Route path="/print" element={<RequireAuth><Print /></RequireAuth>} />
+        <Route path="/scan" element={<RequireAuth><Scan /></RequireAuth>} />
         <Route element={<RequireAuth><Layout /></RequireAuth>}>
           <Route index element={<Overview />} />
           <Route path="orders" element={<Orders />} />

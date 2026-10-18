@@ -58,7 +58,12 @@ dispatch. Shopify fulfillment and courier delivery are tracked on top of these.
   (flagged when the order is already booked), and archive/delete.
 - **Ready to print**: per-day (Asia/Dhaka) unprinted, reserved and printed lists, daily totals, the
   next-day backlog, print job history, release, and audited reprint requests.
-- **Dispatch**: ready to dispatch, awaiting courier receipt, courier received, and exceptions
+- **Scan & sort (phone)**: open `/scan` on any phone browser (iPhone Safari or Android Chrome),
+  scan the Steadfast consignment ID barcode on each label, and hear a beep. Each parcel becomes
+  *Sorted · awaiting pickup*. Scans go over a live WebSocket, are queued offline and resent
+  automatically, and a cancelled order gives a loud STOP. It becomes *Dispatched* only when
+  Steadfast picks it up (status leaves in_review).
+- **Dispatch**: to sort, sorted (awaiting pickup), dispatched, and exceptions
   (held, failed, returned, cancelled after booking, dispatched more than 24 h ago without a
   pickup). Includes bulk *Mark dispatched* and *Undo* with a reason.
 - **Label service API** (`/api/v1/dispatch/*`, see [docs/DISPATCH_API.md](docs/DISPATCH_API.md)):
@@ -199,7 +204,7 @@ API:
 - polling recovery, returns, rebooking and payouts
 - calling confirmation and Shopify In progress
 - the print/dispatch API: concurrent claims, expiry, idempotent replays, reprints, summary and
-  mark-dispatched
+  scan-to-sort (WebSocket) and mark-sorted
 - Shopify-side cancel and edits
 - cancel and delete fallback
 - import, CSV export and permissions

@@ -2,7 +2,8 @@ import { useState } from "react";
 import { Badge, Button, Checkbox, Group, Modal, ScrollArea, Stack, Switch, Table, Tabs, Text, Textarea, Alert } from "@mantine/core";
 import { DatePickerInput } from "@mantine/dates";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { PackageCheck, Truck, Undo2 } from "lucide-react";
+import { PackageCheck, ScanLine, Truck, Undo2 } from "lucide-react";
+import { useNavigate } from "react-router";
 import { api, notifyError, notifySuccess, post, qs } from "../api";
 import { useCan } from "../auth";
 import { dhakaToday, EmptyState, ErrorState, FulfillmentBadge, LoadingState, PageHeader, Panel, StageBadge, SteadfastStatusBadge } from "../components/ui";
@@ -24,21 +25,22 @@ type BoardRow = {
   cancelledAt: string | null;
   bookedAt: string | null;
   printedAt: string | null;
+  sortedAt: string | null;
+  sortedBy: string | null;
   dispatchedAt: string | null;
-  dispatchedBy: string | null;
-  courierReceivedAt: string | null;
   fulfillmentState: string;
 };
 
 const VIEWS = [
-  { value: "ready", label: "Ready to dispatch" },
-  { value: "dispatched", label: "Awaiting courier receipt" },
-  { value: "received", label: "Courier received" },
+  { value: "ready", label: "To sort" },
+  { value: "sorted", label: "Sorted · awaiting pickup" },
+  { value: "dispatched", label: "Dispatched" },
   { value: "exceptions", label: "Exceptions" },
 ];
 
 export default function Dispatch() {
   const can = useCan();
+  const navigate = useNavigate();
   const qc = useQueryClient();
   const [view, setView] = useState("ready");
   const [date, setDate] = useState(dhakaToday());
@@ -50,7 +52,7 @@ export default function Dispatch() {
 
   const q = useQuery({
     queryKey: ["dispatch-board", view, allDates ? null : date],
-    queryFn: () => api<{ orders: BoardRow[]; counts: { ready: number; dispatched: number } }>(`/v1/dispatch/board${qs({ view, date: allDates ? undefined : date })}`),
+    queryFn: () => api<{ orders: BoardRow[]; counts: { ready: number; sorted: number } }>(`/v1/dispatch/board${qs({ view, date: allDates ? undefined : date })}`),
     refetchInterval: 20_000,
   });
   const rows = q.data?.orders ?? [];
@@ -61,17 +63,17 @@ export default function Dispatch() {
   };
 
   const dispatch = useMutation({
-    mutationFn: () => post<{ dispatched: number; results: { orderId: number; result: string }[] }>("/v1/dispatch/mark-dispatched", { orderIds: [...selected] }),
+    mutationFn: () => post<{ sorted: number; results: { orderId: number; result: string }[] }>("/v1/dispatch/mark-sorted", { orderIds: [...selected] }),
     onSuccess: (r) => {
-      const skipped = r.results.filter((x) => x.result !== "dispatched");
-      notifySuccess(`${r.dispatched} parcel(s) marked dispatched${skipped.length ? ` · ${skipped.length} skipped (${skipped[0].result.replace(/_/g, " ")})` : ""}`);
+      const skipped = r.results.filter((x) => x.result !== "sorted");
+      notifySuccess(`${r.sorted} parcel(s) marked sorted${skipped.length ? ` · ${skipped.length} skipped (${skipped[0].result.replace(/_/g, " ")})` : ""}`);
       refresh();
     },
     onError: (e) => notifyError(e),
   });
   const undo = useMutation({
-    mutationFn: () => post<{ reverted: number[] }>("/v1/dispatch/undo-dispatch", { orderIds: [...selected], reason }),
-    onSuccess: (r) => { notifySuccess(`${r.reverted.length} dispatch record(s) undone`); setUndoOpen(false); setReason(""); refresh(); },
+    mutationFn: () => post<{ reverted: number[] }>("/v1/dispatch/undo-sort", { orderIds: [...selected], reason }),
+    onSuccess: (r) => { notifySuccess(`${r.reverted.length} parcel(s) moved back to To sort`); setUndoOpen(false); setReason(""); refresh(); },
     onError: (e) => notifyError(e),
   });
 
@@ -81,15 +83,16 @@ export default function Dispatch() {
     n.has(id) ? n.delete(id) : n.add(id);
     setSelected(n);
   };
-  const selectable = view === "ready" || view === "dispatched";
+  const selectable = view === "ready" || view === "sorted";
 
   return (
     <>
       <PageHeader
         title="Dispatch"
-        description="Record the physical handover to Steadfast. Courier receipt is confirmed automatically by Steadfast, which then fulfills the order in Shopify."
+        description="Scan each label at the packing table to mark it sorted. It becomes Dispatched automatically when Steadfast picks it up (status leaves in review), which also fulfills the order in Shopify."
         actions={
           <Group gap="xs">
+            {can("dispatch.manage") && <Button leftSection={<ScanLine size={15} />} onClick={() => navigate("/scan")}>Open scanner</Button>}
             <Switch label="All dates" checked={allDates} onChange={(e) => setAllDates(e.currentTarget.checked)} />
             {!allDates && <DatePickerInput size="xs" value={date} onChange={(v) => v && setDate(String(v).slice(0, 10))} valueFormat="D MMM YYYY" w={150} />}
           </Group>
@@ -99,7 +102,7 @@ export default function Dispatch() {
         <Tabs value={view} onChange={(v) => { setView(v ?? "ready"); setSelected(new Set()); }} px="md" pt={6}>
           <Tabs.List>
             {VIEWS.map((v) => (
-              <Tabs.Tab key={v.value} value={v.value} rightSection={v.value === "ready" && q.data ? <Badge size="xs" variant="light">{q.data.counts.ready}</Badge> : v.value === "dispatched" && q.data ? <Badge size="xs" variant="light" color="indigo">{q.data.counts.dispatched}</Badge> : null}>
+              <Tabs.Tab key={v.value} value={v.value} rightSection={v.value === "ready" && q.data ? <Badge size="xs" variant="light">{q.data.counts.ready}</Badge> : v.value === "sorted" && q.data ? <Badge size="xs" variant="light" color="indigo">{q.data.counts.sorted}</Badge> : null}>
                 {v.label}
               </Tabs.Tab>
             ))}
@@ -107,15 +110,15 @@ export default function Dispatch() {
         </Tabs>
         {selectable && (
           <Group p="md" justify="space-between">
-            <Text size="sm" c="dimmed">{view === "ready" ? "Only parcels with a printed label can be dispatched." : "Waiting for Steadfast to confirm pickup (webhook)."}</Text>
+            <Text size="sm" c="dimmed">{view === "ready" ? "Scan labels with the phone scanner, or mark sorted here if a label can't be scanned." : "Waiting for Steadfast to pick up (status leaves in review)."}</Text>
             <Group gap="xs">
               {view === "ready" && can("dispatch.manage") && (
                 <Button size="xs" leftSection={<Truck size={14} />} disabled={!selected.size} loading={dispatch.isPending} onClick={() => dispatch.mutate()}>
-                  Mark {selected.size || ""} dispatched
+                  Mark {selected.size || ""} sorted
                 </Button>
               )}
-              {view === "dispatched" && can("dispatch.manage") && (
-                <Button size="xs" variant="default" leftSection={<Undo2 size={14} />} disabled={!selected.size} onClick={() => setUndoOpen(true)}>Undo dispatch</Button>
+              {view === "sorted" && can("dispatch.manage") && (
+                <Button size="xs" variant="default" leftSection={<Undo2 size={14} />} disabled={!selected.size} onClick={() => setUndoOpen(true)}>Undo sort</Button>
               )}
             </Group>
           </Group>
@@ -152,8 +155,8 @@ export default function Dispatch() {
                     <Table.Td>
                       <Text size="xs" c="dimmed">Booked {dateShort(o.bookedAt)}</Text>
                       {o.printedAt && <Text size="xs" c="dimmed">Printed {dateShort(o.printedAt)}</Text>}
-                      {o.dispatchedAt && <Text size="xs" c={view === "exceptions" && !o.courierReceivedAt ? "red" : "dimmed"}>Dispatched {ago(o.dispatchedAt)}{o.dispatchedBy ? ` by ${o.dispatchedBy}` : ""}</Text>}
-                      {o.courierReceivedAt && <Text size="xs" c="teal">Received {dateShort(o.courierReceivedAt)}</Text>}
+                      {o.sortedAt && <Text size="xs" c={view === "exceptions" && !o.dispatchedAt ? "red" : "dimmed"}>Sorted {ago(o.sortedAt)}{o.sortedBy ? ` by ${o.sortedBy}` : ""}</Text>}
+                      {o.dispatchedAt && <Text size="xs" c="teal">Dispatched {dateShort(o.dispatchedAt)}</Text>}
                     </Table.Td>
                     <Table.Td pr="md"><FulfillmentBadge state={o.fulfillmentState} /></Table.Td>
                   </Table.Tr>
@@ -163,9 +166,9 @@ export default function Dispatch() {
           </ScrollArea>
         )}
       </Panel>
-      <Modal opened={undoOpen} onClose={() => setUndoOpen(false)} title="Undo dispatch">
+      <Modal opened={undoOpen} onClose={() => setUndoOpen(false)} title="Undo sort">
         <Stack>
-          <Alert variant="light" color="gray">Use this when a parcel was marked dispatched by mistake. The change is kept in the order history.</Alert>
+          <Alert variant="light" color="gray">Use this when a parcel was scanned by mistake. The change is kept in the order history.</Alert>
           <Textarea label="Reason" required autosize minRows={2} value={reason} onChange={(e) => setReason(e.currentTarget.value)} />
           <Group justify="flex-end"><Button disabled={!reason.trim()} loading={undo.isPending} onClick={() => undo.mutate()}>Undo</Button></Group>
         </Stack>

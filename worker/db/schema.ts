@@ -149,9 +149,13 @@ export const orders = sqliteTable(
     reservedUntil: text("reserved_until"),
     printedAt: text("printed_at"),
     printCount: integer("print_count").notNull().default(0),
-    dispatchStatus: text("dispatch_status").notNull().default("pending"), // pending | dispatched | courier_received
-    dispatchedAt: text("dispatched_at"),
-    dispatchedBy: text("dispatched_by"),
+    // pending → sorted (label scanned at the packing table) → dispatched (Steadfast picked it up)
+    dispatchStatus: text("dispatch_status").notNull().default("pending"),
+    sortedAt: text("sorted_at"),
+    sortedBy: text("sorted_by"),
+    sortBatchId: text("sort_batch_id"),
+    dispatchedAt: text("dispatched_at"), // when Steadfast confirmed pickup
+    dispatchedBy: text("dispatched_by"), // legacy (manual handover); unused for new records
     courierReceivedAt: text("courier_received_at"),
     // Auto-booking: set when an order is confirmed; the cron books it once this time passes.
     autoBookAt: text("auto_book_at"),
@@ -442,4 +446,18 @@ export const dispatchEvents = sqliteTable(
     createdAt: text("created_at").notNull(),
   },
   (t) => [index("dispatch_events_order_idx").on(t.orderId), index("dispatch_events_job_idx").on(t.jobId), index("dispatch_events_created_idx").on(t.createdAt)],
+);
+
+/** A scanning session at the packing table (one courier pickup). */
+export const sortBatches = sqliteTable(
+  "sort_batches",
+  {
+    id: text("id").primaryKey(),
+    name: text("name").notNull(),
+    startedBy: text("started_by").notNull(),
+    startedAt: text("started_at").notNull(),
+    closedAt: text("closed_at"),
+    scannedCount: integer("scanned_count").notNull().default(0),
+  },
+  (t) => [index("sort_batches_started_idx").on(t.startedAt)],
 );

@@ -1,7 +1,7 @@
 import { and, desc, eq, inArray, sql, type AnyColumn } from "drizzle-orm";
 import type { DB } from "../db";
 import { inList, pick } from "../db";
-import { consignments, dispatchEvents, orders, printJobs } from "../db/schema";
+import { consignments, dispatchEvents, orders, printJobs, sortBatches } from "../db/schema";
 import { HttpError, nowIso } from "../lib/util";
 
 /**
@@ -10,7 +10,8 @@ import { HttpError, nowIso } from "../lib/util";
  *   label:    not_ready → unprinted (on booking) → reserved (claim) → printed (confirmed by label service)
  *                                     ↑               │ release / expiry
  *                                     └───────────────┘   printed → unprinted only via explicit reprint request
- *   dispatch: pending → dispatched (staff handover) → courier_received (Steadfast confirms pickup)
+ *   dispatch: pending → sorted (label scanned at the packing table) → dispatched (Steadfast picked it up:
+ *             its status leaves in_review)
  *
  * Every transition is a single conditional UPDATE, so concurrent callers can never both win.
  */
@@ -73,20 +74,20 @@ async function addEvents(db: DB, rows: { orderId: number; event: string; jobId?:
 export async function onBooked(db: DB, orderId: number, consignmentRowId: number, actor: Actor) {
   await db
     .update(orders)
-    .set({ labelStatus: "unprinted", bookedAt: nowIso(), printJobId: null, reservedUntil: null, dispatchStatus: "pending", dispatchedAt: null, dispatchedBy: null, courierReceivedAt: null })
+    .set({ labelStatus: "unprinted", bookedAt: nowIso(), printJobId: null, reservedUntil: null, dispatchStatus: "pending", sortedAt: null, sortedBy: null, sortBatchId: null, dispatchedAt: null, dispatchedBy: null, courierReceivedAt: null })
     .where(eq(orders.id, orderId));
   await addEvents(db, [{ orderId, event: "label_ready", consignmentRowId }], actor);
 }
 
-/** Steadfast confirmed it has the parcel. */
+/** Steadfast picked the parcel up (status left in_review): the order is dispatched. */
 export async function onCourierReceived(db: DB, orderId: number, consignmentRowId: number, at: string) {
   const row = await db
     .update(orders)
-    .set({ dispatchStatus: "courier_received", courierReceivedAt: at })
-    .where(and(eq(orders.id, orderId), eq(orders.activeConsignmentId, consignmentRowId), sql`${orders.dispatchStatus} != 'courier_received'`))
+    .set({ dispatchStatus: "dispatched", dispatchedAt: at, courierReceivedAt: at })
+    .where(and(eq(orders.id, orderId), eq(orders.activeConsignmentId, consignmentRowId), sql`${orders.dispatchStatus} != 'dispatched'`))
     .returning({ id: orders.id })
     .get();
-  if (row) await addEvents(db, [{ orderId, event: "courier_received", consignmentRowId }], { name: "steadfast" });
+  if (row) await addEvents(db, [{ orderId, event: "dispatched", consignmentRowId }], { name: "steadfast" });
 }
 
 /** Booking voided (cancelled before pickup, released for rebooking, or order cancelled): not printable. */
@@ -107,7 +108,7 @@ export type PrintableOrder = ReturnType<typeof toPayload>;
 
 const orderCols = pick(orders, [
   "id", "name", "orderNumber", "shopifyId", "customerName", "phone", "city", "zip", "country", "lineItems", "booking",
-  "bookedAt", "labelStatus", "printJobId", "reservedUntil", "printedAt", "printCount", "dispatchStatus", "dispatchedAt", "courierReceivedAt",
+  "bookedAt", "labelStatus", "printJobId", "reservedUntil", "printedAt", "printCount", "dispatchStatus", "sortedAt", "dispatchedAt", "courierReceivedAt",
 ]);
 const consignmentCols = pick(consignments, [
   "invoice", "consignmentId", "trackingCode", "recipientName", "recipientPhone", "recipientAddress", "codAmount", "deliveryType", "note", "lineItems",
@@ -143,8 +144,8 @@ function toPayload(o: OrderPart, c: ConsignmentPart | null, offset: string) {
     printedAt: o.printedAt,
     printCount: o.printCount,
     dispatchStatus: o.dispatchStatus,
+    sortedAt: o.sortedAt,
     dispatchedAt: o.dispatchedAt,
-    courierReceivedAt: o.courierReceivedAt,
   };
 }
 
@@ -344,44 +345,148 @@ export async function requestReprint(db: DB, actor: Actor, orderIds: number[], r
 }
 
 // ---------------------------------------------------------------------------
-// Dispatch
+// Sorting (scan at the packing table)
 
-/** Records physical handover. Requires a printed label; courier receipt is confirmed separately by Steadfast. */
-export async function markDispatched(db: DB, actor: Actor, orderIds: number[]) {
-  const now = nowIso();
-  const rows = await db
-    .update(orders)
-    .set({ dispatchStatus: "dispatched", dispatchedAt: now, dispatchedBy: actor.name })
-    .where(and(inList(orders.id, orderIds), eq(orders.dispatchStatus, "pending"), eq(orders.labelStatus, "printed"), printableBase))
-    .returning({ id: orders.id, consignmentRowId: orders.activeConsignmentId })
-    .all();
-  await addEvents(db, rows.map((r) => ({ orderId: r.id, event: "dispatched", consignmentRowId: r.consignmentRowId })), actor);
-  const done = new Set(rows.map((r) => r.id));
-  const others = orderIds.filter((id) => !done.has(id));
-  const states = others.length
-    ? await db.select({ id: orders.id, labelStatus: orders.labelStatus, dispatchStatus: orders.dispatchStatus, courierStage: orders.courierStage, cancelledAt: orders.cancelledAt }).from(orders).where(inList(orders.id, others)).all()
-    : [];
-  const results = orderIds.map((id) => {
-    if (done.has(id)) return { orderId: id, result: "dispatched" };
-    const s = states.find((x) => x.id === id);
-    if (!s) return { orderId: id, result: "not_found" };
-    if (s.dispatchStatus !== "pending") return { orderId: id, result: `already_${s.dispatchStatus}` };
-    if (s.cancelledAt) return { orderId: id, result: "order_cancelled" };
-    if (s.courierStage !== "booked") return { orderId: id, result: `not_dispatchable_${s.courierStage}` };
-    return { orderId: id, result: "label_not_printed" };
-  });
-  return { dispatched: rows.length, results };
+export type ScanKind = "sorted" | "duplicate" | "cancelled" | "already_dispatched" | "not_booked" | "old_label" | "unknown";
+export type ScanResult = {
+  kind: ScanKind;
+  ok: boolean;
+  message: string;
+  order?: { id: number; name: string; customer: string | null; phone: string | null; city: string | null; cod: number; items: number; consignmentId: string | null; trackingCode: string | null; sortedAt?: string | null; sortedBy?: string | null };
+};
+
+/** Resolves a scanned barcode: Steadfast consignment ID first, then tracking code, invoice, order number. */
+async function resolveScan(db: DB, raw: string) {
+  const code = raw.trim().replace(/\s+/g, "");
+  if (!code) return null;
+  const byCid = await db.select().from(consignments).where(eq(consignments.consignmentId, code)).orderBy(desc(consignments.id)).get();
+  if (byCid) return byCid;
+  const byTracking = await db.select().from(consignments).where(sql`upper(${consignments.trackingCode}) = ${code.toUpperCase()}`).orderBy(desc(consignments.id)).get();
+  if (byTracking) return byTracking;
+  const byInvoice = await db.select().from(consignments).where(eq(consignments.invoice, code)).get();
+  if (byInvoice) return byInvoice;
+  const order = await db.select({ active: orders.activeConsignmentId }).from(orders).where(sql`${orders.name} in (${code}, ${"#" + code.replace(/^#/, "")})`).get();
+  if (order?.active) return (await db.select().from(consignments).where(eq(consignments.id, order.active)).get()) ?? null;
+  return null;
 }
 
-export async function undoDispatch(db: DB, actor: Actor, orderIds: number[], reason: string) {
+/**
+ * One label scan. Marks the parcel "sorted" (ready for courier pickup) exactly once.
+ * Dispatch itself is recorded only when Steadfast reports the pickup.
+ */
+export async function scanParcel(db: DB, actor: Actor, code: string, batchId: string | null): Promise<ScanResult> {
+  const c = await resolveScan(db, code);
+  if (!c) return { kind: "unknown", ok: false, message: `No parcel found for "${code.trim()}"` };
+  const o = await db.select().from(orders).where(eq(orders.id, c.orderId)).get();
+  if (!o) return { kind: "unknown", ok: false, message: "Order not found" };
+  const info = {
+    id: o.id,
+    name: o.name,
+    customer: c.recipientName || o.customerName,
+    phone: c.recipientPhone || o.phone,
+    city: o.city,
+    cod: c.codAmount,
+    items: (c.lineItems?.length ? c.lineItems : o.lineItems).reduce((sum, li) => sum + li.quantity, 0),
+    consignmentId: c.consignmentId,
+    trackingCode: c.trackingCode,
+    sortedAt: o.sortedAt,
+    sortedBy: o.sortedBy,
+  };
+  if (c.superseded || o.activeConsignmentId !== c.id) {
+    return { kind: "old_label", ok: false, message: "Old label — this order was rebooked. Use the new label.", order: info };
+  }
+  if (o.cancelledAt) return { kind: "cancelled", ok: false, message: "STOP — order cancelled in Shopify. Keep this parcel.", order: info };
+  if (o.dispatchStatus === "dispatched" || !["booked"].includes(o.courierStage)) {
+    if (["in_transit", "on_hold", "delivered", "partial_delivered", "returned"].includes(o.courierStage) || o.dispatchStatus === "dispatched") {
+      return { kind: "already_dispatched", ok: false, message: "Already picked up by Steadfast", order: info };
+    }
+    return { kind: "not_booked", ok: false, message: `Not bookable state (${o.courierStage})`, order: info };
+  }
+  const now = nowIso();
+  const row = await db
+    .update(orders)
+    .set({
+      dispatchStatus: "sorted",
+      sortedAt: now,
+      sortedBy: actor.name,
+      sortBatchId: batchId,
+      // A scanned label physically exists, so it can never be handed to the printer again.
+      labelStatus: "printed",
+      printedAt: sql`coalesce(${orders.printedAt}, ${now})`,
+      reservedUntil: null,
+    })
+    .where(and(eq(orders.id, o.id), eq(orders.dispatchStatus, "pending")))
+    .returning({ id: orders.id })
+    .get();
+  if (!row) {
+    const fresh = await db.select({ sortedAt: orders.sortedAt, sortedBy: orders.sortedBy }).from(orders).where(eq(orders.id, o.id)).get();
+    return { kind: "duplicate", ok: true, message: `Already sorted${fresh?.sortedBy ? ` by ${fresh.sortedBy}` : ""}`, order: { ...info, ...fresh } };
+  }
+  await addEvents(db, [{ orderId: o.id, event: "sorted", jobId: batchId, consignmentRowId: c.id }], actor);
+  if (batchId) await db.update(sortBatches).set({ scannedCount: sql`${sortBatches.scannedCount} + 1` }).where(eq(sortBatches.id, batchId));
+  return { kind: "sorted", ok: true, message: "Sorted — ready for pickup", order: { ...info, sortedAt: now, sortedBy: actor.name } };
+}
+
+/** Manual (no scanner) sorting from the dashboard or API. */
+export async function markSorted(db: DB, actor: Actor, orderIds: number[]) {
+  const results: { orderId: number; result: string }[] = [];
+  for (const id of orderIds) {
+    const o = await db.select({ cid: consignments.consignmentId, tracking: consignments.trackingCode, invoice: consignments.invoice }).from(orders).innerJoin(consignments, eq(consignments.id, orders.activeConsignmentId)).where(eq(orders.id, id)).get();
+    if (!o) {
+      results.push({ orderId: id, result: "not_booked" });
+      continue;
+    }
+    const r = await scanParcel(db, actor, o.cid ?? o.tracking ?? o.invoice, null);
+    results.push({ orderId: id, result: r.kind });
+  }
+  return { sorted: results.filter((r) => r.result === "sorted").length, results };
+}
+
+export async function unsort(db: DB, actor: Actor, orderIds: number[], reason: string) {
   const rows = await db
     .update(orders)
-    .set({ dispatchStatus: "pending", dispatchedAt: null, dispatchedBy: null })
-    .where(and(inList(orders.id, orderIds), eq(orders.dispatchStatus, "dispatched")))
+    .set({ dispatchStatus: "pending", sortedAt: null, sortedBy: null, sortBatchId: null })
+    .where(and(inList(orders.id, orderIds), eq(orders.dispatchStatus, "sorted")))
     .returning({ id: orders.id })
     .all();
-  await addEvents(db, rows.map((r) => ({ orderId: r.id, event: "dispatch_undone", note: reason })), actor);
+  await addEvents(db, rows.map((r) => ({ orderId: r.id, event: "unsorted", note: reason })), actor);
   return { reverted: rows.map((r) => r.id) };
+}
+
+const toSortSql = sql`${orders.courierStage} = 'booked' and ${orders.cancelledAt} is null and ${orders.archived} = 0 and ${orders.dispatchStatus} = 'pending' and ${orders.activeConsignmentId} is not null`;
+
+export async function startBatch(db: DB, actor: Actor, name?: string) {
+  const id = crypto.randomUUID();
+  await db.insert(sortBatches).values({ id, name: name?.trim() || `Pickup ${new Date().toISOString().slice(0, 16).replace("T", " ")}`, startedBy: actor.name, startedAt: nowIso() });
+  return id;
+}
+
+/** Live picture of a scanning session: scanned in this batch, and parcels still waiting to be sorted. */
+export async function batchSummary(db: DB, batchId: string | null) {
+  const batch = batchId ? await db.select().from(sortBatches).where(eq(sortBatches.id, batchId)).get() : null;
+  const cols = { id: orders.id, name: orders.name, customer: orders.customerName, city: orders.city, sortedAt: orders.sortedAt, cid: consignments.consignmentId };
+  const scanned = batchId
+    ? await db.select(cols).from(orders).leftJoin(consignments, eq(consignments.id, orders.activeConsignmentId)).where(eq(orders.sortBatchId, batchId)).orderBy(desc(orders.sortedAt)).limit(500).all()
+    : [];
+  const remaining = await db.select(cols).from(orders).leftJoin(consignments, eq(consignments.id, orders.activeConsignmentId)).where(toSortSql).orderBy(orders.bookedAt).limit(500).all();
+  const totals = await db
+    .select({
+      toSort: sql<number>`sum(case when ${toSortSql} then 1 else 0 end)`,
+      sortedWaiting: sql<number>`sum(case when ${orders.dispatchStatus} = 'sorted' and ${orders.cancelledAt} is null then 1 else 0 end)`,
+      sortedCancelled: sql<number>`sum(case when ${orders.dispatchStatus} = 'sorted' and ${orders.cancelledAt} is not null then 1 else 0 end)`,
+    })
+    .from(orders)
+    .get();
+  return {
+    batch,
+    scanned,
+    remaining,
+    totals: { toSort: Number(totals?.toSort ?? 0), sortedWaiting: Number(totals?.sortedWaiting ?? 0), sortedCancelled: Number(totals?.sortedCancelled ?? 0) },
+  };
+}
+
+export async function closeBatch(db: DB, batchId: string) {
+  await db.update(sortBatches).set({ closedAt: nowIso() }).where(and(eq(sortBatches.id, batchId), sql`${sortBatches.closedAt} is null`));
 }
 
 // ---------------------------------------------------------------------------
@@ -395,9 +500,9 @@ export async function summary(db: DB, range: { from: string; to: string }) {
       unprinted: sql<number>`sum(case when ${orders.labelStatus} = 'unprinted' and ${orders.courierStage} = 'booked' and ${orders.cancelledAt} is null then 1 else 0 end)`,
       reserved: sql<number>`sum(case when ${orders.labelStatus} = 'reserved' then 1 else 0 end)`,
       printed: sql<number>`sum(case when ${orders.labelStatus} = 'printed' then 1 else 0 end)`,
-      awaitingDispatch: sql<number>`sum(case when ${orders.labelStatus} = 'printed' and ${orders.dispatchStatus} = 'pending' and ${orders.courierStage} = 'booked' and ${orders.cancelledAt} is null then 1 else 0 end)`,
+      awaitingSort: sql<number>`sum(case when ${orders.dispatchStatus} = 'pending' and ${orders.courierStage} = 'booked' and ${orders.cancelledAt} is null then 1 else 0 end)`,
+      sorted: sql<number>`sum(case when ${orders.dispatchStatus} = 'sorted' then 1 else 0 end)`,
       dispatched: sql<number>`sum(case when ${orders.dispatchStatus} = 'dispatched' then 1 else 0 end)`,
-      courierReceived: sql<number>`sum(case when ${orders.dispatchStatus} = 'courier_received' then 1 else 0 end)`,
       cancelledAfterBooking: sql<number>`sum(case when ${orders.cancelledAt} is not null then 1 else 0 end)`,
     })
     .from(orders)
@@ -410,8 +515,8 @@ export async function summary(db: DB, range: { from: string; to: string }) {
     .select({
       unprinted: sql<number>`sum(case when ${orders.labelStatus} = 'unprinted' then 1 else 0 end)`,
       reserved: sql<number>`sum(case when ${orders.labelStatus} = 'reserved' then 1 else 0 end)`,
-      awaitingDispatch: sql<number>`sum(case when ${orders.labelStatus} = 'printed' and ${orders.dispatchStatus} = 'pending' then 1 else 0 end)`,
-      awaitingCourier: sql<number>`sum(case when ${orders.dispatchStatus} = 'dispatched' then 1 else 0 end)`,
+      awaitingSort: sql<number>`sum(case when ${orders.dispatchStatus} = 'pending' then 1 else 0 end)`,
+      awaitingPickup: sql<number>`sum(case when ${orders.dispatchStatus} = 'sorted' then 1 else 0 end)`,
     })
     .from(orders)
     .where(printableBase)
@@ -424,15 +529,15 @@ export async function summary(db: DB, range: { from: string; to: string }) {
     reserved: n(cohort?.reserved),
     printed: n(cohort?.printed),
     printedOnDate: printedThatDay,
-    awaitingDispatch: n(cohort?.awaitingDispatch),
+    awaitingSort: n(cohort?.awaitingSort),
+    sorted: n(cohort?.sorted),
     dispatched: n(cohort?.dispatched),
-    courierReceived: n(cohort?.courierReceived),
     cancelledAfterBooking: n(cohort?.cancelledAfterBooking),
     backlog: {
       unprinted: n(backlog?.unprinted),
       reserved: n(backlog?.reserved),
-      awaitingDispatch: n(backlog?.awaitingDispatch),
-      awaitingCourierReceipt: n(backlog?.awaitingCourier),
+      awaitingSort: n(backlog?.awaitingSort),
+      awaitingPickup: n(backlog?.awaitingPickup),
     },
   };
 }
