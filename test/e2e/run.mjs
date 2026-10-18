@@ -558,6 +558,16 @@ await step("notes, bulk tags, print data", async () => {
 await step("Shopify connection test + webhook registration (uses client credentials)", async () => {
   const t = await call("POST", "/api/settings/test/shopify");
   assert.equal(t.body.ok, true, JSON.stringify(t.body));
+  assert.ok(t.body.steps.every((st) => st.ok));
+  // A stray access token (e.g. a secret pasted in the wrong field) must be reported clearly.
+  await call("PUT", "/api/settings/connections", { SHOPIFY_ACCESS_TOKEN: "wrong-value" });
+  const bad = await call("POST", "/api/settings/test/shopify");
+  assert.equal(bad.body.ok, false);
+  assert.match(bad.body.steps.find((st) => st.step === "Auth mode").detail, /Client ID\/secret are ignored/);
+  assert.match(bad.body.error, /401/);
+  await call("PUT", "/api/settings/connections", { SHOPIFY_ACCESS_TOKEN: null });
+  const fixed = await call("POST", "/api/settings/test/shopify");
+  assert.equal(fixed.body.ok, true, JSON.stringify(fixed.body));
   const s = await mockState();
   assert.ok(s.tokenRequests >= 1);
   const sf = await call("POST", "/api/settings/test/steadfast");

@@ -591,3 +591,78 @@ export async function closeOrder(env: Env, db: DB, shopifyOrderId: string) {
   const errs = data.orderClose.userErrors;
   if (errs.length) throw new Error(errs.map((e) => e.message).join("; "));
 }
+
+export type DiagnosticStep = { step: string; ok: boolean; detail: string };
+
+/**
+ * Step-by-step connection check without any cached token, so the Settings page can show
+ * exactly where authentication fails and what Shopify answered.
+ */
+export async function diagnoseShopify(env: Env, db: DB): Promise<DiagnosticStep[]> {
+  const steps: DiagnosticStep[] = [];
+  const domain = env.SHOPIFY_SHOP_DOMAIN ?? "";
+  steps.push({
+    step: "Store domain",
+    ok: /^[a-z0-9][a-z0-9-]*\.myshopify\.com$/.test(domain),
+    detail: domain || "not set",
+  });
+  let token: string | null = null;
+  if (env.SHOPIFY_ACCESS_TOKEN) {
+    steps.push({
+      step: "Auth mode",
+      ok: true,
+      detail: `Admin API access token (…${env.SHOPIFY_ACCESS_TOKEN.slice(-4)}). Client ID/secret are ignored while this is set.`,
+    });
+    token = env.SHOPIFY_ACCESS_TOKEN;
+  } else {
+    steps.push({ step: "Auth mode", ok: Boolean(env.SHOPIFY_CLIENT_ID && env.SHOPIFY_CLIENT_SECRET), detail: `Client credentials (Client ID …${(env.SHOPIFY_CLIENT_ID ?? "").slice(-4)})` });
+    try {
+      const res = await fetch(`${adminBase(env)}/admin/oauth/access_token`, {
+        method: "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        body: new URLSearchParams({ grant_type: "client_credentials", client_id: env.SHOPIFY_CLIENT_ID ?? "", client_secret: env.SHOPIFY_CLIENT_SECRET ?? "" }),
+      });
+      const text = await res.text();
+      if (res.ok) {
+        const json = JSON.parse(text) as { access_token: string; scope?: string; expires_in?: number };
+        token = json.access_token;
+        steps.push({ step: "Get access token", ok: true, detail: `Token issued. Granted scopes: ${json.scope || "(none)"}` });
+      } else {
+        steps.push({ step: "Get access token", ok: false, detail: `HTTP ${res.status}: ${text.slice(0, 400)}` });
+      }
+    } catch (err) {
+      steps.push({ step: "Get access token", ok: false, detail: (err as Error).message });
+    }
+  }
+  if (token) {
+    try {
+      const res = await fetch(`${adminBase(env)}/admin/api/${env.SHOPIFY_API_VERSION}/graphql.json`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "X-Shopify-Access-Token": token },
+        body: JSON.stringify({ query: "{ shop { name myshopifyDomain } currentAppInstallation { accessScopes { handle } } }" }),
+      });
+      const text = await res.text();
+      if (!res.ok) {
+        steps.push({ step: "Call Admin API", ok: false, detail: `HTTP ${res.status}: ${text.slice(0, 400)}` });
+      } else {
+        const json = JSON.parse(text) as { data?: { shop: { name: string; myshopifyDomain: string }; currentAppInstallation?: { accessScopes: { handle: string }[] } }; errors?: unknown };
+        if (json.data?.shop) {
+          const scopes = json.data.currentAppInstallation?.accessScopes.map((s) => s.handle) ?? [];
+          const required = ["read_orders", "write_orders", "read_customers", "read_merchant_managed_fulfillment_orders", "write_merchant_managed_fulfillment_orders"];
+          const missing = required.filter((r) => !scopes.includes(r));
+          steps.push({ step: "Call Admin API", ok: true, detail: `Connected to ${json.data.shop.name} (${json.data.shop.myshopifyDomain})` });
+          steps.push({ step: "Scopes", ok: missing.length === 0, detail: missing.length ? `Missing: ${missing.join(", ")} — add them, release a new version and approve it on the store` : "All required scopes granted" });
+        } else {
+          steps.push({ step: "Call Admin API", ok: false, detail: JSON.stringify(json.errors ?? json).slice(0, 400) });
+        }
+      }
+    } catch (err) {
+      steps.push({ step: "Call Admin API", ok: false, detail: (err as Error).message });
+    }
+  }
+  if (steps.every((s) => s.ok)) {
+    // Replace whatever token was cached with a known-good state.
+    await resetShopifyToken(db);
+  }
+  return steps;
+}

@@ -3,7 +3,7 @@ import {
   Alert, Badge, Button, Card, SegmentedControl, Checkbox, ColorSwatch, Group, Modal, NumberInput, PasswordInput, Radio, Select, SimpleGrid, Stack, Switch, Table, Tabs, Text, TextInput, ActionIcon, Code, Textarea, Tooltip,
 } from "@mantine/core";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { CheckCircle2, Plug, Plus, Trash2, Webhook, Star } from "lucide-react";
+import { CheckCircle2, XCircle, Plug, Plus, Trash2, Webhook, Star } from "lucide-react";
 import { api, del, notifyError, notifySuccess, patch, post, put } from "../api";
 import { useAuth, useCan } from "../auth";
 import { Copyable, ErrorState, LoadingState, PageHeader } from "../components/ui";
@@ -98,7 +98,7 @@ function Connections({ d }: { d: SettingsData }) {
   const [authMode, setAuthMode] = useState<string>(creds?.SHOPIFY_ACCESS_TOKEN.set ? "token" : "client");
   const set = (k: string) => (v: string) => setForm({ ...form, [k]: v });
   const disabled = !can("settings.manage");
-  const testShopify = useMutation({ mutationFn: () => post<{ ok: boolean; error?: string; shop?: { name: string; currencyCode: string }; webhooks?: { topic: string; uri: string }[] }>("/settings/test/shopify") });
+  const testShopify = useMutation({ mutationFn: () => post<{ ok: boolean; error?: string; shop?: { name: string; currencyCode: string }; webhooks?: { topic: string; uri: string }[]; steps?: { step: string; ok: boolean; detail: string }[] }>("/settings/test/shopify") });
   const testSteadfast = useMutation({ mutationFn: () => post<{ ok: boolean; error?: string; balance?: number }>("/settings/test/steadfast") });
   const save = useMutation({
     mutationFn: (body: Record<string, string | null>) => put("/settings/connections", body),
@@ -165,7 +165,18 @@ function Connections({ d }: { d: SettingsData }) {
               <Alert color="teal" variant="light">
                 Connected to <b>{testShopify.data.shop?.name}</b> ({testShopify.data.shop?.currencyCode}). Webhooks: {testShopify.data.webhooks?.length ? testShopify.data.webhooks.map((w) => w.topic).join(", ") : "none registered yet"}
               </Alert>
-            ) : <Alert color="red" variant="light">{testShopify.data.error}</Alert>
+            ) : (
+              <Alert color="red" variant="light" title="Connection failed">
+                <Stack gap={6}>
+                  {(testShopify.data.steps ?? [{ step: "Error", ok: false, detail: testShopify.data.error ?? "" }]).map((st) => (
+                    <Group key={st.step} gap={6} wrap="nowrap" align="flex-start">
+                      {st.ok ? <CheckCircle2 size={14} color="var(--mantine-color-teal-6)" style={{ flexShrink: 0, marginTop: 3 }} /> : <XCircle size={14} color="var(--mantine-color-red-6)" style={{ flexShrink: 0, marginTop: 3 }} />}
+                      <Text size="sm"><b>{st.step}:</b> <span style={{ wordBreak: "break-word" }}>{st.detail}</span></Text>
+                    </Group>
+                  ))}
+                </Stack>
+              </Alert>
+            )
           )}
           {!disabled && (
             <Group gap="xs">

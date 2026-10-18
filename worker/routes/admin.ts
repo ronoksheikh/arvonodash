@@ -10,7 +10,7 @@ import { hashPassword } from "../lib/crypto";
 import { nowIso } from "../lib/util";
 import { logActivity } from "../services/activity";
 import { getSettings, saveSettings, getValues } from "../services/settings";
-import { getShopInfo, listWebhookSubscriptions, registerWebhooks, resetShopifyToken, shopifyConfigured } from "../services/shopify";
+import { diagnoseShopify, getShopInfo, listWebhookSubscriptions, registerWebhooks, resetShopifyToken, shopifyConfigured } from "../services/shopify";
 import { CREDENTIAL_KEYS, describeCredentials, loadCredentials, normalizeShopDomain, saveCredentials, type Credentials } from "../services/credentials";
 import { getBalance, steadfastConfigured } from "../services/steadfast";
 import { getImportState, latestRuns, reconcileShopify, recordRun, retryFailedWebhooks, runImportStep, startImport, syncPayments } from "../services/sync";
@@ -95,11 +95,13 @@ settingsRoutes.put("/", requirePerm("settings.manage"), async (c) => {
 
 settingsRoutes.post("/test/shopify", requirePerm("settings.manage"), async (c) => {
   const db = getDb(c.env.DB);
+  const steps = await diagnoseShopify(c.env, db);
+  if (steps.some((s) => !s.ok)) return c.json({ ok: false, error: steps.find((s) => !s.ok)!.detail, steps });
   try {
     const [shop, hooks] = await Promise.all([getShopInfo(c.env, db), listWebhookSubscriptions(c.env, db)]);
-    return c.json({ ok: true, shop, webhooks: hooks });
+    return c.json({ ok: true, shop, webhooks: hooks, steps });
   } catch (err) {
-    return c.json({ ok: false, error: (err as Error).message });
+    return c.json({ ok: false, error: (err as Error).message, steps });
   }
 });
 

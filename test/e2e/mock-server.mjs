@@ -132,7 +132,10 @@ function graphql(query, variables) {
     if (restOrders[id]) return { data: { order: restToGql(restOrders[id]) } };
     return { data: { order: shopifyOrders.find((o) => o.id === variables.id) ?? null } };
   }
-  if (query.includes("shop {")) return { data: { shop: { name: "ARVONO Test", myshopifyDomain: "arvono-test.myshopify.com", currencyCode: "BDT", ianaTimezone: "Asia/Dhaka" } } };
+  if (query.includes("shop {")) {
+    const scopes = ["read_orders", "write_orders", "read_customers", "read_merchant_managed_fulfillment_orders", "write_merchant_managed_fulfillment_orders"];
+    return { data: { shop: { name: "ARVONO Test", myshopifyDomain: "arvono-test.myshopify.com", currencyCode: "BDT", ianaTimezone: "Asia/Dhaka" }, currentAppInstallation: { accessScopes: scopes.map((handle) => ({ handle })) } } };
+  }
   if (query.includes("webhookSubscriptions")) return { data: { webhookSubscriptions: { nodes: state.webhooks } } };
   if (query.includes("webhookSubscriptionCreate")) {
     state.webhooks.push({ id: `gid://shopify/WebhookSubscription/${state.webhooks.length + 1}`, topic: variables.topic, uri: variables.sub.uri });
