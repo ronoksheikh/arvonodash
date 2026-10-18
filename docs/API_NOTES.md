@@ -142,8 +142,9 @@ Tracking links use `https://steadfast.com.bd/t/{tracking_code}`. You can change 
 
 ## Cloudflare
 
-- One Worker serves the API, the webhooks and the static React build (Workers static assets,
-  `run_worker_first` for `/api/*` and `/webhooks/*`, SPA fallback).
+- One Worker serves the API, the webhooks and the static React build (Workers static assets with
+  an `ASSETS` binding, SPA fallback). `run_worker_first: true` so the Worker can serve the customer
+  tracking domain differently from the dashboard (see TRACKING_DOMAIN.md).
 - D1 (SQLite) through Drizzle ORM. Migrations live in `migrations/` and are applied with
   `wrangler d1 migrations apply`.
 - Cron trigger `*/5 * * * *`. A Workers Paid plan is recommended: CPU time for PBKDF2 login
@@ -156,3 +157,17 @@ Tracking links use `https://steadfast.com.bd/t/{tracking_code}`. You can change 
   The browser only ever sees masked hints.
 - D1 is auto-provisioned on the first `wrangler deploy` (no `database_id` in config); the Worker
   applies pending migrations at startup using Wrangler's `d1_migrations` table.
+
+## Steadfast: deleted consignments
+
+There is no documented "deleted" status. A consignment deleted in the portal answers "not found" on
+the status endpoints, or `unknown`. We record it as our own final status `deleted` when the parcel
+was never picked up, and never let a poll move a finished parcel back to an open status
+(`pollVerdict` in `worker/services/steadfast.ts`).
+
+## SMS API (sms.net.bd)
+
+`POST https://api.sms.net.bd/sendsms` (form: `api_key`, `msg`, `to`, optional `sender_id`) →
+`{ "error": 0, "msg": "Request successfully submitted", "data": { "request_id": … } }`.
+`GET /user/balance/?api_key=…` → `{ "error": 0, "data": { "balance": "…" } }`. Error codes are in
+`SMS_ERROR_CODES` (`shared/constants.ts`).

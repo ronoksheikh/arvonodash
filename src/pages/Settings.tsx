@@ -11,6 +11,8 @@ import { Copyable, ErrorState, LoadingState, PageHeader } from "../components/ui
 import { ago, money } from "../format";
 import { FULFILLMENT_TRIGGERS, PERMISSIONS } from "../../shared/constants";
 import type { CustomStatus } from "../types";
+import { SmsSettings, type SmsSettingsData, type SmsStatus } from "./settings/SmsSettings";
+import { TrackingSettings } from "./settings/TrackingSettings";
 
 type AppSettings = {
   fulfillmentTrigger: keyof typeof FULFILLMENT_TRIGGERS;
@@ -44,7 +46,9 @@ type AppSettings = {
   fraudCacheHours: number;
   fraudMaxPerMinute: number;
   autoCombine: boolean;
-};
+  trackingBaseUrl: string;
+  storeUrl: string;
+} & SmsSettingsData;
 type SettingsData = {
   settings: AppSettings;
   credentials: Record<string, CredInfo> | null;
@@ -56,6 +60,8 @@ type SettingsData = {
     steadfast: { configured: boolean; baseUrl: string; webhookToken: boolean; webhookUrl: string };
   };
   sync: Record<string, unknown>;
+  sms: SmsStatus;
+  tracking: { instanceId: string; dashboardOrigin: string };
 };
 
 export default function SettingsPage() {
@@ -70,6 +76,8 @@ export default function SettingsPage() {
         <Tabs.List mb="lg">
           <Tabs.Tab value="connections">Connections</Tabs.Tab>
           <Tabs.Tab value="workflow">Workflow</Tabs.Tab>
+          <Tabs.Tab value="sms">SMS</Tabs.Tab>
+          <Tabs.Tab value="tracking">Tracking page</Tabs.Tab>
           <Tabs.Tab value="statuses">Internal labels</Tabs.Tab>
           {can("users.manage") && <Tabs.Tab value="staff">Staff & permissions</Tabs.Tab>}
           {can("settings.manage") && <Tabs.Tab value="api">API keys</Tabs.Tab>}
@@ -77,6 +85,10 @@ export default function SettingsPage() {
         </Tabs.List>
         <Tabs.Panel value="connections"><Connections d={q.data!} /></Tabs.Panel>
         <Tabs.Panel value="workflow"><Workflow d={q.data!} /></Tabs.Panel>
+        <Tabs.Panel value="sms"><SmsSettings settings={q.data!.settings} status={q.data!.sms} /></Tabs.Panel>
+        <Tabs.Panel value="tracking">
+          <TrackingSettings trackingBaseUrl={q.data!.settings.trackingBaseUrl} storeUrl={q.data!.settings.storeUrl} instanceId={q.data!.tracking.instanceId} dashboardOrigin={q.data!.tracking.dashboardOrigin} />
+        </Tabs.Panel>
         <Tabs.Panel value="statuses"><Statuses statuses={q.data!.statuses} /></Tabs.Panel>
         {can("users.manage") && <Tabs.Panel value="staff"><Staff /></Tabs.Panel>}
         {can("settings.manage") && <Tabs.Panel value="api"><ApiKeys /></Tabs.Panel>}

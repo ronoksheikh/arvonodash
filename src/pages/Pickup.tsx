@@ -1,7 +1,8 @@
 import { useEffect, useMemo, useState } from "react";
 import { Alert, Badge, Button, Card, Checkbox, Group, Modal, Progress, ScrollArea, SimpleGrid, Stack, Table, Text, TextInput, Title, UnstyledButton } from "@mantine/core";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { AlarmClock, CheckCircle2, PackageX, ScanLine, Truck } from "lucide-react";
+import { AlarmClock, ArrowRight, CheckCircle2, PackageX, ScanLine, Truck, Undo2 } from "lucide-react";
+import { modals } from "@mantine/modals";
 import { useNavigate } from "react-router";
 import { api, notifyError, notifySuccess, post } from "../api";
 import { useCan } from "../auth";
@@ -9,7 +10,7 @@ import { EmptyState, ErrorState, LoadingState, PageHeader, Panel } from "../comp
 import { OrderDrawer } from "../components/OrderDrawer";
 import { dateShort, money } from "../format";
 
-type Stage = "needs_booking" | "needs_label" | "needs_scan" | "ready" | "handed_over" | "picked_up" | "pull_out" | "next_day";
+type Stage = "needs_booking" | "needs_label" | "needs_scan" | "ready" | "handed_over" | "not_collected" | "picked_up" | "pull_out" | "next_day";
 type Parcel = {
   id: number;
   name: string;
@@ -25,6 +26,8 @@ type Parcel = {
   dispatchedAt: string | null;
   stage: Stage;
   carriedOver: boolean;
+  shipBy: string | null;
+  carryOverCount: number;
 };
 type Plan = {
   date: string;
@@ -33,7 +36,7 @@ type Plan = {
   cutoffAt: string;
   pickupTime: string;
   pickupAt: string;
-  counts: { needsBooking: number; needsLabel: number; needsScan: number; ready: number; handedOver: number; pickedUp: number; pullOut: number; nextDay: number; carriedOver: number; notReady: number; shipToday: number };
+  counts: { needsBooking: number; needsLabel: number; needsScan: number; ready: number; handedOver: number; notCollected: number; pickedUp: number; pullOut: number; nextDay: number; carriedOver: number; notReady: number; shipToday: number };
   parcels: Parcel[];
   pickups: { id: string; riderName: string | null; riderPhone: string | null; handedCount: number; leftBehindCount: number; readyCount: number; handedBy: string; createdAt: string; confirmedBySteadfast: number }[];
 };
@@ -48,6 +51,7 @@ const STAGES: { key: Stage; label: string; color: string; hint: string }[] = [
 ];
 const EXTRA: { key: Stage; label: string; color: string }[] = [
   { key: "pull_out", label: "Cancelled — pull out", color: "red" },
+  { key: "not_collected", label: "Rider has it · not confirmed", color: "red" },
   { key: "next_day", label: "After cut-off · tomorrow", color: "gray" },
 ];
 const STAGE_LABEL = Object.fromEntries([...STAGES, ...EXTRA].map((s) => [s.key, s]));
@@ -83,6 +87,23 @@ export default function Pickup() {
   const [openOrder, setOpenOrder] = useState<number | null>(null);
   const q = useQuery({ queryKey: ["pickup-plan"], queryFn: () => api<Plan>("/ops/pickup"), refetchInterval: 15_000 });
 
+  const undo = useMutation({
+    mutationFn: (id: number) => post<{ reverted: number[] }>("/ops/pickup/undo-handover", { orderIds: [id], reason: "Rider did not take it" }),
+    onSuccess: (r) => {
+      notifySuccess(r.reverted.length ? "Back to ready — it goes with the next pickup" : "Nothing changed (Steadfast already has it)");
+      qc.invalidateQueries({ queryKey: ["pickup-plan"] });
+    },
+    onError: (e) => notifyError(e),
+  });
+  const undoHandover = (r: Parcel) =>
+    modals.openConfirmModal({
+      title: `Undo handover of ${r.name}?`,
+      children: <Text size="sm">Only if the parcel is still here. It goes back to "Ready (scanned)" and leaves with the next pickup.</Text>,
+      labels: { confirm: "Undo handover", cancel: "Keep" },
+      confirmProps: { color: "red" },
+      onConfirm: () => undo.mutate(r.id),
+    });
+
   if (q.isLoading) return <LoadingState />;
   if (q.error || !q.data) return <ErrorState error={q.error} onRetry={() => q.refetch()} />;
   const p = q.data;
@@ -93,14 +114,14 @@ export default function Pickup() {
   const rows = p.parcels.filter((x) =>
     filter === null ? x.stage !== "next_day" : filter === "not_ready" ? ["needs_booking", "needs_label", "needs_scan"].includes(x.stage) : x.stage === filter,
   );
-  const order: Stage[] = ["pull_out", "needs_booking", "needs_label", "needs_scan", "ready", "handed_over", "picked_up", "next_day"];
+  const order: Stage[] = ["pull_out", "not_collected", "needs_booking", "needs_label", "needs_scan", "ready", "handed_over", "picked_up", "next_day"];
   rows.sort((a, b) => order.indexOf(a.stage) - order.indexOf(b.stage));
 
   return (
     <>
       <PageHeader
         title="Pickup today"
-        description={`Orders confirmed before ${hhmm12(p.cutoffTime)} ship today. Scanned parcels are ready for the rider. Steadfast confirms the pickup when the status leaves "in review".`}
+        description={`Orders confirmed before ${hhmm12(p.cutoffTime)} ship today. Anything not ready by pickup moves to tomorrow automatically and stays on top of the list until it leaves.`}
         actions={
           <Group gap="xs">
             {can("dispatch.manage") && <Button variant="default" leftSection={<ScanLine size={15} />} onClick={() => navigate("/scan")}>Open scanner</Button>}
@@ -112,6 +133,8 @@ export default function Pickup() {
           </Group>
         }
       />
+
+      <FlowGuide />
 
       <SimpleGrid cols={{ base: 1, sm: 3 }} mb="md">
         <Card padding="md">
@@ -142,6 +165,12 @@ export default function Pickup() {
           Nothing will be left behind.
         </Alert>
       ) : null}
+      {c.notCollected > 0 && (
+        <Alert color="red" variant="light" mb="md" icon={<Truck size={18} />} title={`${c.notCollected} parcel(s) were handed to a rider on an earlier day, but Steadfast still hasn't confirmed pickup`}>
+          Call the rider. If a parcel is actually still here, open it below and press "Undo handover" so it goes with the next pickup.{" "}
+          <UnstyledButton onClick={() => setFilter("not_collected")} style={{ textDecoration: "underline", fontSize: 14 }}>Show them</UnstyledButton>
+        </Alert>
+      )}
       {c.pullOut > 0 && (
         <Alert color="red" variant="filled" mb="md" title={`${c.pullOut} scanned parcel(s) were cancelled in Shopify — take them off the pickup pile`}>
           <UnstyledButton c="white" onClick={() => setFilter("pull_out")} style={{ textDecoration: "underline", fontSize: 14 }}>Show them</UnstyledButton>
@@ -195,10 +224,23 @@ export default function Pickup() {
                     <Table.Td>
                       <Group gap={4}>
                         <Badge size="sm" variant="light" color={STAGE_LABEL[r.stage].color}>{STAGE_LABEL[r.stage].label}</Badge>
-                        {r.carriedOver && <Badge size="sm" variant="outline" color="red">Carried over</Badge>}
+                        {r.carriedOver && (
+                          <Badge size="sm" variant="outline" color="red">
+                            {r.carryOverCount > 0 ? `Late ${r.carryOverCount} day${r.carryOverCount > 1 ? "s" : ""}` : "From earlier"}
+                          </Badge>
+                        )}
                       </Group>
                       {r.stage === "needs_booking" && (r.autoBookAt ? <Text size="xs" c="dimmed">Auto-books {dateShort(r.autoBookAt)}</Text> : r.autoBookNote ? <Text size="xs" c="orange" lineClamp={1}>{r.autoBookNote}</Text> : <Text size="xs" c="dimmed">Book it from Orders</Text>)}
-                      {r.handedOverAt && <Text size="xs" c="dimmed">Handed over {dateShort(r.handedOverAt)}</Text>}
+                      {r.handedOverAt && (
+                        <Group gap={6}>
+                          <Text size="xs" c="dimmed">Handed over {dateShort(r.handedOverAt)}</Text>
+                          {can("dispatch.manage") && (r.stage === "handed_over" || r.stage === "not_collected") && (
+                            <Button size="compact-xs" variant="subtle" color="red" leftSection={<Undo2 size={12} />} onClick={(e) => { e.stopPropagation(); undoHandover(r); }}>
+                              Undo handover
+                            </Button>
+                          )}
+                        </Group>
+                      )}
                     </Table.Td>
                     <Table.Td pr="md"><Text size="xs" c="dimmed">{dateShort(r.confirmedAt)}</Text></Table.Td>
                   </Table.Tr>
@@ -245,6 +287,37 @@ export default function Pickup() {
       <HandoverModal plan={p} opened={handoverOpen} onClose={() => setHandoverOpen(false)} onDone={() => qc.invalidateQueries({ queryKey: ["pickup-plan"] })} />
       <OrderDrawer orderId={openOrder} onClose={() => setOpenOrder(null)} onChanged={() => q.refetch()} />
     </>
+  );
+}
+
+const FLOW = [
+  { label: "Booked", who: "you / auto-book" },
+  { label: "Label printed", who: "print queue" },
+  { label: "Scanned = packed", who: "scanner" },
+  { label: "Handed to rider", who: "you, at pickup" },
+  { label: "Picked up", who: "Steadfast, automatic" },
+];
+
+/** The five steps every parcel goes through, and who moves it to the next one. */
+function FlowGuide() {
+  return (
+    <Card padding="sm" mb="md">
+      <Group gap={6} wrap="wrap">
+        {FLOW.map((f, i) => (
+          <Group key={f.label} gap={6} wrap="nowrap">
+            {i > 0 && <ArrowRight size={14} color="var(--mantine-color-dimmed)" />}
+            <div>
+              <Text size="xs" fw={600}>{i + 1}. {f.label}</Text>
+              <Text size="xs" c="dimmed">{f.who}</Text>
+            </div>
+          </Group>
+        ))}
+      </Group>
+      <Text size="xs" c="dimmed" mt={6}>
+        Steadfast has no pickup API: "handed to rider" is our own record, and "picked up" comes from Steadfast's status (it leaves "in review") by webhook or polling.
+        A parcel handed over without the checklist is marked automatically when Steadfast picks it up.
+      </Text>
+    </Card>
   );
 }
 

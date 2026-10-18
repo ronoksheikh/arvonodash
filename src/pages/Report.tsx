@@ -13,7 +13,7 @@ type Report = {
   returnsWindowFrom: string;
   orders: { received: number; value: number; confirmed: number; rejected: number; cancelled: number; pending: number; newCustomers: number; confirmRate: number | null };
   courier: { booked: number; dispatched: number; delivered: number; returned: number; successRate: number | null };
-  sameDay: { cutoffTime: string; beforeCutoff: number; sameDay: number; nextDay: number; notYet: number; rate: number | null };
+  sameDay: { cutoffTime: string; beforeCutoff: number; sameDay: number; nextDay: number; notYet: number; rate: number | null; carriedOver: number; unscanned: number };
   money: { collected: number; deliveryCharges: number; paidOut: number; payouts: number; awaitingPayout: number; awaitingPayoutCount: number; withCourier: number; withCourierCount: number };
   worstDistricts: { city: string; delivered: number; returned: number; returnRate: number | null }[];
   worstProducts: { title: string; delivered: number; returned: number; returnRate: number | null }[];
@@ -90,7 +90,13 @@ export default function ReportPage() {
           </Section>
 
           <Section title="Courier">
-            <SimpleGrid cols={{ base: 2, sm: 3, lg: 6 }} spacing="xs">
+            <SimpleGrid cols={{ base: 2, sm: 3, lg: 7 }} spacing="xs">
+              <Stat
+                label="Missed pickups"
+                value={num(r.sameDay.carriedOver)}
+                tone={r.sameDay.carriedOver ? "bad" : undefined}
+                hint={`parcel-days carried over${r.sameDay.unscanned ? ` · ${r.sameDay.unscanned} left without a packing scan` : ""}`}
+              />
               <Stat label="Sent to Steadfast" value={num(r.courier.booked)} />
               <Stat label="Picked up (dispatched)" value={num(r.courier.dispatched)} />
               <Stat label="Delivered" value={num(r.courier.delivered)} />

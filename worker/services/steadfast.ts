@@ -171,30 +171,36 @@ export async function createBulkOrders(env: Env, items: CreateOrderInput[]): Pro
   return list as BulkResultItem[];
 }
 
-export async function getStatusByConsignmentId(env: Env, id: string): Promise<string> {
-  const res = await request<{ status: number; delivery_status?: string }>(env, "GET", `/status_by_cid/${encodeURIComponent(id)}`);
-  if (!res.delivery_status) throw new HttpError(502, "Steadfast did not return a delivery status");
-  return res.delivery_status;
+/** null = Steadfast no longer knows this parcel (deleted in the portal). */
+export type ParcelStatus = string | null;
+
+/** A 404 / "not found" answer means the consignment was deleted in the Steadfast portal. */
+function isNotFound(err: unknown): boolean {
+  return err instanceof HttpError && err.status === 422 && /not\s*found|no\s+consignment|invalid|does not exist/i.test(err.message);
 }
 
+async function statusAt(env: Env, path: string): Promise<ParcelStatus | undefined> {
+  try {
+    const res = await request<{ status?: number; delivery_status?: string; message?: string }>(env, "GET", path);
+    if (res.delivery_status) return res.delivery_status;
+    if (Number(res.status) === 404 || /not\s*found/i.test(res.message ?? "")) return null;
+    return undefined; // answered, but without a status: try again later
+  } catch (err) {
+    if (isNotFound(err)) return null;
+    throw err;
+  }
+}
+
+/** Status by invoice (null when unknown to Steadfast or not answered). */
 export async function getStatusByInvoice(env: Env, invoice: string): Promise<string | null> {
-  try {
-    const res = await request<{ status: number; delivery_status?: string }>(env, "GET", `/status_by_invoice/${encodeURIComponent(invoice)}`);
-    return res.delivery_status ?? null;
-  } catch (err) {
-    if (err instanceof HttpError && err.status === 422) return null;
-    throw err;
-  }
+  return (await getParcelStatus(env, { invoice })) ?? null;
 }
 
-export async function getStatusByTrackingCode(env: Env, code: string): Promise<string | null> {
-  try {
-    const res = await request<{ status: number; delivery_status?: string }>(env, "GET", `/status_by_trackingcode/${encodeURIComponent(code)}`);
-    return res.delivery_status ?? null;
-  } catch (err) {
-    if (err instanceof HttpError && err.status === 422) return null;
-    throw err;
-  }
+/** Current raw status; null when Steadfast says the parcel doesn't exist; undefined when it gave no answer. */
+export async function getParcelStatus(env: Env, ref: { consignmentId?: string | null; trackingCode?: string | null; invoice: string }): Promise<ParcelStatus | undefined> {
+  if (ref.consignmentId) return statusAt(env, `/status_by_cid/${encodeURIComponent(ref.consignmentId)}`);
+  if (ref.trackingCode) return statusAt(env, `/status_by_trackingcode/${encodeURIComponent(ref.trackingCode)}`);
+  return statusAt(env, `/status_by_invoice/${encodeURIComponent(ref.invoice)}`);
 }
 
 /** `force` = a person pressed "Test connection": try even while paused. */
@@ -318,7 +324,7 @@ export function trackingUrl(env: Env, trackingCode: string): string {
 // ---------------------------------------------------------------------------
 // Status mapping
 
-const FINAL_STATUSES = new Set(["delivered", "partial_delivered", "cancelled"]);
+const FINAL_STATUSES = new Set(["delivered", "partial_delivered", "cancelled", "deleted"]);
 
 export function isFinalStatus(status: string): boolean {
   return FINAL_STATUSES.has(status);
@@ -349,12 +355,29 @@ export function stageForStatus(status: string, wasPickedUp: boolean): CourierSta
       return "partial_delivered";
     case "cancelled":
       return wasPickedUp ? "returned" : "cancelled";
+    case "deleted":
+      return "cancelled";
     default:
       return "issue";
   }
 }
 
 /** True once the courier has physically accepted the parcel (status moved beyond review). */
+/**
+ * Whether a poll's answer may replace the status we hold. A finished parcel (delivered, cancelled,
+ * deleted) never goes back to an open state from a poll, and "unknown" for a parcel the courier
+ * never took is not a delivery problem: it is what Steadfast answers once the parcel is deleted.
+ */
+export function pollVerdict(current: { status: string; isFinal: boolean; pickedUpAt: string | null }, next: ParcelStatus): "apply" | "ignore" | "deleted" {
+  // A booking still in flight isn't in Steadfast yet; "not found" there means nothing.
+  if (current.status === "creating") return next === null ? "ignore" : "apply";
+  const neverTaken = !current.pickedUpAt && (current.status === "in_review" || current.status.startsWith("cancelled"));
+  if (next === null) return current.pickedUpAt || current.status === "deleted" ? "ignore" : "deleted";
+  if (neverTaken && next.startsWith("unknown")) return current.status === "deleted" ? "ignore" : "deleted";
+  if (current.isFinal && !isFinalStatus(next)) return "ignore";
+  return "apply";
+}
+
 export function isPickedUpStatus(status: string): boolean {
-  return status !== "in_review" && !status.startsWith("unknown") && !status.startsWith("cancelled");
+  return status !== "in_review" && status !== "deleted" && !status.startsWith("unknown") && !status.startsWith("cancelled");
 }

@@ -997,6 +997,199 @@ await step("a Steadfast 429 pauses all Steadfast calls instead of retrying (no a
   assert.equal((await call("GET", "/api/dashboard?days=7")).body.steadfastPause, null, "resumes after Retry-After");
 });
 
+const book = async (id) => {
+  await call("POST", `/api/orders/${id}/calling`, { status: "confirmed" });
+  const r = await call("POST", "/api/orders/book", { ids: [id] });
+  assert.equal(r.body.results[0].ok, true, JSON.stringify(r.body));
+  return (await orderDetail(id)).consignments[0];
+};
+const smsTo = async (phone) => (await mockState()).sms.filter((m) => m.to === phone);
+
+await step("SMS is off by default; switched on, each order gets each message once, with the tracking-domain link", async () => {
+  await newOrder(5701, "+880 1755-500001");
+  await sleep(1200);
+  assert.equal((await smsTo("01755500001")).length, 0, "nothing is sent while SMS is off");
+
+  const saved = await call("PUT", "/api/settings", { smsEnabled: true, trackingBaseUrl: "track.arvono.store", smsTriggers: { placed: true, confirmed: true, delivered: true } });
+  assert.equal(saved.body.settings.trackingBaseUrl, "https://track.arvono.store");
+  const o = await newOrder(5702, "+880 1755-500002");
+  await sleep(1500);
+  let sent = await smsTo("01755500002");
+  assert.equal(sent.length, 1, JSON.stringify(sent));
+  assert.match(sent[0].msg, /^Hi Rafiq, thanks for your order #5702/);
+  assert.match(sent[0].msg, /https:\/\/track\.arvono\.store\/t\/[a-f0-9]{20}/);
+
+  await call("POST", `/api/orders/${o.id}/calling`, { status: "confirmed" });
+  await call("POST", `/api/orders/${o.id}/calling`, { status: "confirmed" });
+  await shopifyWebhook("orders/updated", restOrder(5702, { updated_at: new Date(Date.now() + 1000).toISOString(), shipping_address: { name: "Rafiq Hasan", address1: "House 9, Road 2, Mirpur", city: "Dhaka", phone: "+880 1755-500002" } }));
+  await sleep(1500);
+  sent = await smsTo("01755500002");
+  assert.equal(sent.length, 2, "placed + confirmed, no repeats");
+  assert.match(sent[1].msg, /confirmed/);
+
+  const d = await orderDetail(o.id);
+  assert.match(d.trackingPageUrl, /^https:\/\/track\.arvono\.store\/t\//, "staff copy the public link too");
+  assert.equal(d.sms.length, 2);
+  assert.ok(d.journey.entries.some((e) => e.source === "sms"));
+});
+
+await step("staff can send a custom SMS with placeholders; provider errors are shown, not retried", async () => {
+  const o = (await call("GET", "/api/orders?search=%235702")).body.rows[0];
+  const r = await call("POST", `/api/orders/${o.id}/sms`, { body: "Hello {name}, about {order}: {oops}" });
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  const last = (await smsTo("01755500002")).at(-1);
+  assert.equal(last.msg, "Hello Rafiq, about #5702: {oops}");
+
+  await fetch(`${MOCK}/__sms_code`, { method: "POST", body: JSON.stringify({ code: 417 }) });
+  const fail = await call("POST", `/api/orders/${o.id}/sms`, { body: "Second message" });
+  assert.equal(fail.status, 422);
+  assert.match(fail.body.error, /Insufficient SMS balance/);
+  const settings = (await call("GET", "/api/settings")).body;
+  assert.equal(settings.sms.lastError.code, 417);
+  assert.equal(settings.sms.configured, true);
+  await fetch(`${MOCK}/__sms_code`, { method: "POST", body: JSON.stringify({ code: 0 }) });
+  assert.equal((await call("GET", "/api/settings/sms/balance")).body.balance, 512.25);
+  const caller = await call("POST", "/api/settings/sms/preview", { template: "{name} {order} {cod}", orderId: o.id });
+  assert.equal(caller.body.text, "Rafiq #5702 Tk 1,250");
+  assert.equal(JSON.stringify(settings).includes("sms-key"), false, "the API key never reaches the browser");
+});
+
+await step("order deleted in Shopify after booking: flagged and stopped; then deleted in Steadfast → 'deleted', not 'unknown'", async () => {
+  const o = await newOrder(5801, "+880 1755-500003");
+  const c = await book(o.id);
+  const del = await shopifyWebhook("orders/delete", { id: 5801 });
+  assert.equal(del.status, 200);
+  let d = await orderDetail(o.id);
+  assert.ok(d.order.shopifyDeletedAt, "deletion recorded");
+  assert.ok(d.order.cancelledAt, "treated as cancelled everywhere");
+  assert.equal(d.order.archived, false, "kept visible while its parcel is live");
+  assert.ok(d.order.riskFlags.includes("deleted_in_shopify"));
+  const scan = await call("POST", "/api/v1/dispatch/scan", { code: c.consignmentId });
+  assert.equal(scan.body.kind, "cancelled", "scanner says STOP");
+  assert.ok((await call("GET", "/api/orders?tab=attention")).body.rows.some((r) => r.id === o.id), "needs attention");
+
+  // Someone deletes the parcel in the Steadfast portal: Steadfast no longer knows it.
+  await fetch(`${MOCK}/api/v1/__delete_consignment`, { method: "POST", headers: { "Api-Key": "sf-key", "Secret-Key": "sf-secret" }, body: JSON.stringify({ consignment_id: Number(c.consignmentId) }) });
+  await call("POST", "/api/consignments/refresh", { ids: [c.id] });
+  d = await orderDetail(o.id);
+  assert.equal(d.consignments[0].status, "deleted");
+  assert.equal(d.consignments[0].stage, "cancelled");
+  assert.equal(d.order.courierStage, "cancelled");
+  assert.ok(!d.order.riskFlags.includes("deleted_in_shopify"), "nothing left to stop");
+  assert.ok(d.journey.entries.some((e) => e.title === "Deleted in Shopify"));
+});
+
+await step("a cancelled parcel that Steadfast later reports as 'unknown' is recorded as deleted, never regressed", async () => {
+  const o = await newOrder(5802, "+880 1755-500004");
+  const c = await book(o.id);
+  const sf = (path, body) => fetch(`${MOCK}/api/v1${path}`, { method: "POST", headers: { "Api-Key": "sf-key", "Secret-Key": "sf-secret" }, body: JSON.stringify(body) });
+  await sf("/__set_status", { consignment_id: Number(c.consignmentId), status: "cancelled" });
+  await call("POST", "/api/consignments/refresh", { ids: [c.id] });
+  assert.equal((await orderDetail(o.id)).consignments[0].status, "cancelled");
+  await sf("/__set_status", { consignment_id: Number(c.consignmentId), status: "unknown" });
+  await call("POST", "/api/consignments/refresh", { ids: [c.id] });
+  const d = await orderDetail(o.id);
+  assert.equal(d.consignments[0].status, "deleted", "not 'unknown'");
+  assert.equal(d.order.courierStage, "cancelled");
+  assert.ok(!d.events.some((e) => e.status === "unknown"));
+  // A delivered parcel never goes back to an open status from a poll.
+  const o2 = await newOrder(5803, "+880 1755-500005");
+  const c2 = await book(o2.id);
+  await sf("/__set_status", { consignment_id: Number(c2.consignmentId), status: "delivered" });
+  await call("POST", "/api/consignments/refresh", { ids: [c2.id] });
+  await sf("/__set_status", { consignment_id: Number(c2.consignmentId), status: "pending" });
+  await call("POST", "/api/consignments/refresh", { ids: [c2.id] });
+  assert.equal((await orderDetail(o2.id)).consignments[0].status, "delivered");
+});
+
+await step("an order deleted in Shopify without a webhook is found by the existence check", async () => {
+  const o = await newOrder(5804, "+880 1755-500006");
+  await fetch(`${MOCK}/__delete_order`, { method: "POST", body: JSON.stringify({ id: 5804 }) });
+  let r;
+  for (let i = 0; i < 20; i++) {
+    r = await call("POST", "/api/sync/shopify-deleted");
+    if (r.body.deleted?.includes(o.id) || !r.body.scanned) break;
+  }
+  const d = await orderDetail(o.id);
+  assert.ok(d.order.shopifyDeletedAt, JSON.stringify(r.body));
+  assert.equal(d.order.archived, true, "nothing was booked, so it is simply archived");
+});
+
+await step("pickup: ship-by date from the cut-off, implicit handover on Steadfast pickup, undo handover, carry-over", async () => {
+  await call("PUT", "/api/settings", { cutoffTime: "00:00" });
+  const late = await newOrder(5901, "+880 1755-500007");
+  await book(late.id);
+  let plan = (await call("GET", "/api/ops/pickup")).body;
+  const p1 = plan.parcels.find((x) => x.id === late.id);
+  assert.equal(p1.stage, "next_day", "booked after the cut-off → tomorrow");
+  assert.ok(p1.shipBy > plan.date);
+  await call("PUT", "/api/settings", { cutoffTime: "23:59" });
+
+  const o = await newOrder(5902, "+880 1755-500008");
+  const c = await book(o.id);
+  plan = (await call("GET", "/api/ops/pickup")).body;
+  assert.equal(plan.parcels.find((x) => x.id === o.id).shipBy, plan.date, "before the cut-off → today");
+  await call("POST", "/api/v1/dispatch/scan", { code: c.consignmentId });
+  const h = await call("POST", "/api/ops/pickup/handover", { orderIds: [o.id], riderName: "Karim" });
+  assert.equal(h.body.handed, 1);
+  const undo = await call("POST", "/api/ops/pickup/undo-handover", { orderIds: [o.id], reason: "Rider forgot it" });
+  assert.deepEqual(undo.body.reverted, [o.id]);
+  plan = (await call("GET", "/api/ops/pickup")).body;
+  assert.equal(plan.parcels.find((x) => x.id === o.id).stage, "ready", "back on the pile for the next pickup");
+
+  // Picked up by Steadfast without the checklist (and here, without a packing scan either).
+  const o3 = await newOrder(5903, "+880 1755-500009");
+  const c3 = await book(o3.id);
+  await fetch(`${MOCK}/api/v1/__set_status`, { method: "POST", headers: { "Api-Key": "sf-key", "Secret-Key": "sf-secret" }, body: JSON.stringify({ consignment_id: Number(c3.consignmentId), status: "pending" }) });
+  await call("POST", "/api/consignments/refresh", { ids: [c3.id] });
+  const d3 = await orderDetail(o3.id);
+  assert.equal(d3.order.dispatchStatus, "dispatched");
+  assert.ok(d3.journey.milestones.handedOver, "handover filled in from Steadfast's pickup");
+  assert.ok(d3.dispatchHistory.some((e) => e.event === "picked_up_unscanned"));
+
+  const roll = await call("POST", "/api/sync/carry-over");
+  assert.equal(roll.status, 200);
+  assert.equal(roll.body.processed, 0, "nothing is late today");
+  const report = (await call("GET", `/api/ops/report?from=${plan.date}&to=${plan.date}`)).body;
+  assert.equal(report.sameDay.unscanned >= 1, true);
+});
+
+await step("tracking domain serves only tracking pages (dashboard, login, API and webhooks are not reachable there)", async () => {
+  const http = await import("node:http");
+  const viaHost = (path, host) =>
+    new Promise((resolve, reject) => {
+      const u = new URL(BASE);
+      http.get({ host: u.hostname, port: u.port, path, headers: { Host: `${host}:${u.port}` } }, (r) => {
+        let b = "";
+        r.on("data", (d) => (b += d));
+        r.on("end", () => resolve({ status: r.statusCode, location: r.headers.location, body: b }));
+      }).on("error", reject);
+    });
+  await call("PUT", "/api/settings", { trackingBaseUrl: "https://track.localtest.me" });
+  const o = (await call("GET", "/api/orders?search=%235702")).body.rows[0];
+  const token = (await orderDetail(o.id)).trackingPageUrl.split("/t/")[1];
+  const host = "track.localtest.me";
+  assert.equal((await viaHost("/", host)).location, "https://arvono.store/", "bare domain goes to the shop");
+  assert.match((await viaHost(`/${token}`, host)).location, new RegExp(`/t/${token}$`), "short link form");
+  assert.equal((await viaHost(`/t/${token}`, host)).status, 200);
+  const data = await viaHost(`/api/public/track/${token}`, host);
+  assert.equal(JSON.parse(data.body).order.name, "#5702");
+  assert.equal(JSON.parse((await viaHost("/api/public/domain-check", host)).body).app, "arvono-tracking");
+  for (const p of ["/api/auth/me", "/login", "/orders", "/api/orders", "/webhooks/steadfast"]) assert.equal((await viaHost(p, host)).status, 404, p);
+  assert.equal((await viaHost("/api/auth/me", "localhost")).status, 200, "the dashboard address is unaffected");
+});
+
+await step("journey: one timeline from every source, with milestones", async () => {
+  const o = (await call("GET", "/api/orders?search=%235902")).body.rows[0];
+  const d = await orderDetail(o.id);
+  const sources = new Set(d.journey.entries.map((e) => e.source));
+  for (const s of ["shopify", "call", "booking", "warehouse"]) assert.ok(sources.has(s), `missing ${s}`);
+  const titles = d.journey.entries.map((e) => e.title);
+  for (const t of ["Order placed in Shopify", "Booked with Steadfast", "Scanned & sorted", "Handed to courier rider", "Handover undone (rider didn't take it)"]) assert.ok(titles.includes(t), `missing ${t}: ${titles}`);
+  assert.ok(d.journey.milestones.confirmed && d.journey.milestones.booked && d.journey.milestones.packed);
+  await call("PUT", "/api/settings", { smsEnabled: false, trackingBaseUrl: "" });
+});
+
 await step("activity log records actions", async () => {
   const a = await call("GET", "/api/logs/activity");
   const actions = new Set(a.body.rows.map((r) => r.action));

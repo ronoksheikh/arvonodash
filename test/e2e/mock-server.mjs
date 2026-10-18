@@ -5,8 +5,12 @@ import http from "node:http";
 const PORT = Number(process.env.MOCK_PORT ?? 8790);
 const state = {
   fulfillments: [], tags: [], consignments: [], tokenRequests: 0, webhooks: [], returnRequests: [], progressReports: [], reopened: [], cancelled: [], deleteAttempts: [], closed: [],
-  markedPaid: [], fraudCalls: {}, historyCalls: 0,
+  markedPaid: [], fraudCalls: {}, historyCalls: 0, sms: [],
 };
+// Orders deleted in the Shopify admin (the test deletes them); GraphQL answers null for these.
+const deletedOrders = new Set();
+// Next SMS API answer code (0 = success); set by the test to simulate provider errors.
+let smsCode = 0;
 // Steadfast fraud profiles by phone (set by the test); default is a good customer.
 const fraudProfiles = {};
 // Extra tracking-history steps by invoice (set by the test).
@@ -139,8 +143,12 @@ function graphql(query, variables) {
     const page = pool.slice(after, after + 2);
     return { data: { orders: { nodes: page, pageInfo: { hasNextPage: after + 2 < pool.length, endCursor: String(after + 2) } } }, extensions: { cost: { requestedQueryCost: 50, throttleStatus: { currentlyAvailable: 1900, restoreRate: 100, maximumAvailable: 2000 } } } };
   }
+  if (query.includes("nodes(ids:")) {
+    return { data: { nodes: variables.ids.map((gid) => (deletedOrders.has(gid.split("/").pop()) ? null : { id: gid })) } };
+  }
   if (query.includes("query Order(")) {
     const id = variables.id.split("/").pop();
+    if (deletedOrders.has(id)) return { data: { order: null } };
     if (restOrders[id]) return { data: { order: restToGql(restOrders[id]) } };
     return { data: { order: shopifyOrders.find((o) => o.id === variables.id) ?? null } };
   }
@@ -178,6 +186,25 @@ const server = http.createServer(async (req, res) => {
     histories[invoice] = steps;
     return json(res, 200, { ok: true });
   }
+  if (p === "/__delete_order" && req.method === "POST") {
+    deletedOrders.add(String(JSON.parse(body).id));
+    return json(res, 200, { ok: true });
+  }
+  if (p === "/__sms_code" && req.method === "POST") {
+    smsCode = Number(JSON.parse(body).code);
+    return json(res, 200, { ok: true });
+  }
+
+  // SMS API (sms.net.bd shape): form-encoded api_key, msg, to
+  if (p === "/sms/sendsms") {
+    const f = new URLSearchParams(body);
+    if (f.get("api_key") !== "sms-key") return json(res, 200, { error: 405, msg: "Authorization required" });
+    if (smsCode) return json(res, 200, { error: smsCode, msg: "Mock error" });
+    state.sms.push({ to: f.get("to"), msg: f.get("msg") });
+    return json(res, 200, { error: 0, msg: "Request successfully submitted", data: { request_id: 1000 + state.sms.length } });
+  }
+  if (p === "/sms/user/balance/") return json(res, 200, { error: 0, msg: "Success", data: { balance: "512.2500" } });
+
   if (p === "/__fo_status" && req.method === "POST") {
     // Simulates staff changing fulfillment status in Shopify admin / mobile app.
     const { orderId, status } = JSON.parse(body);
@@ -265,6 +292,11 @@ const server = http.createServer(async (req, res) => {
       return json(res, 200, { data: { id: Number(m[1]), consignments: state.consignments.filter((c) => c.status === "delivered").map((c) => ({ consignment_id: c.consignment_id, invoice: c.invoice })) } });
     }
     // Test helper: set a consignment's status (simulates courier progress for polling)
+    if (route === "/__delete_consignment") {
+      const { consignment_id } = JSON.parse(body);
+      state.consignments = state.consignments.filter((x) => x.consignment_id !== consignment_id);
+      return json(res, 200, { ok: true });
+    }
     if (route === "/__set_status") {
       const { consignment_id, status } = JSON.parse(body);
       const c = state.consignments.find((x) => x.consignment_id === consignment_id);

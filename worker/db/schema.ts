@@ -93,6 +93,7 @@ export const orders = sqliteTable(
     shopUpdatedAt: text("shop_updated_at").notNull(),
     cancelledAt: text("cancelled_at"),
     cancelReason: text("cancel_reason"),
+    shopifyDeletedAt: text("shopify_deleted_at"), // order deleted in Shopify admin (it no longer exists there)
     closedAt: text("closed_at"),
     customerId: integer("customer_id"),
     shopifyCustomerId: text("shopify_customer_id"),
@@ -154,6 +155,10 @@ export const orders = sqliteTable(
     sortedAt: text("sorted_at"),
     sortedBy: text("sorted_by"),
     sortBatchId: text("sort_batch_id"),
+    // Business date (YYYY-MM-DD, local) the parcel is due to leave with the courier. Set once at
+    // booking from the daily cut-off; a parcel still here after that date is "carried over".
+    shipBy: text("ship_by"),
+    carryOverCount: integer("carry_over_count").notNull().default(0), // days it missed its pickup
     // Courier handover (pickup checklist): which pickup took the parcel, and when
     pickupId: text("pickup_id"),
     handedOverAt: text("handed_over_at"),
@@ -193,6 +198,7 @@ export const orders = sqliteTable(
     index("orders_dispatch_idx").on(t.dispatchStatus, t.bookedAt),
     index("orders_pickup_idx").on(t.pickupId),
     index("orders_combined_idx").on(t.combinedIntoOrderId),
+    index("orders_ship_by_idx").on(t.shipBy),
     uniqueIndex("orders_tracking_token_idx").on(t.trackingToken),
   ],
 );
@@ -521,3 +527,25 @@ export const fraudChecks = sqliteTable("fraud_checks", {
   checkedAt: text("checked_at").notNull(),
 });
 
+
+
+/** Every SMS sent (or attempted) to a customer: automatic updates and manual messages. */
+export const smsMessages = sqliteTable(
+  "sms_messages",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    orderId: integer("order_id"),
+    phone: text("phone").notNull(),
+    body: text("body").notNull(),
+    trigger: text("trigger").notNull(), // placed | confirmed | dispatched | delivered | on_hold | returned | cancelled | manual | test
+    status: text("status").notNull().default("queued"), // queued | sent | failed | skipped
+    providerCode: integer("provider_code"), // provider "error" field: 0 = accepted
+    providerMessage: text("provider_message"),
+    requestId: text("request_id"),
+    segments: integer("segments").notNull().default(1),
+    sentBy: text("sent_by").notNull(), // "system" or staff name
+    createdAt: text("created_at").notNull(),
+    sentAt: text("sent_at"),
+  },
+  (t) => [index("sms_order_idx").on(t.orderId), index("sms_created_idx").on(t.createdAt)],
+);

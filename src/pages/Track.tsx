@@ -1,14 +1,20 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useParams } from "react-router";
-import { CopyButton, Group, Loader, Stack, Text, Tooltip, UnstyledButton } from "@mantine/core";
-import {
-  Ban, Check, CheckCircle2, Clock, Copy, MapPin, Package, PackageCheck, Phone, PhoneMissed, RefreshCw, ShoppingBag, Truck, Undo2, type LucideIcon,
-} from "lucide-react";
-import { ago, dateTime, money } from "../format";
+import dayjs from "dayjs";
+import "dayjs/locale/bn";
+import preParsePostFormat from "dayjs/plugin/preParsePostFormat";
+import "../format"; // registers dayjs relativeTime
+import { Ban, Check, CheckCircle2, Clock, Copy, MapPin, Package, PackageCheck, Phone, PhoneMissed, RefreshCw, ShoppingBag, Truck, Undo2, type LucideIcon } from "lucide-react";
+
+/**
+ * Customer tracking page (/t/:token, usually on track.arvono.store). Styled after arvono.store:
+ * white, black type, Instrument Sans (English) and Anek Bangla (Bangla), pill buttons.
+ * Everything is in English and Bangla; the customer's choice is remembered on their phone.
+ */
 
 type Tone = "info" | "good" | "warn" | "bad";
 type TrackingData = {
-  business: { name: string; phone: string | null };
+  business: { name: string; phone: string | null; website: string | null };
   order: {
     name: string;
     placedAt: string;
@@ -29,36 +35,87 @@ type TrackingData = {
   updatedAt: string;
 };
 
-const TONE_COLOR: Record<Tone, string> = { info: "#575bf0", good: "#12a150", warn: "#e8890c", bad: "#d92d2d" };
+type Lang = "en" | "bn";
+dayjs.extend(preParsePostFormat); // Bangla digits in dates (the bn locale's postformat)
+
+const LOGO = "https://arvono.store/cdn/shop/files/arvono-shopify-logo-black-transparent.png";
+const FONTS = "https://fonts.googleapis.com/css2?family=Anek+Bangla:wght@400;500;600;700&family=Instrument+Sans:wght@400;500;600;700&display=swap";
+const LANG_KEY = "arvono.track.lang";
+
+const UI = {
+  status: { en: "Order status", bn: "অর্ডারের অবস্থা" },
+  updates: { en: "Updates", bn: "আপডেট" },
+  yourOrder: { en: "Your order", bn: "আপনার অর্ডার" },
+  subtotal: { en: "Subtotal", bn: "সাবটোটাল" },
+  discount: { en: "Discount", bn: "ছাড়" },
+  delivery: { en: "Delivery", bn: "ডেলিভারি চার্জ" },
+  total: { en: "Total", bn: "মোট" },
+  cod: { en: "Cash on delivery", bn: "ক্যাশ অন ডেলিভারি" },
+  codHint: { en: "Please keep this amount ready for the rider", bn: "রাইডারের জন্য এই টাকা প্রস্তুত রাখুন" },
+  address: { en: "Delivery address", bn: "ডেলিভারি ঠিকানা" },
+  courier: { en: "Courier partner", bn: "কুরিয়ার পার্টনার" },
+  trackingCode: { en: "Copy tracking code", bn: "ট্র্যাকিং কোড কপি করুন" },
+  copied: { en: "Copied", bn: "কপি হয়েছে" },
+  callUs: { en: "Call us", bn: "আমাদের কল করুন" },
+  shop: { en: "Continue shopping", bn: "শপিং চালিয়ে যান" },
+  together: { en: "These orders travel together in one parcel", bn: "এই অর্ডারগুলো একসাথে একটি পার্সেলে যাচ্ছে" },
+  placedOn: { en: "Placed", bn: "অর্ডার" },
+  refreshed: { en: "Updated", bn: "আপডেট" },
+  help: { en: "Questions about your order?", bn: "অর্ডার নিয়ে কোনো প্রশ্ন?" },
+  invalid: { en: "This tracking link is not valid. Please check the link or contact us.", bn: "এই ট্র্যাকিং লিংকটি সঠিক নয়। লিংকটি যাচাই করুন বা আমাদের সাথে যোগাযোগ করুন।" },
+  failed: { en: "Couldn't load tracking right now. Please try again in a moment.", bn: "এখন ট্র্যাকিং লোড করা যাচ্ছে না। কিছুক্ষণ পর আবার চেষ্টা করুন।" },
+} satisfies Record<string, Record<Lang, string>>;
+
+const STEPS: Record<string, Record<Lang, string>> = {
+  placed: { en: "Placed", bn: "অর্ডার" },
+  confirmed: { en: "Confirmed", bn: "নিশ্চিত" },
+  packed: { en: "Packed", bn: "প্যাক" },
+  shipped: { en: "On the way", bn: "পথে" },
+  delivered: { en: "Delivered", bn: "পৌঁছেছে" },
+};
+
+/** Bangla for every title the server writes; Steadfast's own update texts stay as they are. */
+const TITLES_BN: Record<string, string> = {
+  "Order placed": "অর্ডার করা হয়েছে",
+  "We called to confirm but couldn't reach you": "নিশ্চিত করতে কল করেছিলাম, কিন্তু আপনাকে পাওয়া যায়নি",
+  "We'll call you again to confirm": "নিশ্চিত করতে আমরা আবার কল করব",
+  "Order confirmed on the phone": "ফোনে অর্ডার নিশ্চিত হয়েছে",
+  "Order cancelled on the confirmation call": "নিশ্চিতকরণ কলে অর্ডার বাতিল হয়েছে",
+  "Order confirmed": "অর্ডার নিশ্চিত হয়েছে",
+  "Sent to Steadfast Courier": "Steadfast কুরিয়ারে পাঠানো হয়েছে",
+  "Picked up by Steadfast — on the way": "Steadfast পার্সেলটি নিয়েছে — পথে আছে",
+  "Product returned — delivery charge paid": "পণ্য ফেরত — ডেলিভারি চার্জ পরিশোধিত",
+  "Partially delivered": "আংশিক ডেলিভারি হয়েছে",
+  Delivered: "ডেলিভারি সম্পন্ন",
+  "Returned items received back by us": "ফেরত পণ্য আমরা বুঝে পেয়েছি",
+  "Delivery failed — parcel returned": "ডেলিভারি হয়নি — পার্সেল ফেরত এসেছে",
+  "Packed and ready for courier pickup": "প্যাক করা হয়েছে, কুরিয়ার পিকআপের জন্য প্রস্তুত",
+  "Delivery on hold": "ডেলিভারি আপাতত স্থগিত",
+  "Delivery cancelled": "ডেলিভারি বাতিল হয়েছে",
+  "Order cancelled": "অর্ডার বাতিল হয়েছে",
+  "Parcel returned": "পার্সেল ফেরত এসেছে",
+  "On the way with Steadfast": "Steadfast-এর মাধ্যমে পথে আছে",
+  "Packed — waiting for courier pickup": "প্যাক সম্পন্ন — কুরিয়ার পিকআপের অপেক্ষায়",
+  "Sent to courier — being packed": "কুরিয়ারে বুক হয়েছে — প্যাক করা হচ্ছে",
+  "Confirmed — preparing your parcel": "নিশ্চিত — আপনার পার্সেল প্রস্তুত হচ্ছে",
+  "Waiting for confirmation — please pick up our call": "নিশ্চিতকরণের অপেক্ষায় — অনুগ্রহ করে আমাদের কল ধরুন",
+  "Order received — we'll call you to confirm": "অর্ডার পেয়েছি — নিশ্চিত করতে আমরা কল করব",
+};
+
+const NEXT: Record<string, Record<Lang, string>> = {
+  placed: { en: "We'll call you shortly to confirm your order.", bn: "অর্ডার নিশ্চিত করতে শীঘ্রই আমরা আপনাকে কল করব।" },
+  awaiting_call: { en: "We couldn't reach you. Please keep your phone close — we'll call again.", bn: "আপনাকে ফোনে পাওয়া যায়নি। ফোন কাছে রাখুন — আমরা আবার কল করব।" },
+  confirmed: { en: "Your order is confirmed and being prepared.", bn: "আপনার অর্ডার নিশ্চিত হয়েছে এবং প্রস্তুত করা হচ্ছে।" },
+  booked: { en: "Your parcel is booked with Steadfast and being packed.", bn: "আপনার পার্সেল Steadfast-এ বুক হয়েছে এবং প্যাক করা হচ্ছে।" },
+  packed: { en: "Packed and waiting for the courier to pick it up.", bn: "প্যাক সম্পন্ন, কুরিয়ার এসে নিয়ে যাওয়ার অপেক্ষায়।" },
+  shipped: { en: "Your parcel is on the way. The rider will call before delivery.", bn: "আপনার পার্সেল পথে আছে। ডেলিভারির আগে রাইডার আপনাকে কল করবেন।" },
+  on_hold: { en: "Delivery is paused for now. We'll be in touch.", bn: "ডেলিভারি আপাতত স্থগিত আছে। আমরা যোগাযোগ করব।" },
+  delivered: { en: "Thank you for shopping with us!", bn: "আমাদের সাথে কেনাকাটার জন্য ধন্যবাদ!" },
+  returned: { en: "This parcel is coming back to us.", bn: "এই পার্সেলটি আমাদের কাছে ফেরত আসছে।" },
+  cancelled: { en: "This order won't be delivered.", bn: "এই অর্ডারটি ডেলিভারি হবে না।" },
+};
 
 const STEP_ICON: Record<string, LucideIcon> = { placed: ShoppingBag, confirmed: Check, packed: PackageCheck, shipped: Truck, delivered: CheckCircle2 };
-
-const STATUS_ICON: Record<string, LucideIcon> = {
-  placed: ShoppingBag,
-  awaiting_call: Phone,
-  confirmed: Check,
-  booked: Package,
-  packed: PackageCheck,
-  shipped: Truck,
-  on_hold: Clock,
-  delivered: CheckCircle2,
-  returned: Undo2,
-  cancelled: Ban,
-};
-
-/** One friendly line under the status: what happens next. */
-const NEXT_STEP: Record<string, string> = {
-  placed: "We'll call you shortly to confirm your order.",
-  awaiting_call: "We couldn't reach you. Please keep your phone close — we'll call again.",
-  confirmed: "Your order is confirmed and being prepared.",
-  booked: "Your parcel is booked with Steadfast and being packed.",
-  packed: "Packed and waiting for the courier to pick it up.",
-  shipped: "Your parcel is on the way. The rider will call before delivery.",
-  on_hold: "Delivery is paused for now. We'll be in touch.",
-  delivered: "Thank you for shopping with us!",
-  returned: "This parcel is coming back to us.",
-  cancelled: "This order won't be delivered.",
-};
 
 function eventIcon(kind: string): LucideIcon {
   if (kind === "placed") return ShoppingBag;
@@ -68,31 +125,78 @@ function eventIcon(kind: string): LucideIcon {
   if (kind === "call_rejected" || kind === "cancelled" || kind === "courier_cancelled") return Ban;
   if (kind === "booked") return Package;
   if (kind === "packed") return PackageCheck;
-  if (kind === "picked_up" || kind === "courier_update") return Truck;
   if (kind === "delivered") return CheckCircle2;
   if (kind === "returned") return Undo2;
   if (kind === "on_hold") return Clock;
   return Truck;
 }
 
+function initialLang(): Lang {
+  try {
+    const saved = localStorage.getItem(LANG_KEY);
+    if (saved === "en" || saved === "bn") return saved;
+  } catch {
+    // storage blocked (private mode): fall through
+  }
+  return typeof navigator !== "undefined" && navigator.language?.toLowerCase().startsWith("bn") ? "bn" : "en";
+}
+
+/** Loads the store's fonts for this page only (the dashboard doesn't need them). */
+function useBrandFonts() {
+  useEffect(() => {
+    if (document.querySelector(`link[href="${FONTS}"]`)) return;
+    const link = document.createElement("link");
+    link.rel = "stylesheet";
+    link.href = FONTS;
+    document.head.appendChild(link);
+  }, []);
+}
+
 export default function Track() {
   const { token = "" } = useParams();
   const [data, setData] = useState<TrackingData | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<"invalid" | "failed" | null>(null);
   const [loading, setLoading] = useState(false);
+  const [lang, setLangState] = useState<Lang>(initialLang);
+  const [copied, setCopied] = useState(false);
+  const [logoOk, setLogoOk] = useState(true);
+  useBrandFonts();
+
+  const setLang = (l: Lang) => {
+    setLangState(l);
+    try {
+      localStorage.setItem(LANG_KEY, l);
+    } catch {
+      // not remembered; still switches for this visit
+    }
+  };
+
+  const t = (key: keyof typeof UI) => UI[key][lang];
+  const tr = (title: string) => (lang === "bn" ? TITLES_BN[title] ?? title : title);
+  const fmt = useMemo(() => {
+    const nf = new Intl.NumberFormat(lang === "bn" ? "bn-BD" : "en-IN", { maximumFractionDigits: 0 });
+    return {
+      money: (n: number) => `৳${nf.format(n)}`,
+      num: (n: number) => nf.format(n),
+      date: (s: string) => dayjs(s).locale(lang).format("D MMM, h:mm A"),
+      day: (s: string) => dayjs(s).locale(lang).format("D MMM"),
+      long: (s: string) => dayjs(s).locale(lang).format("D MMMM YYYY"),
+      ago: (s: string) => dayjs(s).locale(lang).fromNow(),
+    };
+  }, [lang]);
 
   const load = async () => {
     setLoading(true);
     try {
       const r = await fetch(`/api/public/track/${encodeURIComponent(token)}`);
-      if (r.status === 404) setError("This tracking link is not valid. Please check the link or contact us.");
+      if (r.status === 404) setError("invalid");
       else if (!r.ok) throw new Error();
       else {
         setData(await r.json());
         setError(null);
       }
     } catch {
-      setError((e) => e ?? "Couldn't load tracking right now. Please try again in a moment.");
+      setError((e) => e ?? "failed");
     } finally {
       setLoading(false);
     }
@@ -100,192 +204,197 @@ export default function Track() {
 
   useEffect(() => {
     void load();
-    const t = setInterval(load, 60_000);
-    return () => clearInterval(t);
+    const timer = setInterval(load, 60_000);
+    return () => clearInterval(timer);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [token]);
 
   useEffect(() => {
-    if (data) document.title = `${data.order.name} · ${data.status.title} — ${data.business.name}`;
-  }, [data]);
+    if (data) document.title = `${data.order.name} · ${tr(data.status.title)} — ${data.business.name}`;
+    document.documentElement.lang = lang;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [data, lang]);
+
+  const copy = (text: string) => {
+    void navigator.clipboard?.writeText(text).then(() => {
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    });
+  };
+
+  const brandName = data?.business.name ?? "ARVONO";
+  const website = data?.business.website ?? "https://arvono.store";
+  const header = (
+    <header className="av-header">
+      <div className="av-wrap av-header-row">
+        <a href={website} className="av-logo" aria-label={brandName}>
+          {logoOk ? <img src={LOGO} alt={brandName} onError={() => setLogoOk(false)} /> : <span className="av-wordmark">{brandName}</span>}
+        </a>
+        <div className="av-lang" role="group" aria-label="Language">
+          <button type="button" aria-pressed={lang === "en"} onClick={() => setLang("en")}>EN</button>
+          <button type="button" aria-pressed={lang === "bn"} onClick={() => setLang("bn")}>বাংলা</button>
+        </div>
+      </div>
+    </header>
+  );
 
   if (!data) {
     return (
-      <div className="trk" style={{ display: "grid", placeItems: "center", padding: 24 }}>
-        {error ? <Text ta="center" c="dimmed" maw={360}>{error}</Text> : <Loader />}
+      <div className="av">
+        {header}
+        <main className="av-wrap av-empty">{error ? <p>{t(error)}</p> : <div className="av-spinner" aria-label="Loading" />}</main>
       </div>
     );
   }
 
-  const tone = data.status.tone;
-  const accent = TONE_COLOR[tone];
-  const StatusIcon = STATUS_ICON[data.status.key] ?? Package;
-  const stopped = data.status.key === "cancelled" || data.status.key === "returned";
+  const { status, order } = data;
+  const stopped = status.key === "cancelled" || status.key === "returned";
   const doneCount = data.steps.filter((s) => s.done).length;
-  const currentIndex = Math.max(0, doneCount - 1);
+  const current = Math.max(0, doneCount - 1);
 
   return (
-    <div className="trk" style={{ ["--trk-accent" as string]: accent }}>
-      {/* Hero */}
-      <header className="trk-hero" data-tone={tone === "info" ? undefined : tone}>
-        <div className="trk-wrap">
-          <Group justify="space-between" mb={28}>
-            <Text fw={800} fz={18} style={{ letterSpacing: 1.2 }}>{data.business.name}</Text>
-            <span className="trk-pill"><Package size={13} /> {data.order.name}</span>
-          </Group>
-          <Group gap="md" wrap="nowrap" align="center">
-            <div className="trk-status-icon"><StatusIcon size={26} /></div>
+    <div className="av">
+      {header}
+      <main className="av-wrap av-main">
+        {/* Status */}
+        <section className="av-hero">
+          <div className="av-eyebrow">
+            <span>{t("status")}</span>
+            <span className="av-dot-sep" />
+            <span>{order.name}</span>
+          </div>
+          <h1 className="av-title">
+            <span className="av-tone" data-tone={status.tone} />
+            {tr(status.title)}
+          </h1>
+          <p className="av-next">{NEXT[status.key]?.[lang] ?? ""}</p>
+
+          {!stopped && (
+            <ol className="av-steps" style={{ ["--av-progress" as string]: `${(current / (data.steps.length - 1)) * 100}%` }}>
+              {data.steps.map((s, i) => {
+                const Icon = STEP_ICON[s.key] ?? Check;
+                return (
+                  <li key={s.key} data-done={s.done} data-current={i === current && status.key !== "delivered"}>
+                    <span className="av-step-dot"><Icon size={14} strokeWidth={2.25} /></span>
+                    <span className="av-step-label">{STEPS[s.key]?.[lang] ?? s.label}</span>
+                    <span className="av-step-at">{s.at && s.done ? fmt.day(s.at) : " "}</span>
+                  </li>
+                );
+              })}
+            </ol>
+          )}
+        </section>
+
+        {order.codDue > 0 && !stopped && (
+          <section className="av-cod">
             <div>
-              <Text fz={13} opacity={0.85} fw={500}>Order status</Text>
-              <Text fz={{ base: 24, sm: 28 }} fw={800} lh={1.15}>{data.status.title}</Text>
+              <div className="av-label">{t("cod")}</div>
+              <div className="av-muted">{t("codHint")}</div>
             </div>
-          </Group>
-          <Text mt="md" fz={15} opacity={0.92}>{NEXT_STEP[data.status.key] ?? ""}</Text>
-        </div>
-      </header>
-
-      <main className="trk-wrap" style={{ paddingBottom: 40 }}>
-        <Stack gap="md">
-          {/* Progress */}
-          <section className="trk-card trk-overlap">
-            {!stopped ? (
-              <div className="trk-steps">
-                <div className="trk-steps-fill" style={{ width: `${(currentIndex / (data.steps.length - 1)) * 80}%` }} />
-                {data.steps.map((s, i) => {
-                  const Icon = STEP_ICON[s.key] ?? Check;
-                  return (
-                    <div key={s.key} className="trk-step" data-done={s.done} data-current={i === currentIndex && data.status.key !== "delivered"}>
-                      <div className="trk-dot"><Icon size={16} /></div>
-                      <Text fz={12} fw={s.done ? 700 : 500} c={s.done ? undefined : "dimmed"} lh={1.2}>{s.label}</Text>
-                    </div>
-                  );
-                })}
-              </div>
-            ) : (
-              <Group gap="sm" wrap="nowrap">
-                <StatusIcon size={20} color={accent} />
-                <Text fw={600}>{data.status.title}</Text>
-              </Group>
-            )}
-            {data.order.codDue > 0 && !stopped && (
-              <div className="trk-cod">
-                <div>
-                  <Text fz={13} fw={600}>Cash on delivery</Text>
-                  <Text fz={12} c="dimmed">Please keep the exact amount ready</Text>
-                </div>
-                <Text fz={24} fw={800} style={{ fontVariantNumeric: "tabular-nums" }}>{money(data.order.codDue)}</Text>
-              </div>
-            )}
-            {data.order.shipsWith.length > 0 && (
-              <Text fz={13} c="dimmed" mt="sm">Your orders {[data.order.name, ...data.order.shipsWith].join(" + ")} travel together in one parcel.</Text>
-            )}
+            <div className="av-cod-amount">{fmt.money(order.codDue)}</div>
           </section>
+        )}
+        {order.shipsWith.length > 0 && (
+          <p className="av-note">
+            {t("together")}: <b>{[order.name, ...order.shipsWith].join(" + ")}</b>
+          </p>
+        )}
 
-          {/* Timeline */}
-          <section className="trk-card">
-            <Group justify="space-between" mb="md">
-              <Text fw={700} fz={16}>Updates</Text>
-              <UnstyledButton onClick={() => void load()} aria-label="Refresh" style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 13, color: "var(--mantine-color-dimmed)" }}>
-                <RefreshCw size={13} className={loading ? "spin" : undefined} /> {ago(data.updatedAt)}
-              </UnstyledButton>
-            </Group>
+        {/* Timeline */}
+        <section className="av-card">
+          <div className="av-card-head">
+            <h2>{t("updates")}</h2>
+            <button type="button" className="av-refresh" onClick={() => void load()} aria-label="Refresh">
+              <RefreshCw size={13} className={loading ? "spin" : undefined} /> {t("refreshed")} {fmt.ago(data.updatedAt)}
+            </button>
+          </div>
+          <ol className="av-timeline">
             {data.timeline.map((e, i) => {
               const Icon = eventIcon(e.kind);
               return (
-                <div key={`${e.kind}-${e.at}-${i}`} className="trk-event" data-first={i === 0}>
-                  <div className="trk-event-dot" style={i === 0 ? { background: TONE_COLOR[e.tone] } : undefined}><Icon size={14} /></div>
+                <li key={`${e.kind}-${e.at}-${i}`} data-latest={i === 0} data-tone={e.tone}>
+                  <span className="av-tl-dot"><Icon size={13} strokeWidth={2.25} /></span>
                   <div>
-                    <Text fz={14} fw={i === 0 ? 700 : 500} lh={1.35}>{e.title}</Text>
-                    {e.detail && <Text fz={13} c="dimmed">{e.detail}</Text>}
-                    <Text fz={12} c="dimmed" mt={2}>{dateTime(e.at)} · {ago(e.at)}</Text>
+                    <div className="av-tl-title">{tr(e.title)}</div>
+                    {e.detail && <div className="av-muted">{e.detail}</div>}
+                    <div className="av-tl-time">{fmt.date(e.at)}</div>
                   </div>
-                </div>
+                </li>
               );
             })}
-          </section>
+          </ol>
+        </section>
 
-          {/* Courier */}
-          {data.courier && (
-            <section className="trk-card">
-              <Group justify="space-between" wrap="nowrap">
-                <Group gap="sm" wrap="nowrap">
-                  <div className="trk-event-dot" style={{ width: 40, height: 40, borderRadius: 12, background: "var(--trk-soft)", color: accent }}><Truck size={18} /></div>
-                  <div>
-                    <Text fw={700} fz={14}>{data.courier.name}</Text>
-                    <Text fz={12} c="dimmed">Courier partner</Text>
-                  </div>
-                </Group>
-                {data.courier.trackingCode && (
-                  <CopyButton value={data.courier.trackingCode}>
-                    {({ copied, copy }) => (
-                      <Tooltip label={copied ? "Copied" : "Copy tracking code"}>
-                        <UnstyledButton onClick={copy} style={{ display: "flex", alignItems: "center", gap: 6, padding: "6px 10px", borderRadius: 10, background: "var(--trk-soft)" }}>
-                          <Text fz={13} className="mono" fw={600}>{data.courier?.trackingCode}</Text>
-                          {copied ? <Check size={14} /> : <Copy size={14} />}
-                        </UnstyledButton>
-                      </Tooltip>
-                    )}
-                  </CopyButton>
-                )}
-              </Group>
-            </section>
-          )}
-
-          {/* Order */}
-          <section className="trk-card">
-            <Text fw={700} fz={16} mb="sm">Your order</Text>
-            <Stack gap={10}>
-              {data.order.items.map((it, i) => (
-                <Group key={i} justify="space-between" wrap="nowrap" align="flex-start">
-                  <Group gap="sm" wrap="nowrap" align="flex-start" style={{ minWidth: 0 }}>
-                    <div className="trk-event-dot" style={{ width: 34, height: 34, flexShrink: 0 }}><Text fz={12} fw={700}>{it.quantity}×</Text></div>
-                    <div style={{ minWidth: 0 }}>
-                      <Text fz={14} fw={600} lineClamp={2}>{it.title}</Text>
-                      {it.variant && <Text fz={12} c="dimmed">{it.variant}</Text>}
-                    </div>
-                  </Group>
-                  <Text fz={14} style={{ whiteSpace: "nowrap", fontVariantNumeric: "tabular-nums" }}>{money(it.price * it.quantity)}</Text>
-                </Group>
-              ))}
-            </Stack>
-            <Stack gap={6} mt="md" pt="md" style={{ borderTop: "1px solid var(--trk-line)" }}>
-              <Row label="Subtotal" value={money(data.order.subtotal)} />
-              {data.order.discount > 0 && <Row label="Discount" value={`−${money(data.order.discount)}`} />}
-              <Row label="Delivery" value={money(data.order.shipping)} />
-              <Row label="Total" value={money(data.order.total)} strong />
-            </Stack>
-            {(data.customer.address || data.customer.name) && (
-              <Group gap="sm" wrap="nowrap" align="flex-start" mt="md" pt="md" style={{ borderTop: "1px solid var(--trk-line)" }}>
-                <MapPin size={18} color={accent} style={{ marginTop: 2, flexShrink: 0 }} />
-                <div>
-                  <Text fz={14} fw={600}>{data.customer.name}</Text>
-                  <Text fz={13} c="dimmed">{[data.customer.address, data.customer.city].filter(Boolean).join(", ")}</Text>
-                  {data.customer.phone && <Text fz={12} c="dimmed" className="mono">{data.customer.phone}</Text>}
-                </div>
-              </Group>
+        {/* Courier */}
+        {data.courier && (
+          <section className="av-card av-courier">
+            <span className="av-icon-box"><Truck size={18} /></span>
+            <div style={{ flex: 1, minWidth: 0 }}>
+              <div className="av-label">{data.courier.name}</div>
+              <div className="av-muted">{t("courier")}</div>
+            </div>
+            {data.courier.trackingCode && (
+              <button type="button" className="av-chip" onClick={() => copy(data.courier!.trackingCode!)} title={t("trackingCode")}>
+                <span className="av-mono">{data.courier.trackingCode}</span>
+                {copied ? <Check size={14} aria-label={t("copied")} /> : <Copy size={14} aria-label={t("trackingCode")} />}
+              </button>
             )}
           </section>
+        )}
 
-          {data.business.phone && (
-            <a
-              href={`tel:${data.business.phone}`}
-              style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 8, padding: "14px 16px", borderRadius: 16, background: accent, color: "#fff", fontWeight: 700, textDecoration: "none" }}
-            >
-              <Phone size={18} /> Call {data.business.name}
-            </a>
+        {/* Order */}
+        <section className="av-card">
+          <div className="av-card-head">
+            <h2>{t("yourOrder")}</h2>
+            <span className="av-muted">{t("placedOn")} · {fmt.long(order.placedAt)}</span>
+          </div>
+          <ul className="av-items">
+            {order.items.map((it, i) => (
+              <li key={i}>
+                <span className="av-qty">{fmt.num(it.quantity)}×</span>
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div className="av-item-title">{it.title}</div>
+                  {it.variant && <div className="av-muted">{it.variant}</div>}
+                </div>
+                <span className="av-num">{fmt.money(it.price * it.quantity)}</span>
+              </li>
+            ))}
+          </ul>
+          <dl className="av-totals">
+            <div><dt>{t("subtotal")}</dt><dd>{fmt.money(order.subtotal)}</dd></div>
+            {order.discount > 0 && <div><dt>{t("discount")}</dt><dd>−{fmt.money(order.discount)}</dd></div>}
+            <div><dt>{t("delivery")}</dt><dd>{fmt.money(order.shipping)}</dd></div>
+            <div className="av-grand"><dt>{t("total")}</dt><dd>{fmt.money(order.total)}</dd></div>
+          </dl>
+          {(data.customer.address || data.customer.name) && (
+            <div className="av-address">
+              <MapPin size={16} />
+              <div>
+                <div className="av-label">{t("address")}</div>
+                <div>{data.customer.name}</div>
+                <div className="av-muted">{[data.customer.address, data.customer.city].filter(Boolean).join(", ")}</div>
+                {data.customer.phone && <div className="av-muted av-mono">{data.customer.phone}</div>}
+              </div>
+            </div>
           )}
-          <Text ta="center" fz={12} c="dimmed">Placed {dateTime(data.order.placedAt)} · updates every minute</Text>
-        </Stack>
-      </main>
-    </div>
-  );
-}
+        </section>
 
-function Row({ label, value, strong }: { label: string; value: string; strong?: boolean }) {
-  return (
-    <Group justify="space-between">
-      <Text fz={strong ? 15 : 14} fw={strong ? 800 : 400} c={strong ? undefined : "dimmed"}>{label}</Text>
-      <Text fz={strong ? 15 : 14} fw={strong ? 800 : 500} style={{ fontVariantNumeric: "tabular-nums" }}>{value}</Text>
-    </Group>
+        {/* Help */}
+        <section className="av-help">
+          <p>{t("help")}</p>
+          <div className="av-actions">
+            {data.business.phone && (
+              <a className="av-btn av-btn-primary" href={`tel:${data.business.phone}`}><Phone size={16} /> {t("callUs")}</a>
+            )}
+            <a className="av-btn av-btn-secondary" href={website}>{t("shop")}</a>
+          </div>
+        </section>
+      </main>
+      <footer className="av-footer">
+        <div className="av-wrap">
+          © {new Date().getFullYear()} {brandName} · <a href={website}>{website.replace(/^https?:\/\//, "")}</a>
+        </div>
+      </footer>
+    </div>
   );
 }

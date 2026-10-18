@@ -2,7 +2,9 @@ import { and, eq, gte, isNull, ne, sql } from "drizzle-orm";
 import type { DB } from "../db";
 import { consignments, customers, customStatuses, orders } from "../db/schema";
 import type { NormalizedOrder } from "./shopify";
-import type { AppSettings } from "./settings";
+import { getSettings, type AppSettings } from "./settings";
+import { logActivity } from "./activity";
+import type { SessionUser } from "../env";
 import { cleanPhone, normalizeBdPhone, nowIso } from "../lib/util";
 import { applyShopifySideChanges } from "./calling";
 import { newTrackingToken } from "./tracking";
@@ -106,6 +108,11 @@ export async function upsertOrder(db: DB, input: NormalizedOrder, appSettings: A
   // New live order (not a historical import): look the customer up in Steadfast's fraud check.
   if (!existing && after && !after.cancelledAt && after.courierStage === "unbooked" && Date.now() - Date.parse(after.shopCreatedAt) < 3 * 86_400_000) {
     await queueFraudCheck(db, after.phone);
+    // "Thanks for your order" only for orders that just arrived, never for a historical import.
+    if (Date.now() - Date.parse(after.shopCreatedAt) < 6 * 3_600_000) {
+      const { queueSms } = await import("./sms");
+      await queueSms(db, id, "placed", appSettings);
+    }
   }
   return { id, created: !existing, stale: false };
 }
@@ -227,6 +234,11 @@ export async function refreshRiskFlags(db: DB, orderId: number, appSettings: App
     }
   }
 
+  // Deleted in Shopify while the parcel is still live: someone has to stop it at Steadfast.
+  if (order.shopifyDeletedAt && order.courierStage !== "unbooked" && !["delivered", "partial_delivered", "returned", "cancelled"].includes(order.courierStage)) {
+    flags.push("deleted_in_shopify");
+  }
+
   // Shopify edits (admin or mobile app) after booking: the courier still has the old details.
   if (order.bookedSource && !["delivered", "partial_delivered", "returned", "cancelled"].includes(order.courierStage) && order.bookedSource !== shopifyContactKey(order)) {
     flags.push("changed_after_booking");
@@ -249,9 +261,40 @@ export function shopifyContactKey(o: { rawPhone: string | null; address1: string
 /** Orders that need a human: unreviewed flags, courier issues, failed syncs, cancellations after booking. */
 export const ATTENTION_SQL = sql`(
   (json_array_length(coalesce(${orders.riskFlags}, '[]')) > 0 and ${orders.riskDismissed} = 0 and ${orders.courierStage} = 'unbooked' and ${orders.cancelledAt} is null)
-  or exists (select 1 from json_each(coalesce(${orders.riskFlags}, '[]')) where value in ('changed_after_booking', 'cod_mismatch', 'combined_order_cancelled'))
+  or exists (select 1 from json_each(coalesce(${orders.riskFlags}, '[]')) where value in ('changed_after_booking', 'cod_mismatch', 'combined_order_cancelled', 'deleted_in_shopify'))
   or ${orders.courierStage} in ('issue', 'on_hold')
   or ${orders.fulfillmentState} = 'failed'
   or ${orders.shopifySyncStatus} = 'failed'
   or (${orders.cancelledAt} is not null and ${orders.courierStage} in ('booked', 'in_transit', 'on_hold', 'awaiting_confirmation'))
 )`;
+
+/**
+ * The order no longer exists in Shopify (deleted in the admin or app). It is treated as cancelled
+ * everywhere (no booking, no printing, scanner says STOP, pickup says pull it out). Without a live
+ * parcel it is archived; with one it stays visible, flagged, until the parcel is stopped.
+ */
+export async function markDeletedInShopify(db: DB, shopifyId: string, actor: "shopify" | "system" | SessionUser = "shopify") {
+  const order = await db.select().from(orders).where(eq(orders.shopifyId, shopifyId)).get();
+  if (!order || order.shopifyDeletedAt) return null;
+  const now = nowIso();
+  const liveParcel = order.courierStage !== "unbooked" && !["delivered", "partial_delivered", "returned", "cancelled"].includes(order.courierStage);
+  await db
+    .update(orders)
+    .set({
+      shopifyDeletedAt: now,
+      cancelledAt: order.cancelledAt ?? now,
+      cancelReason: order.cancelReason ?? "deleted",
+      processingStatus: "cancelled",
+      shopifySyncStatus: "none",
+      autoBookAt: null,
+      autoBookNote: "Order deleted in Shopify",
+      archived: !liveParcel,
+      updatedAt: now,
+    })
+    .where(eq(orders.id, order.id));
+  const { onNotPrintable } = await import("./dispatch");
+  await onNotPrintable(db, order.id, "Order deleted in Shopify", { name: typeof actor === "object" ? actor.name : actor });
+  await refreshRiskFlags(db, order.id, await getSettings(db));
+  await logActivity(db, actor, "order.deleted_in_shopify", { entityType: "order", entityId: order.id, orderId: order.id, details: { courierStage: order.courierStage, liveParcel } });
+  return { id: order.id, liveParcel };
+}

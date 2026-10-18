@@ -14,6 +14,10 @@ export interface Env {
   STEADFAST_API_KEY?: string;
   STEADFAST_SECRET_KEY?: string;
   STEADFAST_WEBHOOK_TOKEN?: string;
+  // Customer SMS (sms.net.bd-compatible API). Key is a Worker secret only: `wrangler secret put SMS_API_KEY`.
+  SMS_API_KEY?: string;
+  SMS_SENDER_ID?: string; // approved sender ID, if the account has one
+  SMS_API_URL?: string; // default https://api.sms.net.bd
   // Optional: encrypts credentials saved from Settings → Connections at rest.
   APP_ENCRYPTION_KEY?: string;
   // Set by hydrateEnv: credential keys that came from real Worker secrets/vars (not the dashboard).

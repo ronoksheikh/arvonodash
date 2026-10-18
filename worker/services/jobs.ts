@@ -8,13 +8,15 @@ import { addOrderTags } from "./shopify";
 import { refreshOrderFromShopify, syncProcessingToShopify } from "./calling";
 import { markPaidAfterDelivery } from "./payments";
 import { runFraudCheckJob } from "./fraud";
+import { runSmsJob } from "./sms";
+import type { SmsTrigger } from "../../shared/constants";
 
 /**
  * Minimal D1-backed outbox for work that talks to Shopify after a courier event.
  * Jobs run immediately (via waitUntil) and are retried by the cron with exponential backoff.
  */
 
-export type JobType = "fulfill_order" | "shopify_tag" | "shopify_processing" | "shopify_refresh" | "shopify_mark_paid" | "fraud_check";
+export type JobType = "fulfill_order" | "shopify_tag" | "shopify_processing" | "shopify_refresh" | "shopify_mark_paid" | "fraud_check" | "sms";
 
 export async function enqueueJob(db: DB, type: JobType, key: string, payload: unknown, opts: { reset?: boolean } = {}) {
   const now = nowIso();
@@ -58,6 +60,9 @@ async function runJob(env: Env, db: DB, job: typeof jobs.$inferSelect) {
       return;
     case "fraud_check":
       await runFraudCheckJob(env, db, String(payload.phone));
+      return;
+    case "sms":
+      await runSmsJob(env, db, { orderId: Number(payload.orderId), trigger: payload.trigger as SmsTrigger });
       return;
     default:
       throw new Error(`Unknown job type ${job.type}`);

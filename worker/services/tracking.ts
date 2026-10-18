@@ -1,7 +1,7 @@
 import { and, asc, eq, isNull, or } from "drizzle-orm";
 import type { DB } from "../db";
 import { callLogs, consignments, orders, trackingEvents } from "../db/schema";
-import { getSettings } from "./settings";
+import { getSettings, getValue, setValue, type AppSettings } from "./settings";
 import { partialOutcome } from "../../shared/delivery";
 
 /**
@@ -26,6 +26,61 @@ export async function ensureTrackingToken(db: DB, orderId: number): Promise<stri
 
 export function trackingPageUrl(origin: string, token: string): string {
   return `${origin.replace(/\/$/, "")}/t/${token}`;
+}
+
+// ---------------------------------------------------------------------------
+// Custom tracking domain (e.g. track.arvono.store → this Worker)
+
+let hostCache: { at: number; value: { host: string; storeUrl: string } | null } | null = null;
+
+/** Host of the tracking domain from Settings → Tracking page. Read on every request, so cached per isolate. */
+export async function trackingHost(env: { DB: D1Database }) {
+  if (hostCache && Date.now() - hostCache.at < 60_000) return hostCache.value;
+  let value: { host: string; storeUrl: string } | null = null;
+  try {
+    const row = await env.DB.prepare("SELECT value FROM settings WHERE key = 'app'").first<{ value: string }>();
+    const s = row?.value ? (JSON.parse(row.value) as Partial<AppSettings>) : {};
+    if (s.trackingBaseUrl) value = { host: new URL(s.trackingBaseUrl).hostname, storeUrl: s.storeUrl || "https://arvono.store" };
+  } catch {
+    value = null; // fresh install (no settings table yet) or a bad value: behave like the dashboard
+  }
+  hostCache = { at: Date.now(), value };
+  return value;
+}
+
+/** Called when the setting is saved, so this isolate switches over at once. */
+export function forgetTrackingHost() {
+  hostCache = null;
+}
+
+const ORIGIN_KEY = "app.origin";
+const INSTANCE_KEY = "app.instanceId";
+
+/** Random id of this installation; the tracking-domain check compares it to prove the domain reaches us. */
+export async function instanceId(db: DB): Promise<string> {
+  const existing = await getValue<string>(db, INSTANCE_KEY);
+  if (existing) return existing;
+  const id = newTrackingToken();
+  await setValue(db, INSTANCE_KEY, id);
+  return id;
+}
+
+/**
+ * Where customer links point: the custom tracking domain (Settings → Tracking page) when set,
+ * otherwise the dashboard's own address (remembered from the last sign-in, for background jobs).
+ */
+export async function trackingBase(db: DB, appSettings: AppSettings, requestOrigin?: string | null): Promise<string> {
+  return appSettings.trackingBaseUrl || requestOrigin || (await getValue<string>(db, ORIGIN_KEY)) || "";
+}
+
+export async function publicTrackingUrl(db: DB, appSettings: AppSettings, token: string, requestOrigin?: string | null) {
+  return trackingPageUrl(await trackingBase(db, appSettings, requestOrigin), token);
+}
+
+/** Remembers the dashboard's address so jobs without a request can still build links. */
+export async function rememberOrigin(db: DB, origin: string) {
+  if (!/^https?:\/\//.test(origin) || (await getValue<string>(db, ORIGIN_KEY)) === origin) return;
+  await setValue(db, ORIGIN_KEY, origin);
 }
 
 export type TrackingTone = "info" | "good" | "warn" | "bad";
@@ -70,9 +125,10 @@ export async function buildTracking(db: DB, token: string) {
 
   const timeline: TrackingEvent[] = [{ at: order.shopCreatedAt, kind: "placed", title: "Order placed", detail: `Order ${order.name}`, tone: "info" }];
 
-  for (const call of calls) {
+  for (const [i, call] of calls.entries()) {
     const e = CALL_EVENTS[call.outcome];
-    if (!e) continue;
+    // The same outcome logged twice in a row (two calls, or a re-click) is one update for the customer.
+    if (!e || calls[i - 1]?.outcome === call.outcome) continue;
     const detail = call.outcome === "call_again" && call.callbackAt ? `Next call around ${call.callbackAt}` : null;
     timeline.push({ at: call.createdAt, kind: `call_${call.outcome}`, title: e.title, detail, tone: e.tone });
   }
@@ -165,7 +221,7 @@ export async function buildTracking(db: DB, token: string) {
   const codDue = active?.codAmount ?? order.outstanding;
 
   return {
-    business: { name: appSettings.businessName, phone: appSettings.businessPhone || null },
+    business: { name: appSettings.businessName, phone: appSettings.businessPhone || null, website: appSettings.storeUrl || null },
     order: {
       name: order.name,
       placedAt: order.shopCreatedAt,

@@ -8,7 +8,7 @@ import { csvEscape, nowIso, normalizeBdPhone } from "../lib/util";
 import { getSettings } from "../services/settings";
 import { logActivity } from "../services/activity";
 import { bookOrders, defaultBooking, effectiveBooking, queueFulfillment, validateBooking } from "../services/courier";
-import { ATTENTION_SQL, customerHistory, refreshRiskFlags, upsertOrder } from "../services/orders";
+import { ATTENTION_SQL, customerHistory, markDeletedInShopify, refreshRiskFlags, upsertOrder } from "../services/orders";
 import { CANCEL_REASONS, cancelOrder, closeOrder, deleteOrder, fetchOrder, shopifyAdminOrderUrl } from "../services/shopify";
 import { setCallingStatus } from "../services/calling";
 import { orderHistory } from "../services/dispatch";
@@ -16,7 +16,9 @@ import { processJobs } from "../services/jobs";
 import { trackingUrl } from "../services/steadfast";
 import { NOTE_KINDS } from "../../shared/constants";
 import { partialOutcome } from "../../shared/delivery";
-import { ensureTrackingToken, trackingPageUrl } from "../services/tracking";
+import { ensureTrackingToken, publicTrackingUrl } from "../services/tracking";
+import { buildJourney } from "../services/journey";
+import { sendManualSms, smsLog } from "../services/sms";
 import { ensureFraudCheck, fraudSummary, getFraudCheck, RISKY_FRAUD_SQL, type FraudRow } from "../services/fraud";
 import { openSiblings } from "../services/autobook";
 
@@ -352,8 +354,21 @@ orderRoutes.get("/:id{[0-9]+}", async (c) => {
     calls,
     dispatchHistory,
     shopifyUrl: shopifyAdminOrderUrl(c.env, order.shopifyId),
-    trackingPageUrl: await ensureTrackingToken(db, order.id).then((t) => (t ? trackingPageUrl(new URL(c.req.url).origin, t) : null)),
+    trackingPageUrl: await ensureTrackingToken(db, order.id).then((t) => (t ? publicTrackingUrl(db, appSettings, t, new URL(c.req.url).origin) : null)),
+    journey: await buildJourney(db, order),
+    sms: await smsLog(db, { orderId: order.id, limit: 50 }),
   });
+});
+
+/** Staff SMS to the order's customer: free text or a template, with {placeholders} filled in. */
+orderRoutes.post("/:id{[0-9]+}/sms", requirePerm("sms.send"), async (c) => {
+  const db = getDb(c.env.DB);
+  const id = Number(c.req.param("id"));
+  const body = await c.req.json<{ body?: string; template?: string; phone?: string }>();
+  const user = c.get("user");
+  const r = await sendManualSms(c.env, db, user, { orderId: id, body: body.body, template: (body.template as never) ?? null, phone: body.phone });
+  await logActivity(db, user, "sms.manual", { entityType: "order", entityId: id, orderId: id, details: { phone: r.phone, segments: r.segments } });
+  return c.json(r);
 });
 
 orderRoutes.patch("/:id{[0-9]+}", requirePerm("orders.edit"), async (c) => {
@@ -611,8 +626,9 @@ orderRoutes.post("/:id{[0-9]+}/delete", requirePerm("orders.cancel"), async (c) 
       result.error = `${result.error ?? ""} ${(err as Error).message}`.trim();
     }
   }
+  if (result.deleted) await markDeletedInShopify(db, order.shopifyId, c.get("user"));
   await db.update(orders).set({ archived: true, updatedAt: nowIso() }).where(eq(orders.id, id));
-  await logActivity(db, c.get("user"), result.deleted ? "order.deleted_in_shopify" : "order.archived", {
+  await logActivity(db, c.get("user"), result.deleted ? "order.deleted_from_dashboard" : "order.archived", {
     entityType: "order",
     entityId: id,
     orderId: id,

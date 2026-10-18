@@ -7,6 +7,7 @@ import { hashPassword, verifyPassword } from "../lib/crypto";
 import { checkRateLimit, clearRateLimit, createSession, destroySession, loadSessionUser } from "../lib/auth";
 import { nowIso } from "../lib/util";
 import { logActivity } from "../services/activity";
+import { rememberOrigin } from "../services/tracking";
 
 export const authRoutes = new Hono<AppEnv>();
 
@@ -75,6 +76,7 @@ authRoutes.post("/logout", async (c) => {
 
 authRoutes.get("/me", async (c) => {
   const user = await loadSessionUser(c);
+  if (user) await rememberOrigin(getDb(c.env.DB), new URL(c.req.url).origin);
   // 200 with null keeps the signed-out state free of console errors on the login page.
   return c.json({ user });
 });

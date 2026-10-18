@@ -1,3 +1,5 @@
+import { trackingBase } from "../services/tracking";
+import { getSettings } from "../services/settings";
 import { Hono, type Context } from "hono";
 import { and, desc, eq, sql } from "drizzle-orm";
 import { createMiddleware } from "hono/factory";
@@ -158,9 +160,11 @@ const ids = (v: unknown, field: string, max = 500): number[] | undefined => {
 export const dispatchRoutes = new Hono<DispatchEnv>();
 dispatchRoutes.use("*", authenticate);
 
-function absoluteUrls(c: Context<DispatchEnv>, list: dispatch.PrintableOrder[]) {
-  const origin = new URL(c.req.url).origin;
-  return list.map((o) => ({ ...o, trackingUrl: o.trackingUrl ? origin + o.trackingUrl : null }));
+/** Label QR/links use the public tracking domain when one is set (Settings → Tracking page). */
+async function absoluteUrls(c: Context<DispatchEnv>, list: dispatch.PrintableOrder[]) {
+  const db = getDb(c.env.DB);
+  const base = (await trackingBase(db, await getSettings(db), new URL(c.req.url).origin)).replace(/\/$/, "");
+  return list.map((o) => ({ ...o, trackingUrl: o.trackingUrl ? base + o.trackingUrl : null }));
 }
 
 dispatchRoutes.get("/printable", requireScope("dispatch:read"), async (c) => {
@@ -171,7 +175,7 @@ dispatchRoutes.get("/printable", requireScope("dispatch:read"), async (c) => {
   const db = getDb(c.env.DB);
   await dispatch.expireReservations(db);
   const r = await dispatch.listByLabelStatus(db, { ...range, status, limit, afterId: Number(q.cursor) || undefined, offset: c.env.APP_TIMEZONE_OFFSET || "+06:00" });
-  return c.json({ range: range.label, timezone: "Asia/Dhaka", status, count: r.orders.length, nextCursor: r.nextCursor, orders: absoluteUrls(c, r.orders) });
+  return c.json({ range: range.label, timezone: "Asia/Dhaka", status, count: r.orders.length, nextCursor: r.nextCursor, orders: await absoluteUrls(c, r.orders) });
 });
 
 dispatchRoutes.post("/claim", requireScope("dispatch:print"), (c) =>
@@ -187,7 +191,7 @@ dispatchRoutes.post("/claim", requireScope("dispatch:print"), (c) =>
       offset: c.env.APP_TIMEZONE_OFFSET || "+06:00",
       filters: { range: range.label, limit, orderIds: body.orderIds ?? null },
     });
-    return { status: 200, body: { ...r, orders: absoluteUrls(c, r.orders), count: r.orders.length } };
+    return { status: 200, body: { ...r, orders: await absoluteUrls(c, r.orders), count: r.orders.length } };
   }),
 );
 

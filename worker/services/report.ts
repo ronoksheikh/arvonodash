@@ -1,6 +1,6 @@
 import { and, eq, sql, type AnyColumn } from "drizzle-orm";
-import type { DB } from "../db";
-import { callLogs, consignments, orders, payments } from "../db/schema";
+import { inList, type DB } from "../db";
+import { callLogs, consignments, dispatchEvents, orders, payments } from "../db/schema";
 import { businessDate, dayRange } from "./dispatch";
 import { localTimeIso } from "./pickup";
 import type { AppSettings } from "./settings";
@@ -80,6 +80,15 @@ export async function ownerReport(db: DB, settings: AppSettings, offset: string,
     else nextDay++;
   }
 
+  // Missed pickups (one per parcel per day it waited) and parcels that left without a packing scan.
+  const misses = await db
+    .select({ event: dispatchEvents.event, n: sql<number>`count(*)` })
+    .from(dispatchEvents)
+    .where(and(inList(dispatchEvents.event, ["carried_over", "picked_up_unscanned"]), sql`${dispatchEvents.createdAt} >= ${range.from} and ${dispatchEvents.createdAt} < ${range.to}`))
+    .groupBy(dispatchEvents.event)
+    .all();
+  const missCount = (e: string) => n(misses.find((m) => m.event === e)?.n);
+
   // Where returns come from: at least the last 30 days so a single day still has enough history.
   const returnsFrom = new Date(Math.min(Date.parse(range.from), Date.parse(range.to) - 30 * DAY)).toISOString();
   const finished = sql`coalesce(${consignments.deliveredAt}, ${consignments.returnedAt}) >= ${returnsFrom} and coalesce(${consignments.deliveredAt}, ${consignments.returnedAt}) < ${range.to}`;
@@ -150,7 +159,7 @@ export async function ownerReport(db: DB, settings: AppSettings, offset: string,
       returned,
       successRate: rate(delivered, delivered + returned),
     },
-    sameDay: { cutoffTime: settings.cutoffTime, beforeCutoff, sameDay, nextDay, notYet, rate: rate(sameDay, beforeCutoff) },
+    sameDay: { cutoffTime: settings.cutoffTime, beforeCutoff, sameDay, nextDay, notYet, rate: rate(sameDay, beforeCutoff), carriedOver: missCount("carried_over"), unscanned: missCount("picked_up_unscanned") },
     money: {
       collected: n(flow?.collected),
       deliveryCharges: n(flow?.charges),

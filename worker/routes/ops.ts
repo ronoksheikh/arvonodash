@@ -5,7 +5,7 @@ import { requirePerm } from "../lib/auth";
 import { HttpError } from "../lib/util";
 import { logActivity } from "../services/activity";
 import { businessDate } from "../services/dispatch";
-import { confirmHandover, dayPlan } from "../services/pickup";
+import { confirmHandover, dayPlan, undoHandover } from "../services/pickup";
 import { ownerReport } from "../services/report";
 import { getSettings } from "../services/settings";
 import { recordFollowUp, stuckParcels } from "../services/stuck";
@@ -28,6 +28,17 @@ opsRoutes.post("/pickup/handover", requirePerm("dispatch.manage"), async (c) => 
   const user = c.get("user");
   const r = await confirmHandover(db, user, await getSettings(db), tz(c.env), { orderIds: ids, riderName: body.riderName, riderPhone: body.riderPhone, note: body.note });
   await logActivity(db, user, "dispatch.handover", { entityType: "pickup", entityId: r.pickupId, details: { handed: r.handed, leftBehind: r.leftBehind, rider: body.riderName ?? null } });
+  return c.json(r);
+});
+
+opsRoutes.post("/pickup/undo-handover", requirePerm("dispatch.manage"), async (c) => {
+  const db = getDb(c.env.DB);
+  const body = await c.req.json<{ orderIds?: unknown; reason?: string }>();
+  const ids = Array.isArray(body.orderIds) ? body.orderIds.map(Number).filter((x) => Number.isInteger(x) && x > 0) : [];
+  if (!ids.length) throw new HttpError(400, "Select the parcels the rider did not take");
+  const user = c.get("user");
+  const r = await undoHandover(db, user, ids, body.reason?.trim().slice(0, 300) ?? "");
+  await logActivity(db, user, "dispatch.handover_undone", { entityType: "pickup", details: { orders: r.reverted.length, reason: body.reason ?? null } });
   return c.json(r);
 });
 

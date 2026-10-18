@@ -18,6 +18,7 @@ export type PlanStage =
   | "needs_scan"
   | "ready"
   | "handed_over"
+  | "not_collected" // handed over on an earlier day, Steadfast still hasn't confirmed pickup
   | "picked_up"
   | "pull_out" // scanned, then cancelled in Shopify: take it off the pile
   | "next_day"; // confirmed after the cut-off
@@ -25,6 +26,50 @@ export type PlanStage =
 /** Local wall-clock time on a business date → UTC ISO. */
 export function localTimeIso(date: string, hhmm: string, offset: string): string {
   return new Date(Date.parse(`${date}T${hhmm}:00Z`) - offsetMinutes(offset) * 60_000).toISOString();
+}
+
+/** The business date a parcel should leave: today when ready before the cut-off, else the next day. */
+export function shipByDate(readyAt: string, cutoffTime: string, offset: string): string {
+  const day = businessDate(readyAt, offset);
+  if (readyAt < localTimeIso(day, cutoffTime, offset)) return day;
+  return businessDate(new Date(Date.parse(`${day}T12:00:00Z`) + 86_400_000), "+00:00");
+}
+
+/**
+ * Daily roll-over (runs with the cron; only the first run after midnight finds anything): parcels
+ * still in the warehouse after their pickup day move to today, counted and logged each day they
+ * miss, so they head tomorrow's list instead of being forgotten. Handed-over parcels are not
+ * carried over: the rider has them (see "not collected" if Steadfast never confirms).
+ */
+export async function rollOverMissedPickups(db: DB, offset: string, now = new Date()) {
+  const today = businessDate(now, offset);
+  const rows = await db
+    .update(orders)
+    .set({ shipBy: today, carryOverCount: sql`${orders.carryOverCount} + 1` })
+    .where(
+      sql`${orders.shipBy} < ${today} and ${orders.handedOverAt} is null and ${orders.dispatchStatus} != 'dispatched'
+        and ${orders.courierStage} = 'booked' and ${orders.cancelledAt} is null and ${orders.archived} = 0 and ${orders.combinedIntoOrderId} is null`,
+    )
+    .returning({ id: orders.id, consignmentRowId: orders.activeConsignmentId, count: orders.carryOverCount, sorted: orders.dispatchStatus })
+    .all();
+  await addEvents(
+    db,
+    rows.map((r) => ({ orderId: r.id, consignmentRowId: r.consignmentRowId, event: "carried_over", note: `${r.sorted === "sorted" ? "Packed" : "Not packed"}; due ${today} (${r.count} day${r.count > 1 ? "s" : ""} late)` })),
+    { name: "system" },
+  );
+  return { processed: rows.length };
+}
+
+/** The rider didn't take these after all: back to "ready" so they go with the next pickup. */
+export async function undoHandover(db: DB, actor: Actor, orderIds: number[], reason: string) {
+  const rows = await db
+    .update(orders)
+    .set({ pickupId: null, handedOverAt: null })
+    .where(and(inList(orders.id, orderIds), sql`${orders.handedOverAt} is not null and ${orders.dispatchStatus} != 'dispatched'`))
+    .returning({ id: orders.id, consignmentRowId: orders.activeConsignmentId })
+    .all();
+  await addEvents(db, rows.map((r) => ({ orderId: r.id, consignmentRowId: r.consignmentRowId, event: "handover_undone", note: reason || null })), actor);
+  return { reverted: rows.map((r) => r.id) };
 }
 
 export async function dayPlan(db: DB, settings: AppSettings, offset: string, now = new Date()) {
@@ -52,6 +97,8 @@ export async function dayPlan(db: DB, settings: AppSettings, offset: string, now
       autoBookAt: orders.autoBookAt,
       autoBookNote: orders.autoBookNote,
       cancelledAt: orders.cancelledAt,
+      shipBy: orders.shipBy,
+      carryOverCount: orders.carryOverCount,
       consignmentId: consignments.consignmentId,
       trackingCode: consignments.trackingCode,
       codAmount: consignments.codAmount,
@@ -64,6 +111,7 @@ export async function dayPlan(db: DB, settings: AppSettings, offset: string, now
           and coalesce(${orders.shopifyFulfillmentStatus}, '') not in ('fulfilled', 'partially_fulfilled', 'partial'))
         or (${orders.dispatchStatus} = 'sorted' and ${orders.handedOverAt} is null)
         or ${orders.handedOverAt} >= ${dayStart}
+        or (${orders.handedOverAt} is not null and ${orders.dispatchStatus} != 'dispatched' and ${orders.courierStage} = 'booked')
         or (${orders.dispatchStatus} = 'dispatched' and ${orders.dispatchedAt} >= ${dayStart})
       )`,
     )
@@ -74,14 +122,17 @@ export async function dayPlan(db: DB, settings: AppSettings, offset: string, now
   const parcels = rows.map((r) => {
     let stage: PlanStage;
     if (r.dispatchStatus === "dispatched") stage = "picked_up";
-    else if (r.handedOverAt) stage = "handed_over";
+    else if (r.handedOverAt) stage = r.handedOverAt < dayStart ? "not_collected" : "handed_over";
     else if (r.cancelledAt) stage = "pull_out";
+    // Packed is packed: if the rider is here, it goes, even when it was only due tomorrow.
     else if (r.dispatchStatus === "sorted") stage = "ready";
-    else if (r.confirmedAt && r.confirmedAt >= cutoffAt) stage = "next_day";
+    else if (r.shipBy ? r.shipBy > today : Boolean(r.confirmedAt && r.confirmedAt >= cutoffAt)) stage = "next_day";
     else if (r.courierStage === "unbooked") stage = "needs_booking";
     else if (r.labelStatus !== "printed") stage = "needs_label";
     else stage = "needs_scan";
-    const carriedOver = Boolean(r.confirmedAt && r.confirmedAt < dayStart) && ["needs_booking", "needs_label", "needs_scan", "ready"].includes(stage);
+    const waiting = ["needs_booking", "needs_label", "needs_scan", "ready"].includes(stage);
+    // Booked parcels count the pickups they actually missed; unbooked ones, confirmed before today.
+    const carriedOver = waiting && (r.carryOverCount > 0 || (r.courierStage === "unbooked" && Boolean(r.confirmedAt && r.confirmedAt < dayStart)));
     return { ...r, codAmount: r.codAmount ?? r.total, stage, carriedOver };
   });
 
@@ -93,6 +144,7 @@ export async function dayPlan(db: DB, settings: AppSettings, offset: string, now
     needsScan: count("needs_scan"),
     ready: count("ready"),
     handedOver: count("handed_over"),
+    notCollected: count("not_collected"),
     pickedUp: count("picked_up"),
     pullOut: count("pull_out"),
     nextDay: count("next_day"),

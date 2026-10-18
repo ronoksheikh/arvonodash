@@ -18,10 +18,15 @@ Shopify ──webhooks──► Worker (Hono) ◄──webhooks── Steadfast
 ## Daily workflow
 
 ```
-New order → Call customer → Confirmed (Shopify: In progress) → Admin books Steadfast → Ready to print
-→ Label service prints & confirms → Printed → Dispatched (staff) → Steadfast confirms pickup
-→ Shopify fulfilled (tracking added) → Delivered / Returned
+New order → Call customer → Confirmed (Shopify: In progress) → Booked with Steadfast (auto, 10 min)
+→ Label printed → Scanned at packing (= packed, ready) → Handed to rider (pickup checklist)
+→ Steadfast confirms pickup (dispatched) → Shopify fulfilled → Delivered / Returned → COD paid out
 ```
+
+Parcels not ready by the pickup move to the next day automatically and stay at the top of the list
+until they leave. See [docs/PARCEL_LIFECYCLE.md](docs/PARCEL_LIFECYCLE.md) for every step, what is
+recorded, and how deleted or cancelled orders and parcels are handled. Customer SMS:
+[docs/SMS.md](docs/SMS.md). Custom tracking domain: [docs/TRACKING_DOMAIN.md](docs/TRACKING_DOMAIN.md).
 
 Everything is synchronised automatically except the **calling confirmation** and **physical
 dispatch**. Booking happens automatically a few minutes after confirmation (default 10, set in
@@ -233,6 +238,10 @@ Go to Sync & webhooks → *Start import*. Imported orders are never booked.
   `SHOPIFY_CLIENT_SECRET`, `SHOPIFY_ACCESS_TOKEN`, `SHOPIFY_WEBHOOK_SECRET`, `STEADFAST_API_KEY`,
   `STEADFAST_SECRET_KEY` and `STEADFAST_WEBHOOK_TOKEN` can be set with `wrangler secret put`. A
   secret overrides the dashboard value.
+- **Customer SMS**: `npx wrangler secret put SMS_API_KEY` (and optionally `SMS_SENDER_ID`), then
+  switch it on in Settings → SMS. Off by default. See [docs/SMS.md](docs/SMS.md).
+- **Tracking domain** (`track.arvono.store`): add it as a Custom Domain on the Worker, then save it
+  in Settings → Tracking page. See [docs/TRACKING_DOMAIN.md](docs/TRACKING_DOMAIN.md).
 - **Plan**: Workers Paid is recommended, for CPU time on login hashing and for subrequest headroom.
 
 ### Recommended hardening
@@ -277,6 +286,8 @@ To run it:
 # .dev.vars for the mock run (the suite enters credentials through Settings → Connections):
 #   SHOPIFY_ADMIN_URL_OVERRIDE=http://localhost:8790
 #   STEADFAST_BASE_URL=http://localhost:8790/api/v1
+#   SMS_API_URL=http://localhost:8790/sms
+#   SMS_API_KEY=sms-key
 rm -rf .wrangler
 node test/e2e/mock-server.mjs &   # mock APIs on :8790
 npm run dev &                      # app on :5173

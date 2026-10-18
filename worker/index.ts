@@ -9,6 +9,7 @@ import { authRoutes } from "./routes/auth";
 import { webhookRoutes } from "./routes/webhooks";
 import { dispatchRoutes } from "./routes/dispatch";
 import { expireReservations } from "./services/dispatch";
+import { rollOverMissedPickups } from "./services/pickup";
 import { orderRoutes } from "./routes/orders";
 import { opsRoutes } from "./routes/ops";
 import { consignmentRoutes } from "./routes/consignments";
@@ -16,14 +17,14 @@ import { codRoutes, customerRoutes, dashboardRoutes, returnRoutes } from "./rout
 import { logRoutes, pruneOldData, settingsRoutes, syncRoutes, userRoutes } from "./routes/admin";
 import { processJobs } from "./services/jobs";
 import { pollActiveConsignments } from "./services/courier";
-import { getImportState, reconcileShopify, recordRun, retryFailedWebhooks, runImportStep, syncPayments, syncRecentOpenOrders } from "./services/sync";
+import { getImportState, reconcileShopify, recordRun, retryFailedWebhooks, runImportStep, syncPayments, syncRecentOpenOrders, verifyShopifyOrdersExist } from "./services/sync";
 import { runAutoBookings } from "./services/autobook";
 import { shopifyConfigured } from "./services/shopify";
 import { steadfastConfigured } from "./services/steadfast";
 import { setValue } from "./services/settings";
 import { ensureMigrated } from "./db/migrate";
 import { hydrateEnv } from "./services/credentials";
-import { buildTracking } from "./services/tracking";
+import { buildTracking, instanceId, trackingHost } from "./services/tracking";
 
 const app = new Hono<AppEnv>();
 
@@ -43,6 +44,12 @@ app.route("/webhooks", webhookRoutes);
 app.route("/api/v1/dispatch", dispatchRoutes);
 app.route("/api/auth", authRoutes);
 // Customer-facing tracking page data (no login; the token in the link is the secret).
+// Lets Settings confirm, from the browser, that the tracking domain reaches this installation over HTTPS.
+app.get("/api/public/domain-check", async (c) => {
+  c.header("Access-Control-Allow-Origin", "*");
+  c.header("Cache-Control", "no-store");
+  return c.json({ app: "arvono-tracking", instanceId: await instanceId(getDb(c.env.DB)), host: new URL(c.req.url).host });
+});
 app.get("/api/public/track/:token", async (c) => {
   const data = await buildTracking(getDb(c.env.DB), c.req.param("token"));
   c.header("Cache-Control", "no-store");
@@ -96,6 +103,7 @@ async function scheduled(controller: ScheduledController, env: Env) {
   }
   const steps: [string, () => Promise<Record<string, unknown>>, boolean][] = [
     ["print_reservations", () => expireReservations(db).then((r) => ({ ...r, processed: r.expired })), true],
+    ["carry_over", () => rollOverMissedPickups(db, env.APP_TIMEZONE_OFFSET || "+06:00"), true],
     ["jobs", () => processJobs(env, db, { limit: 25 }), true],
     ["webhook_retry", () => retryFailedWebhooks(db, { limit: 20 }), true],
     ["courier_poll", () => pollActiveConsignments(env, db, { limit: 40, staleMinutes: 30 }), steadfastConfigured(env)],
@@ -121,6 +129,11 @@ async function scheduled(controller: ScheduledController, env: Env) {
     if (importState && !importState.done) await recordRun(db, "shopify_import", "cron", () => runImportStep(env, db, 3)).catch(() => {});
     // Every 15 minutes: catch edits made in Shopify admin/mobile whose webhooks were missed.
     if (minute % 15 === 0) await recordRun(db, "shopify_reconcile", "cron", () => reconcileShopify(env, db)).catch(() => {});
+    // Every 30 minutes: orders deleted in Shopify whose delete webhook never arrived.
+    if (minute % 30 === 0) {
+      const r = await verifyShopifyOrdersExist(env, db).catch(() => null);
+      if (r && "processed" in r && r.processed) await db.insert(syncRuns).values({ kind: "shopify_deleted", trigger: "cron", status: "success", stats: r, startedAt: nowIso(), finishedAt: nowIso() });
+    }
     // Shopify-app changes like "Mark as in progress" don't always fire a webhook.
     await syncRecentOpenOrders(env, db, { days: 3, maxPages: 4 }).catch(() => {});
   }
@@ -129,6 +142,31 @@ async function scheduled(controller: ScheduledController, env: Env) {
   }
   if (minute === 0 && hour === 21) await pruneOldData(db); // ~03:00 Asia/Dhaka
   await setValue(db, "cron.lastRun", nowIso());
+}
+
+// ---------------------------------------------------------------------------
+// Custom tracking domain (CNAME / Workers Custom Domain → this Worker; Cloudflare issues the HTTPS certificate)
+
+async function serveTrackingHost(request: Request, env: Env, ctx: ExecutionContext, storeUrl: string): Promise<Response> {
+  const url = new URL(request.url);
+  const path = url.pathname;
+  if (path.startsWith("/api/public/")) return app.fetch(request, await prepare(env), ctx);
+  if (path === "/" || path === "") return Response.redirect(storeUrl, 302);
+  // Short form for SMS: track.arvono.store/<token> → /t/<token>
+  const bare = /^\/([a-f0-9]{16,64})\/?$/.exec(path);
+  if (bare) return Response.redirect(`${url.origin}/t/${bare[1]}`, 301);
+  if (/^\/t\/[a-f0-9]{16,64}\/?$/.test(path) || /^\/(assets\/|favicon)/.test(path) || /\.(js|css|svg|png|ico|woff2?|webmanifest)$/.test(path)) {
+    const res = await env.ASSETS.fetch(request);
+    const out = new Response(res.body, res);
+    out.headers.set("X-Robots-Tag", "noindex, nofollow");
+    out.headers.set("Strict-Transport-Security", "max-age=31536000");
+    return out;
+  }
+  // Nothing else (dashboard, login, API, webhooks) is reachable on the public tracking domain.
+  return new Response(`<!doctype html><meta name="viewport" content="width=device-width,initial-scale=1"><title>Not found</title><body style="font-family:system-ui;display:grid;place-items:center;min-height:90vh;margin:0;color:#111"><div style="text-align:center"><p>This page doesn't exist.</p><a href="${storeUrl}" style="color:#000">Visit our store</a></div>`, {
+    status: 404,
+    headers: { "Content-Type": "text/html; charset=utf-8", "X-Robots-Tag": "noindex" },
+  });
 }
 
 /** Every entry point: apply pending migrations, then fill in credentials saved from the dashboard. */
@@ -140,8 +178,11 @@ async function prepare(env: Env): Promise<Env> {
 export default {
   fetch: async (request, env, ctx) => {
     const url = new URL(request.url);
-    // Static assets never reach here (assets are served first except /api and /webhooks).
     if (url.pathname === "/api/health") return app.fetch(request, env, ctx);
+    // The customer tracking domain (e.g. track.arvono.store) only ever shows tracking pages.
+    const tracking = await trackingHost(env);
+    if (tracking && url.hostname === tracking.host) return serveTrackingHost(request, env, ctx, tracking.storeUrl);
+    if (!url.pathname.startsWith("/api/") && !url.pathname.startsWith("/webhooks/")) return env.ASSETS.fetch(request);
     try {
       return app.fetch(request, await prepare(env), ctx);
     } catch (err) {

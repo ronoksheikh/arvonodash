@@ -1,9 +1,12 @@
 import { describe, expect, it } from "vitest";
 import { normalizeBdPhone, startOfDayIso, csvEscape, gidToId } from "../worker/lib/util";
 import { hashPassword, verifyPassword, hmacSha256Base64, hmacSha256Hex, timingSafeEqual } from "../worker/lib/crypto";
-import { stageForStatus, isPickedUpStatus, isFinalStatus, normalizeFraudScore, parseSteadfastTime } from "../worker/services/steadfast";
+import { stageForStatus, isPickedUpStatus, isFinalStatus, normalizeFraudScore, parseSteadfastTime, pollVerdict } from "../worker/services/steadfast";
+import { shipByDate } from "../worker/services/pickup";
+import { renderTemplate } from "../worker/services/sms";
+import { smsSegments } from "../shared/constants";
 import { judgeFraud } from "../worker/services/fraud";
-import { DEFAULT_SETTINGS } from "../worker/services/settings";
+import { DEFAULT_SETTINGS, normalizeBaseUrl } from "../worker/services/settings";
 import { partialOutcome } from "../shared/delivery";
 import { normalizeRestOrder } from "../worker/services/shopify";
 import { buildAddress } from "../worker/services/orders";
@@ -168,4 +171,51 @@ describe("hmacSha256Hex", () => {
     // RFC 4231-style known vector
     expect(await hmacSha256Hex("key", "The quick brown fox jumps over the lazy dog")).toBe("f7bc83f430538424b13298e6aa6fb143ef4d59a14946175997479dbc2d1a3cd8");
   });
+});
+
+describe("poll verdict (deleted / regressing parcels)", () => {
+  const base = { isFinal: false, pickedUpAt: null };
+  it("'unknown' for a cancelled parcel that was never picked up means it was deleted in Steadfast", () =>
+    expect(pollVerdict({ ...base, status: "cancelled", isFinal: true }, "unknown")).toBe("deleted"));
+  it("'not found' before pickup means deleted", () => expect(pollVerdict({ ...base, status: "in_review" }, null)).toBe("deleted"));
+  it("a booking still in flight is never treated as deleted", () => expect(pollVerdict({ ...base, status: "creating" }, null)).toBe("ignore"));
+  it("'unknown' after pickup is a real delivery problem", () =>
+    expect(pollVerdict({ ...base, status: "pending", pickedUpAt: "2026-10-18T05:00:00Z" }, "unknown")).toBe("apply"));
+  it("a finished parcel never goes back to an open status", () =>
+    expect(pollVerdict({ status: "delivered", isFinal: true, pickedUpAt: "2026-10-18T05:00:00Z" }, "pending")).toBe("ignore"));
+  it("an already-deleted parcel stays deleted", () => expect(pollVerdict({ status: "deleted", isFinal: true, pickedUpAt: null }, "unknown")).toBe("ignore"));
+  it("normal progress applies", () => expect(pollVerdict({ ...base, status: "in_review" }, "pending")).toBe("apply"));
+  it("deleted maps to a cancelled, final stage", () => {
+    expect(stageForStatus("deleted", false)).toBe("cancelled");
+    expect(isFinalStatus("deleted")).toBe(true);
+    expect(isPickedUpStatus("deleted")).toBe(false);
+  });
+});
+
+describe("ship-by date (same-day cut-off)", () => {
+  // 16:00 Dhaka = 10:00 UTC
+  it("ready before the cut-off ships today", () => expect(shipByDate("2026-10-18T09:59:00Z", "16:00", "+06:00")).toBe("2026-10-18"));
+  it("ready after the cut-off ships tomorrow", () => expect(shipByDate("2026-10-18T10:01:00Z", "16:00", "+06:00")).toBe("2026-10-19"));
+  it("uses the Dhaka date, not UTC", () => expect(shipByDate("2026-10-18T19:00:00Z", "16:00", "+06:00")).toBe("2026-10-19"));
+  it("rolls over month ends", () => expect(shipByDate("2026-10-31T12:00:00Z", "16:00", "+06:00")).toBe("2026-11-01"));
+});
+
+describe("SMS", () => {
+  it("fills placeholders and keeps unknown ones visible", () =>
+    expect(renderTemplate("Hi {name}, {order} {oops}", { name: "Rahim", order: "#1001" })).toBe("Hi Rahim, #1001 {oops}"));
+  it("counts GSM and Unicode (Bangla) segments", () => {
+    expect(smsSegments("a".repeat(160)).segments).toBe(1);
+    expect(smsSegments("a".repeat(161)).segments).toBe(2);
+    expect(smsSegments("আ".repeat(70))).toMatchObject({ unicode: true, segments: 1 });
+    expect(smsSegments("আ".repeat(71)).segments).toBe(2);
+  });
+});
+
+describe("tracking domain", () => {
+  it.each([
+    ["track.arvono.store", "https://track.arvono.store"],
+    ["https://track.arvono.store/", "https://track.arvono.store"],
+    ["", ""],
+  ])("normalizes %s", (input, out) => expect(normalizeBaseUrl(input)).toBe(out));
+  it.each(["http://track.arvono.store", "https://track.arvono.store/?x=1", "not a url at all"])("rejects %s", (input) => expect(normalizeBaseUrl(input)).toBeNull());
 });
