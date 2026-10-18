@@ -17,6 +17,7 @@ export const PERMISSIONS = {
   "settings.manage": "Connection and workflow settings",
   "users.manage": "Staff accounts and permissions",
   "logs.view": "Activity logs and sync history",
+  "reports.view": "Owner report (sales, returns, COD)",
 } as const;
 
 export type Permission = keyof typeof PERMISSIONS;
@@ -42,7 +43,7 @@ export const ROLE_PERMISSIONS: Record<Role, Permission[]> = {
   ],
   caller: ["orders.view", "orders.call"],
   packer: ["orders.view", "export", "dispatch.manage"],
-  viewer: ["orders.view", "cod.view", "logs.view"],
+  viewer: ["orders.view", "cod.view", "logs.view", "reports.view"],
 };
 
 // Courier stages derived from raw Steadfast statuses (see worker/services/steadfast.ts).
@@ -176,6 +177,7 @@ export const DISPATCH_EVENTS: Record<string, string> = {
   reprint_requested: "Reprint requested",
   sorted: "Scanned & sorted",
   unsorted: "Sorting undone",
+  handed_over: "Handed to courier rider",
   dispatched: "Dispatched (picked up by Steadfast)",
   dispatch_undone: "Dispatch undone",
   courier_received: "Received by courier",

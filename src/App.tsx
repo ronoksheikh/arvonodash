@@ -19,6 +19,9 @@ const SettingsPage = lazy(() => import("./pages/Settings"));
 const Print = lazy(() => import("./pages/Print"));
 const Scan = lazy(() => import("./pages/Scan"));
 const Track = lazy(() => import("./pages/Track"));
+const Pickup = lazy(() => import("./pages/Pickup"));
+const Stuck = lazy(() => import("./pages/Stuck"));
+const ReportPage = lazy(() => import("./pages/Report"));
 
 function RequireAuth({ children }: { children: React.ReactNode }) {
   const { user, loading } = useAuth();
@@ -43,6 +46,9 @@ export function App() {
           <Route path="consignments" element={<Consignments />} />
           <Route path="print-queue" element={<PrintQueue />} />
           <Route path="dispatch" element={<Dispatch />} />
+          <Route path="pickup" element={<Pickup />} />
+          <Route path="stuck" element={<Stuck />} />
+          <Route path="report" element={<ReportPage />} />
           <Route path="returns" element={<Returns />} />
           <Route path="customers" element={<Customers />} />
           <Route path="cod" element={<Cod />} />

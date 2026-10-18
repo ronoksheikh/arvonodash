@@ -4,7 +4,7 @@ import { useDisclosure, useHotkeys } from "@mantine/hooks";
 import { NavLink as RouterLink, Outlet, useLocation, useNavigate } from "react-router";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
-  LayoutDashboard, Printer, PackageCheck, ScanLine, ShoppingBag, Truck, Undo2, Users, Wallet, History, RefreshCw, Settings, Moon, Sun, Search, LogOut, ChevronDown,
+  LayoutDashboard, Printer, PackageCheck, ScanLine, AlarmClock, AlertOctagon, BarChart3, ShoppingBag, Truck, Undo2, Users, Wallet, History, RefreshCw, Settings, Moon, Sun, Search, LogOut, ChevronDown,
 } from "lucide-react";
 import { api, post } from "../api";
 import { useAuth } from "../auth";
@@ -12,10 +12,13 @@ import type { Permission } from "../../shared/constants";
 
 const NAV: { to: string; label: string; icon: typeof LayoutDashboard; perm?: Permission; badgeKey?: string }[] = [
   { to: "/", label: "Overview", icon: LayoutDashboard, perm: "orders.view" },
+  { to: "/report", label: "Owner report", icon: BarChart3, perm: "reports.view" },
   { to: "/orders", label: "Orders", icon: ShoppingBag, perm: "orders.view", badgeKey: "unbooked" },
   { to: "/print-queue", label: "Ready to print", icon: Printer, perm: "orders.view" },
   { to: "/dispatch", label: "Dispatch", icon: PackageCheck, perm: "orders.view" },
   { to: "/scan", label: "Scan & sort", icon: ScanLine, perm: "dispatch.manage" },
+  { to: "/pickup", label: "Pickup today", icon: AlarmClock, perm: "orders.view" },
+  { to: "/stuck", label: "Stuck parcels", icon: AlertOctagon, perm: "orders.view", badgeKey: "stuck" },
   { to: "/consignments", label: "Consignments", icon: Truck, perm: "orders.view" },
   { to: "/returns", label: "Returns", icon: Undo2, perm: "orders.view" },
   { to: "/customers", label: "Customers", icon: Users, perm: "orders.view" },
@@ -63,7 +66,7 @@ export function Layout() {
 
   const counts = useQuery({
     queryKey: ["nav-counts"],
-    queryFn: () => api<{ pipeline: { toCall: number; readyToBook: number; attention: number } }>("/dashboard?days=7"),
+    queryFn: () => api<{ pipeline: { toCall: number; readyToBook: number; attention: number; stuck: number } }>("/dashboard?days=7"),
     refetchInterval: 60_000,
     enabled: Boolean(user?.permissions.includes("orders.view")),
   });
@@ -82,7 +85,11 @@ export function Layout() {
         onClick={close}
         active={item.to === "/" ? location.pathname === "/" : location.pathname.startsWith(item.to)}
         rightSection={
-          item.badgeKey && counts.data && counts.data.pipeline.toCall + counts.data.pipeline.readyToBook > 0 ? (
+          item.badgeKey === "stuck" && counts.data?.pipeline.stuck ? (
+            <Tooltip label={`${counts.data.pipeline.stuck} parcel(s) need a call`}>
+              <Badge size="xs" variant="filled" color="red">{counts.data.pipeline.stuck}</Badge>
+            </Tooltip>
+          ) : item.badgeKey === "unbooked" && counts.data && counts.data.pipeline.toCall + counts.data.pipeline.readyToBook > 0 ? (
             <Tooltip label={`${counts.data.pipeline.toCall} to call · ${counts.data.pipeline.readyToBook} ready to book`}>
               <Badge size="xs" variant="filled">{counts.data.pipeline.toCall + counts.data.pipeline.readyToBook}</Badge>
             </Tooltip>

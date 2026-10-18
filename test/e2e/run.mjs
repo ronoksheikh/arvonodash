@@ -406,6 +406,28 @@ await step("scanning the Steadfast consignment ID (WebSocket) marks the parcel s
   assert.equal(http.body.kind, "duplicate", "HTTP fallback works too");
 });
 
+await step("pickup checklist: scanned parcels are handed to the rider once", async () => {
+  const plan = await call("GET", "/api/ops/pickup");
+  assert.equal(plan.status, 200, JSON.stringify(plan.body));
+  const a = plan.body.parcels.find((p) => p.id === orderA.id);
+  assert.equal(a.stage, "ready", "scanned = ready for pickup");
+  assert.ok(plan.body.cutoffAt && plan.body.pickupAt);
+  const none = await call("POST", "/api/ops/pickup/handover", { orderIds: [] });
+  assert.equal(none.status, 400);
+  const h = await call("POST", "/api/ops/pickup/handover", { orderIds: [orderA.id], riderName: "Rahim", riderPhone: "01711-000111" });
+  assert.equal(h.status, 200, JSON.stringify(h.body));
+  assert.equal(h.body.handed, 1);
+  const again = await call("POST", "/api/ops/pickup/handover", { orderIds: [orderA.id] });
+  assert.equal(again.status, 409, "a parcel can't be handed over twice");
+  const after = await call("GET", "/api/ops/pickup");
+  assert.equal(after.body.parcels.find((p) => p.id === orderA.id).stage, "handed_over");
+  assert.equal(after.body.pickups[0].riderPhone, "01711000111");
+  assert.equal(after.body.pickups[0].confirmedBySteadfast, 0);
+  const d = await orderDetail(orderA.id);
+  assert.equal(d.order.dispatchStatus, "sorted", "handover alone never marks dispatched");
+  assert.ok(d.dispatchHistory.some((e) => e.event === "handed_over" && /Rahim/.test(e.note)));
+});
+
 await step("Steadfast webhook rejects wrong bearer token", async () => {
   const r = await steadfastWebhook({ consignment_id: Number(consignmentA.consignmentId), status: "pending" }, "nope");
   assert.equal(r.status, 401);
@@ -427,6 +449,12 @@ await step("pickup webhook triggers Shopify fulfillment with tracking (partial i
   assert.equal(d.body.order.courierStage, "in_transit");
   assert.equal(d.body.order.dispatchStatus, "dispatched", "dispatched only when Steadfast leaves in_review");
   assert.ok(s.tags.some((t) => t.tags.includes("steadfast-booked")), "booked tag job ran");
+});
+
+await step("Steadfast pickup confirms the rider's handover", async () => {
+  const plan = await call("GET", "/api/ops/pickup");
+  assert.equal(plan.body.parcels.find((p) => p.id === orderA.id).stage, "picked_up");
+  assert.equal(plan.body.pickups[0].confirmedBySteadfast, 1);
 });
 
 await step("repeated webhook and manual fulfill do not double-fulfill", async () => {
@@ -749,6 +777,53 @@ await step("Shopify-app 'In progress' is picked up by dashboard sync even withou
   const o = (await call("GET", "/api/orders?search=%235007")).body.rows[0];
   assert.equal(o.callingStatus, "confirmed");
   assert.ok(o.autoBookAt, "auto-booking timer started from Shopify confirmation");
+});
+
+await step("stuck parcels: silent and slow parcels surface with rider number; calls are logged", async () => {
+  const o = (await call("GET", "/api/orders?search=%235006")).body.rows[0];
+  const d = await orderDetail(o.id);
+  const c = d.consignments.find((x) => !x.superseded);
+  const sixDaysAgo = new Date(Date.now() - 6 * 86_400_000).toISOString();
+  await steadfastWebhook({ notification_type: "delivery_status", consignment_id: Number(c.consignmentId), invoice: c.invoice, status: "pending", tracking_message: "Assigned to rider Karim (01712345678)", updated_at: sixDaysAgo });
+  const r = await call("GET", "/api/ops/stuck");
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  const p = r.body.parcels.find((x) => x.orderName === "#5006");
+  assert.ok(p, "stuck parcel listed");
+  const codes = p.reasons.map((x) => x.code);
+  assert.ok(codes.includes("no_update") && codes.includes("slow_transit"), codes.join(","));
+  assert.deepEqual(p.riderPhones, ["01712345678"]);
+  const dash = await call("GET", "/api/dashboard?days=7");
+  assert.ok(dash.body.pipeline.stuck >= 1, "nav badge count");
+  const empty = await call("POST", `/api/ops/stuck/${p.rowId}/follow-up`, { note: " " });
+  assert.equal(empty.status, 400);
+  const f = await call("POST", `/api/ops/stuck/${p.rowId}/follow-up`, { note: "Customer will receive tomorrow", snoozeDays: 1 });
+  assert.equal(f.status, 200, JSON.stringify(f.body));
+  const hidden = await call("GET", "/api/ops/stuck");
+  assert.ok(!hidden.body.parcels.some((x) => x.orderName === "#5006"), "snoozed");
+  assert.ok(hidden.body.snoozed >= 1);
+  const all = await call("GET", "/api/ops/stuck?all=1");
+  const again = all.body.parcels.find((x) => x.orderName === "#5006");
+  assert.equal(again.snoozed, true);
+  assert.equal(again.followUpNote, "Customer will receive tomorrow");
+  const notes = (await orderDetail(o.id)).notes;
+  assert.ok(notes.some((n) => /Customer will receive tomorrow/.test(n.body)), "follow-up added to order notes");
+});
+
+await step("owner report: orders, calls, courier, COD and returns by district/product", async () => {
+  const from = new Date(Date.now() + 6 * 3_600_000 - 2 * 86_400_000).toISOString().slice(0, 10);
+  const r = await call("GET", `/api/ops/report?from=${from}&to=${today}`);
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  assert.ok(r.body.orders.received >= 5);
+  assert.ok(r.body.orders.confirmed >= 3);
+  assert.ok(r.body.courier.booked >= 3);
+  assert.ok(r.body.courier.delivered >= 1);
+  assert.ok(r.body.courier.dispatched >= 1);
+  assert.ok(r.body.money.collected >= 900);
+  assert.ok(r.body.callers.some((c) => c.confirmed >= 1));
+  assert.equal(typeof r.body.sameDay.beforeCutoff, "number");
+  assert.ok(Array.isArray(r.body.worstDistricts) && Array.isArray(r.body.worstProducts));
+  const bad = await call("GET", `/api/ops/report?from=${today}&to=${from}`);
+  assert.equal(bad.status, 400);
 });
 
 await step("activity log records actions", async () => {

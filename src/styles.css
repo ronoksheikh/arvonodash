@@ -77,3 +77,8 @@ body {
   transition: background-color 180ms ease, box-shadow 180ms ease;
 }
 .scan-side[data-flash="true"] { box-shadow: 0 0 0 4px rgba(255, 255, 255, 0.35) inset; }
+
+@media print {
+  .no-print, .mantine-AppShell-navbar, .mantine-AppShell-header { display: none !important; }
+  .mantine-AppShell-main { padding: 0 !important; }
+}

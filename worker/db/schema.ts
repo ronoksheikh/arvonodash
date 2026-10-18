@@ -154,6 +154,9 @@ export const orders = sqliteTable(
     sortedAt: text("sorted_at"),
     sortedBy: text("sorted_by"),
     sortBatchId: text("sort_batch_id"),
+    // Courier handover (pickup checklist): which pickup took the parcel, and when
+    pickupId: text("pickup_id"),
+    handedOverAt: text("handed_over_at"),
     dispatchedAt: text("dispatched_at"), // when Steadfast confirmed pickup
     dispatchedBy: text("dispatched_by"), // legacy (manual handover); unused for new records
     courierReceivedAt: text("courier_received_at"),
@@ -184,6 +187,7 @@ export const orders = sqliteTable(
     index("orders_label_idx").on(t.labelStatus, t.bookedAt),
     index("orders_print_job_idx").on(t.printJobId),
     index("orders_dispatch_idx").on(t.dispatchStatus, t.bookedAt),
+    index("orders_pickup_idx").on(t.pickupId),
     uniqueIndex("orders_tracking_token_idx").on(t.trackingToken),
   ],
 );
@@ -215,6 +219,11 @@ export const consignments = sqliteTable(
     lastMessage: text("last_message"),
     isFinal: integer("is_final", { mode: "boolean" }).notNull().default(false),
     superseded: integer("superseded", { mode: "boolean" }).notNull().default(false), // replaced by a rebooking
+    // Stuck-parcel follow-up (calls to rider / customer)
+    followUpNote: text("follow_up_note"),
+    followUpAt: text("follow_up_at"),
+    followUpBy: text("follow_up_by"),
+    snoozedUntil: text("snoozed_until"),
     paymentId: text("payment_id"),
     settledAt: text("settled_at"),
     createdBy: integer("created_by"),
@@ -463,4 +472,22 @@ export const sortBatches = sqliteTable(
     scannedCount: integer("scanned_count").notNull().default(0),
   },
   (t) => [index("sort_batches_started_idx").on(t.startedAt)],
+);
+
+/** A courier pickup: the rider who collected the scanned parcels, and how many. */
+export const pickups = sqliteTable(
+  "pickups",
+  {
+    id: text("id").primaryKey(),
+    businessDate: text("business_date").notNull(),
+    riderName: text("rider_name"),
+    riderPhone: text("rider_phone"),
+    readyCount: integer("ready_count").notNull().default(0), // scanned parcels when the handover started
+    handedCount: integer("handed_count").notNull().default(0),
+    leftBehindCount: integer("left_behind_count").notNull().default(0), // ship-today parcels not scanned
+    note: text("note"),
+    handedBy: text("handed_by").notNull(),
+    createdAt: text("created_at").notNull(),
+  },
+  (t) => [index("pickups_date_idx").on(t.businessDate)],
 );

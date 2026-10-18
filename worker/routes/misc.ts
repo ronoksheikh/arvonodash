@@ -8,6 +8,7 @@ import { nowIso, startOfDayIso } from "../lib/util";
 import { logActivity } from "../services/activity";
 import { ATTENTION_SQL, customerHistory, refreshRiskFlags } from "../services/orders";
 import { getSettings } from "../services/settings";
+import { stuckParcels } from "../services/stuck";
 import * as steadfast from "../services/steadfast";
 import { RETURN_FOLLOW_UPS, RETURN_STATUSES } from "../../shared/constants";
 
@@ -132,7 +133,7 @@ dashboardRoutes.get("/", async (c) => {
   return c.json({
     days,
     today: { orders: todayOrders, revenue: todayRevenue?.v ?? 0 },
-    pipeline: { toCall, readyToBook, unbooked, booked, inTransit, delivered, returned, attention },
+    pipeline: { toCall, readyToBook, unbooked, booked, inTransit, delivered, returned, attention, stuck: (await stuckParcels(db, await getSettings(db))).parcels.length },
     oldestUnbookedAt: oldestUnbooked?.at ?? null,
     cod: {
       booked: cod?.booked ?? 0,

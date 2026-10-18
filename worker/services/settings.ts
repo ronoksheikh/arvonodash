@@ -19,6 +19,17 @@ export type AppSettings = {
   autoBookEnabled: boolean;
   autoBookDelayMinutes: number;
   autoBookSkipFlagged: boolean;
+  /** Orders confirmed before this local time (HH:MM, Asia/Dhaka) ship the same day. */
+  cutoffTime: string;
+  /** Usual courier pickup time (HH:MM), for the countdown on the pickup page. */
+  pickupTime: string;
+  /** Picked-up parcel with no Steadfast update for this many days is stuck. */
+  stuckNoUpdateDays: number;
+  /** Normal delivery time when a district has too little history to learn from. */
+  transitDaysDhaka: number;
+  transitDaysOutside: number;
+  /** Handed to the rider but Steadfast still shows in_review after this many hours. */
+  handoverConfirmHours: number;
   businessName: string;
   businessPhone: string;
   businessAddress: string;
@@ -38,6 +49,12 @@ export const DEFAULT_SETTINGS: AppSettings = {
   autoBookEnabled: true,
   autoBookDelayMinutes: 10,
   autoBookSkipFlagged: true,
+  cutoffTime: "16:00",
+  pickupTime: "18:00",
+  stuckNoUpdateDays: 3,
+  transitDaysDhaka: 3,
+  transitDaysOutside: 5,
+  handoverConfirmHours: 12,
   businessName: "ARVONO",
   businessPhone: "",
   businessAddress: "",
@@ -55,7 +72,10 @@ export async function saveSettings(db: DB, patch: Partial<AppSettings>): Promise
   for (const key of Object.keys(DEFAULT_SETTINGS) as (keyof AppSettings)[]) {
     if (key in patch && patch[key] !== undefined) {
       const expected = typeof DEFAULT_SETTINGS[key];
-      if (typeof patch[key] === expected) (next as Record<string, unknown>)[key] = patch[key];
+      if (typeof patch[key] !== expected) continue;
+      if ((key === "cutoffTime" || key === "pickupTime") && !/^([01]\d|2[0-3]):[0-5]\d$/.test(String(patch[key]))) continue;
+      if (typeof patch[key] === "number" && (!Number.isFinite(patch[key]) || (patch[key] as number) < 0)) continue;
+      (next as Record<string, unknown>)[key] = patch[key];
     }
   }
   await setValue(db, APP_KEY, next);
