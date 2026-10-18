@@ -112,10 +112,35 @@ await step("connections are configured from the dashboard (no secrets file)", as
   assert.equal(r.body.credentials.SHOPIFY_CLIENT_SECRET.hint, "••••cret", "secrets only returned masked");
   const after = await call("GET", "/api/settings");
   assert.equal(after.body.connections.shopify.configured, true);
+  for (const k of ["SHOPIFY_SHOP_DOMAIN", "SHOPIFY_CLIENT_ID", "SHOPIFY_CLIENT_SECRET", "STEADFAST_API_KEY", "STEADFAST_WEBHOOK_TOKEN"]) {
+    assert.equal(after.body.credentials[k].source, "dashboard", `${k} stays editable in Settings`);
+  }
   assert.equal(after.body.connections.shopify.shopDomain, "arvono-test.myshopify.com");
   assert.equal(after.body.connections.steadfast.configured, true);
   assert.ok(!JSON.stringify(after.body).includes(SHOPIFY_SECRET), "client secret never sent to browser");
   SF_TOKEN = after.body.steadfastWebhookToken;
+});
+
+await step("credentials can be changed and removed from Settings", async () => {
+  const oldToken = SF_TOKEN;
+  const short = await call("PUT", "/api/settings/connections", { STEADFAST_WEBHOOK_TOKEN: "short" });
+  assert.equal(short.status, 400);
+  const custom = "arvono-custom-webhook-token-123";
+  await call("PUT", "/api/settings/connections", { STEADFAST_WEBHOOK_TOKEN: custom });
+  const s1 = await call("GET", "/api/settings");
+  assert.equal(s1.body.steadfastWebhookToken, custom);
+  await sleep(5200); // credential cache window
+  const rejected = await call("POST", "/webhooks/steadfast", { consignment_id: 1, status: "pending" }, { auth: false, headers: { Authorization: `Bearer ${oldToken}` } });
+  assert.equal(rejected.status, 401, "old token stops working");
+  SF_TOKEN = custom;
+  await call("PUT", "/api/settings/connections", { STEADFAST_API_KEY: null });
+  const s2 = await call("GET", "/api/settings");
+  assert.equal(s2.body.connections.steadfast.configured, false);
+  await call("PUT", "/api/settings/connections", { STEADFAST_API_KEY: "sf-key" });
+  const s3 = await call("GET", "/api/settings");
+  assert.equal(s3.body.connections.steadfast.configured, true);
+  const cannotRemove = await call("PUT", "/api/settings/connections", { STEADFAST_WEBHOOK_TOKEN: null });
+  assert.equal(cannotRemove.status, 400);
 });
 
 await step("API rejects missing CSRF header and anonymous access", async () => {

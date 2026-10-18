@@ -66,6 +66,10 @@ settingsRoutes.put("/connections", requirePerm("settings.manage"), async (c) => 
     if (v === null) delete next[k];
     else if (typeof v === "string" && v.trim()) next[k] = k === "SHOPIFY_SHOP_DOMAIN" ? normalizeShopDomain(v) : v.trim();
   }
+  if (typeof body.STEADFAST_WEBHOOK_TOKEN === "string" && body.STEADFAST_WEBHOOK_TOKEN.trim().length < 16) {
+    return c.json({ error: "Webhook token must be at least 16 characters" }, 400);
+  }
+  if (body.STEADFAST_WEBHOOK_TOKEN === null) return c.json({ error: "The webhook token can be changed but not removed" }, 400);
   if (next.SHOPIFY_SHOP_DOMAIN && !/^[a-z0-9][a-z0-9-]*\.myshopify\.com$/.test(next.SHOPIFY_SHOP_DOMAIN)) {
     return c.json({ error: "Store domain must be the permanent *.myshopify.com domain (e.g. arvono.myshopify.com)" }, 400);
   }

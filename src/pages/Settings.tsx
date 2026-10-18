@@ -3,6 +3,7 @@ import {
   Alert, Badge, Button, Card, SegmentedControl, Checkbox, ColorSwatch, Group, Modal, NumberInput, PasswordInput, Radio, Select, SimpleGrid, Stack, Switch, Table, Tabs, Text, TextInput, ActionIcon, Code, Textarea, Tooltip,
 } from "@mantine/core";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { modals } from "@mantine/modals";
 import { CheckCircle2, XCircle, Plug, Plus, Trash2, Webhook, Star } from "lucide-react";
 import { api, del, notifyError, notifySuccess, patch, post, put } from "../api";
 import { useAuth, useCan } from "../auth";
@@ -70,8 +71,8 @@ export default function SettingsPage() {
 
 type CredInfo = { set: boolean; source: "worker_secret" | "dashboard" | null; hint: string | null };
 
-function CredentialField({ name, label, description, info, secret, value, onChange, disabled }: {
-  name: string; label: string; description?: string; info?: CredInfo; secret?: boolean; value: string; onChange: (v: string) => void; disabled?: boolean;
+function CredentialField({ name, label, description, info, secret, value, onChange, disabled, onClear }: {
+  name: string; label: string; description?: string; info?: CredInfo; secret?: boolean; value: string; onChange: (v: string) => void; disabled?: boolean; onClear?: () => void;
 }) {
   const fromSecret = info?.source === "worker_secret";
   const placeholder = info?.set ? `${info.hint ?? "Saved"} — leave empty to keep` : undefined;
@@ -84,9 +85,26 @@ function CredentialField({ name, label, description, info, secret, value, onChan
     disabled: disabled || fromSecret,
     autoComplete: "off",
     name,
-    rightSection: info?.set ? <CheckCircle2 size={15} color="var(--mantine-color-teal-6)" /> : undefined,
+    rightSection: info?.set && !secret ? <CheckCircle2 size={15} color="var(--mantine-color-teal-6)" /> : undefined,
   };
-  return secret ? <PasswordInput {...props} /> : <TextInput {...props} />;
+  const field = secret ? <PasswordInput {...props} /> : <TextInput {...props} />;
+  const canClear = onClear && info?.set && info.source === "dashboard" && !disabled;
+  return (
+    <div>
+      {field}
+      {canClear && (
+        <Button size="compact-xs" variant="subtle" color="red" mt={4} onClick={() => modals.openConfirmModal({
+          title: `Remove ${label}?`,
+          children: <Text size="sm">The saved value is deleted. The connection stops working until a new value is saved.</Text>,
+          labels: { confirm: "Remove", cancel: "Cancel" },
+          confirmProps: { color: "red" },
+          onConfirm: onClear,
+        })}>
+          Remove saved {label.toLowerCase()}
+        </Button>
+      )}
+    </div>
+  );
 }
 
 function Connections({ d }: { d: SettingsData }) {
@@ -128,6 +146,9 @@ function Connections({ d }: { d: SettingsData }) {
     save.mutate(body);
   };
   const dirty = (keys: string[]) => keys.some((k) => form[k]?.trim());
+  const clear = (k: string) => () => save.mutate({ [k]: null });
+  // Switching to client credentials must drop a saved access token, which would otherwise take precedence.
+  const staleToken = authMode === "client" && creds?.SHOPIFY_ACCESS_TOKEN.source === "dashboard";
   const shopifyKeys = ["SHOPIFY_SHOP_DOMAIN", "SHOPIFY_CLIENT_ID", "SHOPIFY_CLIENT_SECRET", "SHOPIFY_ACCESS_TOKEN", "SHOPIFY_WEBHOOK_SECRET"];
   const steadfastKeys = ["STEADFAST_API_KEY", "STEADFAST_SECRET_KEY"];
 
@@ -149,13 +170,13 @@ function Connections({ d }: { d: SettingsData }) {
           />
           {authMode === "client" ? (
             <>
-              <CredentialField name="client_id" label="Client ID" info={creds?.SHOPIFY_CLIENT_ID} value={form.SHOPIFY_CLIENT_ID ?? ""} onChange={set("SHOPIFY_CLIENT_ID")} disabled={disabled} />
-              <CredentialField name="client_secret" label="Client secret" description="Also used to verify webhook signatures" secret info={creds?.SHOPIFY_CLIENT_SECRET} value={form.SHOPIFY_CLIENT_SECRET ?? ""} onChange={set("SHOPIFY_CLIENT_SECRET")} disabled={disabled} />
+              <CredentialField name="client_id" label="Client ID" info={creds?.SHOPIFY_CLIENT_ID} value={form.SHOPIFY_CLIENT_ID ?? ""} onChange={set("SHOPIFY_CLIENT_ID")} disabled={disabled} onClear={clear("SHOPIFY_CLIENT_ID")} />
+              <CredentialField name="client_secret" label="Client secret" description="Also used to verify webhook signatures" secret info={creds?.SHOPIFY_CLIENT_SECRET} value={form.SHOPIFY_CLIENT_SECRET ?? ""} onChange={set("SHOPIFY_CLIENT_SECRET")} disabled={disabled} onClear={clear("SHOPIFY_CLIENT_SECRET")} />
             </>
           ) : (
             <>
-              <CredentialField name="access_token" label="Admin API access token" description="shpat_… from a legacy custom app" secret info={creds?.SHOPIFY_ACCESS_TOKEN} value={form.SHOPIFY_ACCESS_TOKEN ?? ""} onChange={set("SHOPIFY_ACCESS_TOKEN")} disabled={disabled} />
-              <CredentialField name="webhook_secret" label="Webhook signing secret" description="Shown in Shopify admin → Notifications → Webhooks" secret info={creds?.SHOPIFY_WEBHOOK_SECRET} value={form.SHOPIFY_WEBHOOK_SECRET ?? ""} onChange={set("SHOPIFY_WEBHOOK_SECRET")} disabled={disabled} />
+              <CredentialField name="access_token" label="Admin API access token" description="shpat_… from a legacy custom app" secret info={creds?.SHOPIFY_ACCESS_TOKEN} value={form.SHOPIFY_ACCESS_TOKEN ?? ""} onChange={set("SHOPIFY_ACCESS_TOKEN")} disabled={disabled} onClear={clear("SHOPIFY_ACCESS_TOKEN")} />
+              <CredentialField name="webhook_secret" label="Webhook signing secret" description="Shown in Shopify admin → Notifications → Webhooks" secret info={creds?.SHOPIFY_WEBHOOK_SECRET} value={form.SHOPIFY_WEBHOOK_SECRET ?? ""} onChange={set("SHOPIFY_WEBHOOK_SECRET")} disabled={disabled} onClear={clear("SHOPIFY_WEBHOOK_SECRET")} />
             </>
           )}
           <Text size="sm" c="dimmed">Webhook endpoint (registered automatically)</Text>
@@ -178,9 +199,10 @@ function Connections({ d }: { d: SettingsData }) {
               </Alert>
             )
           )}
+          {staleToken && <Alert color="orange" variant="light">A saved Admin API access token is still active and overrides the Client ID/secret. Click Save to remove it.</Alert>}
           {!disabled && (
             <Group gap="xs">
-              <Button size="xs" disabled={!dirty(shopifyKeys)} loading={save.isPending} onClick={() => saveSection(shopifyKeys, authMode === "client" ? (creds?.SHOPIFY_ACCESS_TOKEN.source === "dashboard" ? ["SHOPIFY_ACCESS_TOKEN"] : []) : [])}>Save</Button>
+              <Button size="xs" disabled={!dirty(shopifyKeys) && !staleToken} loading={save.isPending} onClick={() => saveSection(shopifyKeys, staleToken ? ["SHOPIFY_ACCESS_TOKEN"] : [])}>Save</Button>
               <Button variant="default" size="xs" leftSection={<Plug size={14} />} disabled={!shopify.configured} loading={testShopify.isPending} onClick={() => testShopify.mutate()}>Test connection</Button>
               <Button variant="default" size="xs" leftSection={<Webhook size={14} />} disabled={!shopify.configured} loading={registerHooks.isPending} onClick={() => registerHooks.mutate()}>Register webhooks</Button>
             </Group>
@@ -193,8 +215,8 @@ function Connections({ d }: { d: SettingsData }) {
           <Badge color={steadfast.configured ? "teal" : "red"}>{steadfast.configured ? "Configured" : "Not configured"}</Badge>
         </Group>
         <Stack gap="sm">
-          <CredentialField name="sf_key" label="API key" description="Steadfast panel → API" secret info={creds?.STEADFAST_API_KEY} value={form.STEADFAST_API_KEY ?? ""} onChange={set("STEADFAST_API_KEY")} disabled={disabled} />
-          <CredentialField name="sf_secret" label="Secret key" secret info={creds?.STEADFAST_SECRET_KEY} value={form.STEADFAST_SECRET_KEY ?? ""} onChange={set("STEADFAST_SECRET_KEY")} disabled={disabled} />
+          <CredentialField name="sf_key" label="API key" description="Steadfast panel → API" secret info={creds?.STEADFAST_API_KEY} value={form.STEADFAST_API_KEY ?? ""} onChange={set("STEADFAST_API_KEY")} disabled={disabled} onClear={clear("STEADFAST_API_KEY")} />
+          <CredentialField name="sf_secret" label="Secret key" secret info={creds?.STEADFAST_SECRET_KEY} value={form.STEADFAST_SECRET_KEY ?? ""} onChange={set("STEADFAST_SECRET_KEY")} disabled={disabled} onClear={clear("STEADFAST_SECRET_KEY")} />
           {testSteadfast.data && (testSteadfast.data.ok ? <Alert color="teal" variant="light">Connected. Current balance {money(testSteadfast.data.balance, true)}</Alert> : <Alert color="red" variant="light">{testSteadfast.data.error}</Alert>)}
           {!disabled && (
             <Group gap="xs">
@@ -208,7 +230,27 @@ function Connections({ d }: { d: SettingsData }) {
           <Text size="xs" c="dimmed">Auth Token (Bearer)</Text>
           {d.steadfastWebhookToken ? <Copyable value={d.steadfastWebhookToken} /> : <Text size="sm" c="dimmed">Hidden</Text>}
           {!disabled && creds?.STEADFAST_WEBHOOK_TOKEN.source !== "worker_secret" && (
-            <Button size="compact-xs" variant="subtle" color="red" w="fit-content" loading={regenerate.isPending} onClick={() => regenerate.mutate()}>Regenerate token</Button>
+            <>
+              <Group gap="xs" align="flex-end">
+                <TextInput
+                  size="xs"
+                  style={{ flex: 1 }}
+                  label="Use your own token"
+                  description="At least 16 characters. The same value must be entered in the Steadfast panel."
+                  value={form.STEADFAST_WEBHOOK_TOKEN ?? ""}
+                  onChange={(e) => set("STEADFAST_WEBHOOK_TOKEN")(e.currentTarget.value)}
+                  autoComplete="off"
+                />
+                <Button size="xs" disabled={(form.STEADFAST_WEBHOOK_TOKEN?.trim().length ?? 0) < 16} loading={save.isPending} onClick={() => saveSection(["STEADFAST_WEBHOOK_TOKEN"])}>Save token</Button>
+              </Group>
+              <Button size="compact-xs" variant="subtle" color="red" w="fit-content" loading={regenerate.isPending} onClick={() => modals.openConfirmModal({
+                title: "Generate a new webhook token?",
+                children: <Text size="sm">Steadfast webhooks will be rejected until you paste the new token into the Steadfast panel. The cron keeps polling statuses meanwhile.</Text>,
+                labels: { confirm: "Generate", cancel: "Cancel" },
+                confirmProps: { color: "red" },
+                onConfirm: () => regenerate.mutate(),
+              })}>Generate new random token</Button>
+            </>
           )}
         </Stack>
       </Card>

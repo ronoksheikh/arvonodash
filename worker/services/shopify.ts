@@ -3,6 +3,7 @@ import type { DB } from "../db";
 import type { LineItem } from "../db/schema";
 import { getValue, setValue } from "./settings";
 import { gidToId, sleep, toNumber, HttpError } from "../lib/util";
+import { sha256Hex } from "../lib/crypto";
 
 /**
  * Shopify GraphQL Admin API client.
@@ -12,7 +13,7 @@ import { gidToId, sleep, toNumber, HttpError } from "../lib/util";
  * whose tokens expire after 24h and are cached in D1.
  */
 
-type TokenCache = { token: string; expiresAt: number };
+type TokenCache = { token: string; expiresAt: number; issuedFor?: string };
 const TOKEN_KEY = "shopify.token";
 let memoryToken: TokenCache | null = null;
 
@@ -43,11 +44,13 @@ async function getAccessToken(env: Env, db: DB, forceRefresh = false): Promise<s
   if (!env.SHOPIFY_CLIENT_ID || !env.SHOPIFY_CLIENT_SECRET) {
     throw new HttpError(503, "Shopify credentials are not configured");
   }
+  // Bind cached tokens to the store + app + secret that issued them.
+  const issuedFor = await sha256Hex(`${env.SHOPIFY_SHOP_DOMAIN}|${env.SHOPIFY_CLIENT_ID}|${env.SHOPIFY_CLIENT_SECRET}`);
   const margin = 5 * 60_000;
   if (!forceRefresh) {
-    if (memoryToken && memoryToken.expiresAt - margin > Date.now()) return memoryToken.token;
+    if (memoryToken && memoryToken.issuedFor === issuedFor && memoryToken.expiresAt - margin > Date.now()) return memoryToken.token;
     const cached = await getValue<TokenCache>(db, TOKEN_KEY);
-    if (cached && cached.expiresAt - margin > Date.now()) {
+    if (cached && cached.issuedFor === issuedFor && cached.expiresAt - margin > Date.now()) {
       memoryToken = cached;
       return cached.token;
     }
@@ -66,7 +69,7 @@ async function getAccessToken(env: Env, db: DB, forceRefresh = false): Promise<s
     throw new HttpError(502, `Shopify token request failed (${res.status}): ${text.slice(0, 300)}`);
   }
   const json = (await res.json()) as { access_token: string; expires_in: number };
-  memoryToken = { token: json.access_token, expiresAt: Date.now() + json.expires_in * 1000 };
+  memoryToken = { token: json.access_token, expiresAt: Date.now() + json.expires_in * 1000, issuedFor };
   await setValue(db, TOKEN_KEY, memoryToken);
   return json.access_token;
 }

@@ -32,7 +32,7 @@ const SECRET_KEYS = new Set<keyof Credentials>(["SHOPIFY_CLIENT_SECRET", "SHOPIF
 
 const ROW_KEY = "credentials";
 let cache: { at: number; value: Credentials } | null = null;
-const CACHE_MS = 30_000;
+const CACHE_MS = 5_000;
 
 async function aesKey(secret: string) {
   const raw = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(secret));
@@ -96,7 +96,7 @@ export async function hydrateEnv(env: Env): Promise<Env> {
     // Before migrations ran (fresh database) or with a wrong encryption key: fall back to env only.
     console.error("credentials unavailable:", (err as Error).message);
   }
-  const merged: Env = { ...env };
+  const merged: Env = { ...env, CREDENTIALS_FROM_ENV: CREDENTIAL_KEYS.filter((k) => isSet(env[k])) };
   for (const k of CREDENTIAL_KEYS) {
     if (!isSet(env[k]) && isSet(creds[k])) (merged as unknown as Record<string, unknown>)[k] = creds[k]!.trim();
   }
@@ -113,7 +113,8 @@ export async function describeCredentials(env: Env) {
   const creds = await loadCredentials(env, true);
   return Object.fromEntries(
     CREDENTIAL_KEYS.map((k) => {
-      const fromEnv = isSet(env[k]);
+      // env here is already hydrated, so use the recorded origin rather than presence.
+      const fromEnv = env.CREDENTIALS_FROM_ENV ? env.CREDENTIALS_FROM_ENV.includes(k) : isSet(env[k]);
       const v = fromEnv ? (env[k] as string) : creds[k];
       const secret = SECRET_KEYS.has(k);
       return [
