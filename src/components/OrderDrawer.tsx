@@ -12,6 +12,8 @@ import { useCan } from "../auth";
 import { useCountdown, CallingBadge, Copyable, CustomStatusBadge, DispatchBadge, ErrorState, FulfillmentBadge, KeyValue, LabelBadge, LoadingState, RiskBadge, ShopifySyncBadge, StageBadge, SteadfastStatusBadge, useStatuses, ReturnStatusBadge } from "./ui";
 import { CallingPanel } from "./Calling";
 import { FraudCard } from "./Fraud";
+import { JourneyTab } from "./Journey";
+import { SmsTab } from "./Sms";
 import { PARTIAL_OUTCOME_LABEL } from "../../shared/delivery";
 import { ago, dateTime, money, titleCase } from "../format";
 import { DISPATCH_EVENTS, NOTE_KINDS, RISK_FLAGS, STEADFAST_STATUSES } from "../../shared/constants";
@@ -56,13 +58,15 @@ export function OrderDrawer({ orderId, onClose, onChanged }: { orderId: number |
               <Tabs.Tab value="booking">Booking</Tabs.Tab>
               <Tabs.Tab value="courier" rightSection={d.consignments.length ? <Badge size="xs" variant="light">{d.consignments.length}</Badge> : null}>Courier</Tabs.Tab>
               <Tabs.Tab value="notes" rightSection={d.notes.length ? <Badge size="xs" variant="light">{d.notes.length}</Badge> : null}>Notes</Tabs.Tab>
-              <Tabs.Tab value="activity">Activity</Tabs.Tab>
+              <Tabs.Tab value="sms" rightSection={d.sms.length ? <Badge size="xs" variant="light">{d.sms.length}</Badge> : null}>SMS</Tabs.Tab>
+              <Tabs.Tab value="journey">Journey</Tabs.Tab>
             </Tabs.List>
             <Tabs.Panel value="overview" py="lg"><OverviewTab d={d} refresh={refresh} goBooking={() => setTab("booking")} /></Tabs.Panel>
             <Tabs.Panel value="booking" py="lg"><BookingTab d={d} refresh={refresh} goCourier={() => setTab("courier")} /></Tabs.Panel>
             <Tabs.Panel value="courier" py="lg"><CourierTab d={d} refresh={refresh} /></Tabs.Panel>
             <Tabs.Panel value="notes" py="lg"><NotesTab d={d} refresh={refresh} /></Tabs.Panel>
-            <Tabs.Panel value="activity" py="lg"><ActivityTab d={d} /></Tabs.Panel>
+            <Tabs.Panel value="sms" py="lg"><SmsTab orderId={d.order.id} phone={d.order.phone} messages={d.sms} refresh={refresh} /></Tabs.Panel>
+            <Tabs.Panel value="journey" py="lg"><JourneyTab journey={d.journey} activity={d.activity} /></Tabs.Panel>
           </Tabs>
         </>
       ) : null}
@@ -103,7 +107,7 @@ function DrawerHeader({ d, onClose, refresh }: { d: OrderDetail; onClose: () => 
         <div>
           <Group gap="xs">
             <Title order={3} fw={600}>{o.name}</Title>
-            {o.cancelledAt && <Badge color="dark">Cancelled</Badge>}
+            {o.cancelledAt && <Badge color="dark">{o.shopifyDeletedAt ? "Deleted in Shopify" : "Cancelled"}</Badge>}
             {o.archived && <Badge color="gray">Archived</Badge>}
           </Group>
           <Text size="sm" c="dimmed" mt={2}>
@@ -196,10 +200,18 @@ function OverviewTab({ d, refresh, goBooking }: { d: OrderDetail; refresh: () =>
           )}
         </Alert>
       )}
-      {o.cancelledAt && o.courierStage !== "unbooked" && !["returned", "cancelled", "delivered"].includes(o.courierStage) && (
-        <Alert color="red" variant="light" icon={<AlertTriangle size={18} />} title="Cancelled in Shopify after booking">
-          Contact Steadfast to stop this parcel ({o.cancelReason ? titleCase(o.cancelReason) : "no reason given"}).
+      {o.cancelledAt && o.courierStage !== "unbooked" && !["returned", "cancelled", "delivered", "partial_delivered"].includes(o.courierStage) && (
+        <Alert color="red" variant="light" icon={<AlertTriangle size={18} />} title={o.shopifyDeletedAt ? "Deleted in Shopify after booking" : "Cancelled in Shopify after booking"}>
+          {o.courierStage === "booked" && o.dispatchStatus !== "dispatched" ? (
+            <>Keep this parcel here: don't hand it to the rider. Cancel it in the Steadfast portal (Steadfast has no cancel API); the dashboard updates by itself once Steadfast shows it cancelled.</>
+          ) : (
+            <>Steadfast already has the parcel. Create a return request from the Courier tab so it comes back.</>
+          )}
+          {!o.shopifyDeletedAt && <> Reason: {o.cancelReason ? titleCase(o.cancelReason) : "none given"}.</>}
         </Alert>
+      )}
+      {o.shopifyDeletedAt && o.courierStage === "unbooked" && (
+        <Alert color="gray" variant="light" title="Deleted in Shopify">This order no longer exists in Shopify. Nothing was sent to Steadfast, so there's nothing to stop.</Alert>
       )}
 
       <SimpleGrid cols={{ base: 1, sm: 2 }} spacing="md">
@@ -740,22 +752,6 @@ function NotesTab({ d, refresh }: { d: OrderDetail; refresh: () => void }) {
         ))
       )}
     </Stack>
-  );
-}
-
-function ActivityTab({ d }: { d: OrderDetail }) {
-  if (!d.activity.length) return <Text size="sm" c="dimmed">No activity recorded.</Text>;
-  return (
-    <Timeline bulletSize={14} lineWidth={2}>
-      {d.activity.map((a) => (
-        <Timeline.Item key={a.id} title={<Text size="sm"><b>{a.actor}</b> <Text span c="dimmed">{titleCase(a.action.replace(".", " · "))}</Text></Text>}>
-          {a.details && typeof a.details === "object" && Object.keys(a.details as object).length > 0 ? (
-            <Text size="xs" c="dimmed" className="mono" lineClamp={3}>{JSON.stringify(a.details)}</Text>
-          ) : null}
-          <Text size="xs" c="dimmed">{dateTime(a.createdAt)}</Text>
-        </Timeline.Item>
-      ))}
-    </Timeline>
   );
 }
 

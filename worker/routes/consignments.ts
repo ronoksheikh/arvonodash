@@ -191,7 +191,7 @@ consignmentRoutes.post("/:id{[0-9]+}/release", requirePerm("courier.manage"), as
   // Orders that travelled in this parcel become bookable on their own again.
   await detachCombined(db, row.id);
   await onNotPrintable(db, row.orderId, "Released for rebooking", c.get("user"));
-  await db.update(orders).set({ dispatchStatus: "pending", sortedAt: null, sortedBy: null, sortBatchId: null, dispatchedAt: null, dispatchedBy: null, courierReceivedAt: null }).where(eq(orders.id, row.orderId));
+  await db.update(orders).set({ dispatchStatus: "pending", sortedAt: null, sortedBy: null, sortBatchId: null, pickupId: null, handedOverAt: null, shipBy: null, dispatchedAt: null, dispatchedBy: null, courierReceivedAt: null }).where(eq(orders.id, row.orderId));
   await logActivity(db, c.get("user"), "courier.released_for_rebooking", { entityType: "consignment", entityId: row.consignmentId ?? row.invoice, orderId: row.orderId });
   return c.json({ ok: true });
 });

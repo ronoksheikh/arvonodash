@@ -6,3 +6,7 @@
 # SHOPIFY_CLIENT_SECRET=
 # STEADFAST_API_KEY=
 # STEADFAST_SECRET_KEY=
+# Customer SMS (server-side only; never stored in the database or sent to the browser)
+# SMS_API_KEY=
+# SMS_SENDER_ID=
+# SMS_API_URL=https://api.sms.net.bd

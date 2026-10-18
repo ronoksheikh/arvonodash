@@ -5,8 +5,11 @@
   "compatibility_date": "2026-10-01",
   "observability": { "enabled": true },
   "assets": {
+    "binding": "ASSETS",
     "not_found_handling": "single-page-application",
-    "run_worker_first": ["/api/*", "/webhooks/*"]
+    // The Worker sees every request so the tracking domain (track.arvono.store) can be told apart
+    // from the dashboard; dashboard assets are passed straight through to the asset store.
+    "run_worker_first": true
   },
   "d1_databases": [
     {
@@ -20,6 +23,9 @@
   // Every 5 minutes: background jobs + courier status polling.
   // Hourly / daily work (Shopify reconciliation, COD settlements) is scheduled inside the handler.
   "triggers": { "crons": ["* * * * *"] },
+  // Customer tracking domain. Uncomment once arvono.store is on Cloudflare DNS (see docs/TRACKING_DOMAIN.md);
+  // Cloudflare then creates the DNS record and the HTTPS certificate. Also set it in Settings → Tracking page.
+  // "routes": [{ "pattern": "track.arvono.store", "custom_domain": true }],
   // Shopify / Steadfast credentials are entered in the dashboard (Settings → Connections).
   // Worker secrets with the same names (wrangler secret put …) override them if you prefer.
   "vars": {

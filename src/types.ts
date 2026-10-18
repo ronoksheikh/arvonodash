@@ -127,6 +127,9 @@ export type Order = Omit<OrderListRow, "itemCount" | "trackingCode" | "consignme
   sortedAt: string | null;
   sortedBy: string | null;
   dispatchedAt: string | null;
+  shipBy: string | null;
+  carryOverCount: number;
+  shopifyDeletedAt: string | null;
 };
 
 export type CallLog = { id: number; outcome: string; note: string | null; callbackAt: string | null; userName: string | null; createdAt: string };
@@ -240,4 +243,39 @@ export type OrderDetail = {
   dispatchHistory: DispatchEvent[];
   shopifyUrl: string;
   trackingPageUrl: string | null;
+  journey: Journey;
+  sms: SmsMessage[];
+};
+
+export type JourneySource = "shopify" | "call" | "booking" | "warehouse" | "courier" | "sms" | "staff" | "system";
+export type Journey = {
+  entries: { at: string; source: JourneySource; title: string; detail: string | null; actor: string | null; tone?: "good" | "warn" | "bad" }[];
+  milestones: {
+    placed: string;
+    confirmed: string | null;
+    booked: string | null;
+    printed: string | null;
+    packed: string | null;
+    handedOver: string | null;
+    pickedUp: string | null;
+    outcome: string | null;
+    outcomeKind: "delivered" | "partial_delivered" | "returned" | null;
+    paid: string | null;
+  };
+};
+
+export type SmsMessage = {
+  id: number;
+  orderId: number | null;
+  orderName?: string | null;
+  phone: string;
+  body: string;
+  trigger: string;
+  status: "queued" | "sent" | "failed" | "skipped";
+  providerCode: number | null;
+  providerMessage: string | null;
+  segments: number;
+  sentBy: string;
+  createdAt: string;
+  sentAt: string | null;
 };

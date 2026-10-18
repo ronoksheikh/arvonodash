@@ -71,23 +71,29 @@ export async function addEvents(db: DB, rows: { orderId: number; event: string; 
 // Hooks called by booking / courier updates
 
 /** A fresh booking (or rebooking) makes the order printable again with a new tracking code. */
-export async function onBooked(db: DB, orderId: number, consignmentRowId: number, actor: Actor) {
+export async function onBooked(db: DB, orderId: number, consignmentRowId: number, actor: Actor, shipBy: string) {
   await db
     .update(orders)
-    .set({ labelStatus: "unprinted", bookedAt: nowIso(), printJobId: null, reservedUntil: null, dispatchStatus: "pending", sortedAt: null, sortedBy: null, sortBatchId: null, pickupId: null, handedOverAt: null, dispatchedAt: null, dispatchedBy: null, courierReceivedAt: null })
+    .set({ labelStatus: "unprinted", bookedAt: nowIso(), shipBy, carryOverCount: 0, printJobId: null, reservedUntil: null, dispatchStatus: "pending", sortedAt: null, sortedBy: null, sortBatchId: null, pickupId: null, handedOverAt: null, dispatchedAt: null, dispatchedBy: null, courierReceivedAt: null })
     .where(eq(orders.id, orderId));
-  await addEvents(db, [{ orderId, event: "label_ready", consignmentRowId }], actor);
+  await addEvents(db, [{ orderId, event: "label_ready", consignmentRowId, note: `Ships with the pickup on ${shipBy}` }], actor);
 }
 
 /** Steadfast picked the parcel up (status left in_review): the order is dispatched. */
 export async function onCourierReceived(db: DB, orderId: number, consignmentRowId: number, at: string) {
+  const before = await db.select({ sortedAt: orders.sortedAt, handedOverAt: orders.handedOverAt, combined: orders.combinedIntoOrderId }).from(orders).where(eq(orders.id, orderId)).get();
   const row = await db
     .update(orders)
-    .set({ dispatchStatus: "dispatched", dispatchedAt: at, courierReceivedAt: at })
+    // Steadfast has it, so it was handed over even if nobody ticked the handover checklist.
+    .set({ dispatchStatus: "dispatched", dispatchedAt: at, courierReceivedAt: at, handedOverAt: sql`coalesce(${orders.handedOverAt}, ${at})` })
     .where(and(eq(orders.id, orderId), eq(orders.activeConsignmentId, consignmentRowId), sql`${orders.dispatchStatus} != 'dispatched'`))
     .returning({ id: orders.id })
     .get();
-  if (row) await addEvents(db, [{ orderId, event: "dispatched", consignmentRowId }], { name: "steadfast" });
+  if (!row) return;
+  const events = [{ orderId, event: "dispatched", consignmentRowId }];
+  // Worth knowing for packing discipline: it left without the packing-table scan.
+  if (before && !before.sortedAt && !before.combined) events.unshift({ orderId, event: "picked_up_unscanned", consignmentRowId });
+  await addEvents(db, events, { name: "steadfast" });
 }
 
 /** Booking voided (cancelled before pickup, released for rebooking, or order cancelled): not printable. */

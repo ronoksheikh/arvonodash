@@ -61,6 +61,10 @@ export async function setCallingStatus(
   let autoBookAt: string | null = null;
   if (status === "confirmed") autoBookAt = order.autoBookAt ?? (await scheduleAutoBook(db, orderId));
   else await cancelAutoBook(db, orderId, null);
+  if (status !== order.callingStatus && (status === "confirmed" || status === "rejected")) {
+    const { queueSms } = await import("./sms");
+    await queueSms(db, orderId, status === "confirmed" ? "confirmed" : "cancelled");
+  }
   return { processingStatus: processing, shopifySync: processingChanged, autoBookAt };
 }
 
@@ -108,7 +112,16 @@ export async function syncProcessingToShopify(env: Env, db: DB, orderId: number)
 /** Job: re-read an order through GraphQL after a webhook (REST payloads can't express "In progress"). */
 export async function refreshOrderFromShopify(env: Env, db: DB, shopifyId: string) {
   const fresh = await fetchOrder(env, db, shopifyId);
-  if (!fresh) return;
+  if (!fresh) {
+    // Shopify answers null for a deleted order — and for any order older than 60 days when the app
+    // lacks read_all_orders, so only recent orders are taken as deleted.
+    const row = await db.select({ placed: orders.shopCreatedAt }).from(orders).where(eq(orders.shopifyId, shopifyId)).get();
+    if (row && Date.now() - Date.parse(row.placed) < 55 * 86_400_000) {
+      const { markDeletedInShopify } = await import("./orders");
+      await markDeletedInShopify(db, shopifyId, "system");
+    }
+    return;
+  }
   const { upsertOrder } = await import("./orders");
   const { getSettings } = await import("./settings");
   await upsertOrder(db, fresh, await getSettings(db));
@@ -132,7 +145,11 @@ export async function applyShopifySideChanges(
     await db.update(orders).set({ processingStatus: "cancelled", shopifySyncStatus: "none", autoBookAt: null, autoBookNote: "Order cancelled in Shopify" }).where(eq(orders.id, after.id));
     const { onNotPrintable } = await import("./dispatch");
     await onNotPrintable(db, after.id, "Order cancelled in Shopify", { name: "shopify" });
-    if (before) await logActivity(db, "shopify", "order.cancelled_in_shopify", { entityType: "order", entityId: after.id, orderId: after.id });
+    if (before) {
+      await logActivity(db, "shopify", "order.cancelled_in_shopify", { entityType: "order", entityId: after.id, orderId: after.id });
+      const { queueSms } = await import("./sms");
+      await queueSms(db, after.id, "cancelled");
+    }
     return;
   }
   if (!before || after.cancelledAt) return;
@@ -151,6 +168,8 @@ export async function applyShopifySideChanges(
     const { scheduleAutoBook } = await import("./autobook");
     await scheduleAutoBook(db, after.id);
     await logActivity(db, "shopify", "calling.confirmed", { entityType: "order", entityId: after.id, orderId: after.id, details: { source: "shopify" } });
+    const { queueSms } = await import("./sms");
+    await queueSms(db, after.id, "confirmed");
     return;
   }
 

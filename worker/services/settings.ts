@@ -2,7 +2,7 @@ import { eq, inArray } from "drizzle-orm";
 import type { DB } from "../db";
 import { settings } from "../db/schema";
 import { nowIso } from "../lib/util";
-import type { FulfillmentTrigger } from "../../shared/constants";
+import { DEFAULT_SMS_TEMPLATES, SMS_TRIGGERS, type FulfillmentTrigger, type SmsTrigger } from "../../shared/constants";
 
 /** Workflow settings editable from the dashboard. Credentials never live here — they are Worker secrets. */
 export type AppSettings = {
@@ -48,6 +48,16 @@ export type AppSettings = {
   fraudMaxPerMinute: number;
   /** Auto-booking sends a customer's confirmed orders as one parcel. */
   autoCombine: boolean;
+  /** Customer SMS (provider key is a Worker secret). Off until switched on in Settings. */
+  smsEnabled: boolean;
+  /** Which moments send an automatic SMS. */
+  smsTriggers: Record<SmsTrigger, boolean>;
+  /** Message per moment; {name}, {order}, {link}… are filled in per order (see SMS_VARIABLES). */
+  smsTemplates: Record<SmsTrigger, string>;
+  /** Public address of the tracking page, e.g. https://track.arvono.store. Empty = this dashboard's address. */
+  trackingBaseUrl: string;
+  /** The shop's website (logo link and "Continue shopping" on the tracking page). */
+  storeUrl: string;
   businessName: string;
   businessPhone: string;
   businessAddress: string;
@@ -82,6 +92,11 @@ export const DEFAULT_SETTINGS: AppSettings = {
   fraudCacheHours: 24,
   fraudMaxPerMinute: 30,
   autoCombine: true,
+  smsEnabled: false,
+  smsTriggers: { placed: true, confirmed: true, dispatched: true, delivered: false, on_hold: false, returned: false, cancelled: false },
+  smsTemplates: DEFAULT_SMS_TEMPLATES,
+  trackingBaseUrl: "",
+  storeUrl: "https://arvono.store",
   businessName: "ARVONO",
   businessPhone: "",
   businessAddress: "",
@@ -91,7 +106,14 @@ const APP_KEY = "app";
 
 export async function getSettings(db: DB): Promise<AppSettings> {
   const row = await db.select().from(settings).where(eq(settings.key, APP_KEY)).get();
-  return { ...DEFAULT_SETTINGS, ...((row?.value as Partial<AppSettings>) ?? {}) };
+  const saved = (row?.value as Partial<AppSettings>) ?? {};
+  // Nested maps merge too, so a moment added in a later version gets its default.
+  return {
+    ...DEFAULT_SETTINGS,
+    ...saved,
+    smsTriggers: { ...DEFAULT_SETTINGS.smsTriggers, ...(saved.smsTriggers ?? {}) },
+    smsTemplates: { ...DEFAULT_SETTINGS.smsTemplates, ...(saved.smsTemplates ?? {}) },
+  };
 }
 
 export async function saveSettings(db: DB, patch: Partial<AppSettings>): Promise<AppSettings> {
@@ -101,12 +123,46 @@ export async function saveSettings(db: DB, patch: Partial<AppSettings>): Promise
       const expected = typeof DEFAULT_SETTINGS[key];
       if (typeof patch[key] !== expected) continue;
       if ((key === "cutoffTime" || key === "pickupTime") && !/^([01]\d|2[0-3]):[0-5]\d$/.test(String(patch[key]))) continue;
+      if (key === "smsTriggers" || key === "smsTemplates") {
+        (next as Record<string, unknown>)[key] = mergeSmsMap(next[key] as Record<SmsTrigger, unknown>, patch[key], key === "smsTriggers" ? "boolean" : "string");
+        continue;
+      }
+      if (key === "trackingBaseUrl" || key === "storeUrl") {
+        const url = normalizeBaseUrl(String(patch[key]));
+        if (url === null) continue;
+        (next as Record<string, unknown>)[key] = url;
+        continue;
+      }
       if (typeof patch[key] === "number" && (!Number.isFinite(patch[key]) || (patch[key] as number) < 0)) continue;
       (next as Record<string, unknown>)[key] = patch[key];
     }
   }
   await setValue(db, APP_KEY, next);
   return next;
+}
+
+/** Only known SMS moments, with values of the right type (templates capped at 1000 characters). */
+function mergeSmsMap<T>(current: Record<SmsTrigger, T>, patch: unknown, type: "boolean" | "string"): Record<SmsTrigger, T> {
+  const out = { ...current };
+  if (!patch || typeof patch !== "object") return out;
+  for (const t of SMS_TRIGGERS) {
+    const v = (patch as Record<string, unknown>)[t];
+    if (typeof v === type) out[t] = (type === "string" ? String(v).slice(0, 1000) : v) as T;
+  }
+  return out;
+}
+
+/** "track.arvono.store" → "https://track.arvono.store". Empty clears it; anything that isn't a plain https origin is rejected (null). */
+export function normalizeBaseUrl(input: string): string | null {
+  const v = input.trim();
+  if (!v) return "";
+  try {
+    const u = new URL(/^https?:\/\//i.test(v) ? v : `https://${v}`);
+    if (u.protocol !== "https:" || u.username || u.password || u.search || u.hash) return null;
+    return `${u.origin}${u.pathname.replace(/\/+$/, "")}`;
+  } catch {
+    return null;
+  }
 }
 
 // Generic internal key/value state (sync cursors, cached tokens).

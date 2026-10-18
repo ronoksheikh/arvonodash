@@ -6,8 +6,10 @@ import * as steadfast from "./steadfast";
 import { enqueueJob } from "./jobs";
 import { getSettings, type AppSettings } from "./settings";
 import { logActivity, type Actor } from "./activity";
-import { buildAddress, shopifyContactKey } from "./orders";
+import { buildAddress, refreshRiskFlags, shopifyContactKey } from "./orders";
 import { onBooked, onCourierReceived, onNotPrintable } from "./dispatch";
+import { shipByDate } from "./pickup";
+import { queueSms } from "./sms";
 import { HttpError, normalizeBdPhone, nowIso, toNumber, truncate } from "../lib/util";
 import { partialOutcome } from "../../shared/delivery";
 
@@ -247,7 +249,9 @@ async function bookOne(
     .update(orders)
     .set({ courierStage: "booked", activeConsignmentId: reserved.id, booking: booking, bookedSource: shopifyContactKey(order), autoBookAt: null, autoBookNote: null, updatedAt: nowIso() })
     .where(eq(orders.id, order.id));
-  await onBooked(db, order.id, reserved.id, user);
+  // Same-day dispatch: ready before the cut-off → leaves with today's pickup, otherwise tomorrow's.
+  const readyAt = [order.confirmedAt, ...extras.map((x) => x.confirmedAt), now].filter((t): t is string => Boolean(t)).sort()[0];
+  await onBooked(db, order.id, reserved.id, user, shipByDate(readyAt, appSettings.cutoffTime, env.APP_TIMEZONE_OFFSET || "+06:00"));
   for (const x of extras) {
     // The parcel (label, scan, pickup) belongs to the primary order; combined orders follow it.
     await db
@@ -373,6 +377,8 @@ export async function applyCourierUpdate(
     }
     if (firstPickup) await onCourierReceived(db, order.id, c.id, occurredAt);
     if (stage === "cancelled") await onNotPrintable(db, order.id, "Consignment cancelled before pickup", { name: "steadfast" });
+    // Parcel finished: parcel-level warnings (deleted/cancelled in Shopify, COD mismatch) no longer apply.
+    if (steadfast.isFinalStatus(newStatus!)) await refreshRiskFlags(db, order.id, appSettings);
 
     const trigger = appSettings.fulfillmentTrigger;
     const shouldFulfill =
@@ -387,6 +393,10 @@ export async function applyCourierUpdate(
       await enqueueJob(db, "shopify_mark_paid", `paid:${order.id}`, { orderId: order.id, consignmentRowId: c.id });
     }
   }
+
+  // Customer SMS: one per parcel (sent for the order that owns it; it names every order inside).
+  const smsMoment = firstPickup ? "dispatched" : stage === "delivered" ? "delivered" : stage === "on_hold" || stage === "returned" ? stage : null;
+  if (smsMoment) await queueSms(db, c.orderId, smsMoment, appSettings);
 
   if (appSettings.autoCreateReturns && (stage === "returned" || stage === "partial_delivered")) {
     const existingReturn = await db.select({ id: returns.id }).from(returns).where(eq(returns.consignmentRowId, c.id)).get();
@@ -411,6 +421,31 @@ export async function applyCourierUpdate(
       });
       await logActivity(db, "system", "return.created", { entityType: "order", entityId: c.orderId, orderId: c.orderId, details: { stage, chargeOnly } });
     }
+  }
+  return true;
+}
+
+/**
+ * Steadfast no longer has this parcel (deleted in the portal before pickup; afterwards it answers
+ * "unknown" or "not found"). Recorded as its own final status so it never shows as a courier problem,
+ * and the order goes back to "To book" if it is still wanted (cancelled orders just stop here).
+ */
+export async function onDeletedInSteadfast(db: DB, c: ConsignmentRow) {
+  const now = nowIso();
+  const row = await db
+    .update(consignments)
+    .set({ status: "deleted", stage: "cancelled", isFinal: true, lastStatusAt: now, lastPolledAt: now, lastMessage: "Deleted in the Steadfast portal", collectedAmount: 0, updatedAt: now })
+    .where(and(eq(consignments.id, c.id), sql`${consignments.status} != 'deleted'`, isNull(consignments.pickedUpAt)))
+    .returning({ id: consignments.id })
+    .get();
+  if (!row) return false;
+  await db.insert(trackingEvents).values({ consignmentRowId: c.id, orderId: c.orderId, kind: "status", status: "deleted", message: "Parcel no longer exists in Steadfast (deleted in the portal before pickup)", source: "poll", occurredAt: now, createdAt: now });
+  await logActivity(db, "steadfast", "consignment.deleted_in_steadfast", { entityType: "consignment", entityId: c.consignmentId ?? c.invoice, orderId: c.orderId, details: { from: c.status } });
+  for (const order of await parcelOrders(db, c)) {
+    if (order.activeConsignmentId !== c.id) continue;
+    await db.update(orders).set({ courierStage: "cancelled", updatedAt: now }).where(eq(orders.id, order.id));
+    await onNotPrintable(db, order.id, "Parcel deleted in Steadfast", { name: "steadfast" });
+    await refreshRiskFlags(db, order.id, await getSettings(db));
   }
   return true;
 }
@@ -447,12 +482,20 @@ export async function pollActiveConsignments(env: Env, db: DB, opts: { limit?: n
   let errors = 0;
   for (const c of rows) {
     try {
-      let status: string | null;
-      if (c.consignmentId) status = await steadfast.getStatusByConsignmentId(env, c.consignmentId);
-      else if (c.trackingCode) status = await steadfast.getStatusByTrackingCode(env, c.trackingCode);
-      else if (c.status === "creating") continue; // booking in flight
-      else status = await steadfast.getStatusByInvoice(env, c.invoice);
-      if (!status) {
+      if (c.status === "creating" && !c.consignmentId && !c.trackingCode) continue; // booking in flight
+      const status = await steadfast.getParcelStatus(env, c);
+      if (status === undefined) {
+        await db.update(consignments).set({ lastPolledAt: nowIso() }).where(eq(consignments.id, c.id));
+        continue;
+      }
+      const verdict = steadfast.pollVerdict(c, status);
+      if (verdict === "deleted") {
+        await onDeletedInSteadfast(db, c);
+        changed++;
+        continue;
+      }
+      if (verdict === "ignore") {
+        // e.g. "unknown" for a parcel that is already cancelled: keep what we have.
         await db.update(consignments).set({ lastPolledAt: nowIso() }).where(eq(consignments.id, c.id));
         continue;
       }

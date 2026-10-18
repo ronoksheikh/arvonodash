@@ -7,13 +7,17 @@ import { API_SCOPES } from "./dispatch";
 import { randomToken, sha256Hex } from "../lib/crypto";
 import { requirePerm } from "../lib/auth";
 import { hashPassword } from "../lib/crypto";
-import { nowIso } from "../lib/util";
+import { normalizeBdPhone, nowIso } from "../lib/util";
+import { getSmsBalance, renderTemplate, sendManualSms, smsLog, smsStatus, smsVariables } from "../services/sms";
+import { forgetTrackingHost, instanceId } from "../services/tracking";
+import { smsSegments } from "../../shared/constants";
 import { logActivity } from "../services/activity";
 import { getSettings, saveSettings, getValues } from "../services/settings";
 import { diagnoseShopify, getShopInfo, listWebhookSubscriptions, registerWebhooks, resetShopifyToken, shopifyConfigured } from "../services/shopify";
 import { CREDENTIAL_KEYS, describeCredentials, loadCredentials, normalizeShopDomain, saveCredentials, type Credentials } from "../services/credentials";
 import { getBalance, steadfastConfigured } from "../services/steadfast";
-import { getImportState, latestRuns, reconcileShopify, recordRun, retryFailedWebhooks, runImportStep, startImport, syncPayments } from "../services/sync";
+import { getImportState, latestRuns, reconcileShopify, recordRun, retryFailedWebhooks, runImportStep, startImport, syncPayments, verifyShopifyOrdersExist } from "../services/sync";
+import { rollOverMissedPickups } from "../services/pickup";
 import { processJobs, enqueueJob } from "../services/jobs";
 import { pollActiveConsignments } from "../services/courier";
 import { ALL_PERMISSIONS, ROLES, ROLE_PERMISSIONS } from "../../shared/constants";
@@ -50,7 +54,45 @@ settingsRoutes.get("/", async (c) => {
       },
     },
     sync: state,
+    sms: await smsStatus(c.env, db),
+    tracking: { instanceId: await instanceId(db), dashboardOrigin: origin },
   });
+});
+
+// ---------------------------------------------------------------------------
+// Customer SMS
+
+settingsRoutes.get("/sms/log", async (c) => {
+  const db = getDb(c.env.DB);
+  return c.json({ messages: await smsLog(db, { limit: Math.min(500, Number(c.req.query("limit")) || 100) }) });
+});
+
+settingsRoutes.get("/sms/balance", requirePerm("settings.manage"), async (c) => {
+  try {
+    return c.json({ ok: true, balance: await getSmsBalance(c.env) });
+  } catch (err) {
+    return c.json({ ok: false, error: (err as Error).message });
+  }
+});
+
+/** Renders a template against a real order (the given one, or the newest) so the preview is exact. */
+settingsRoutes.post("/sms/preview", async (c) => {
+  const db = getDb(c.env.DB);
+  const body = await c.req.json<{ template?: string; orderId?: number }>();
+  const order = body.orderId
+    ? await db.select().from(orders).where(eq(orders.id, Number(body.orderId))).get()
+    : await db.select().from(orders).orderBy(desc(orders.shopCreatedAt)).limit(1).get();
+  const appSettings = await getSettings(db);
+  const text = order ? renderTemplate(body.template ?? "", await smsVariables(db, appSettings, order)) : (body.template ?? "");
+  return c.json({ text, orderName: order?.name ?? null, ...smsSegments(text) });
+});
+
+settingsRoutes.post("/sms/test", requirePerm("settings.manage"), async (c) => {
+  const db = getDb(c.env.DB);
+  const body = await c.req.json<{ phone?: string; body?: string }>();
+  if (!normalizeBdPhone(body.phone)) return c.json({ error: "Enter a Bangladeshi mobile number (01XXXXXXXXX)" }, 400);
+  const r = await sendManualSms(c.env, db, c.get("user"), { phone: body.phone, body: body.body || `Test message from ${(await getSettings(db)).businessName}.` });
+  return c.json(r);
 });
 
 // Connection credentials, editable from the dashboard. Values are never returned unmasked,
@@ -93,6 +135,7 @@ settingsRoutes.put("/", requirePerm("settings.manage"), async (c) => {
   const db = getDb(c.env.DB);
   const body = await c.req.json();
   const saved = await saveSettings(db, body);
+  forgetTrackingHost();
   await logActivity(db, c.get("user"), "settings.updated", { details: body });
   return c.json({ settings: saved });
 });
@@ -352,6 +395,18 @@ syncRoutes.post("/courier", async (c) => {
   return c.json(await recordRun(db, "courier_poll", "manual", () => pollActiveConsignments(c.env, db, { limit: 40, staleMinutes: 5 })));
 });
 
+/** Looks for orders deleted in Shopify whose delete webhook never arrived (also runs every 30 minutes). */
+syncRoutes.post("/shopify-deleted", async (c) => {
+  const db = getDb(c.env.DB);
+  return c.json(await recordRun(db, "shopify_deleted", "manual", () => verifyShopifyOrdersExist(c.env, db, { batches: 5 })));
+});
+
+/** Moves parcels that missed their pickup day to today (also runs automatically after midnight). */
+syncRoutes.post("/carry-over", async (c) => {
+  const db = getDb(c.env.DB);
+  return c.json(await recordRun(db, "carry_over", "manual", () => rollOverMissedPickups(db, c.env.APP_TIMEZONE_OFFSET || "+06:00")));
+});
+
 syncRoutes.post("/payments", async (c) => {
   const db = getDb(c.env.DB);
   return c.json(await recordRun(db, "payments", "manual", () => syncPayments(c.env, db, 3)));
@@ -385,7 +440,9 @@ syncRoutes.post("/webhooks/retry", async (c) => {
 /** Housekeeping: prune old webhook payloads and finished jobs. */
 export async function pruneOldData(db: ReturnType<typeof getDb>) {
   const cutoff = new Date(Date.now() - 60 * 86_400_000).toISOString();
-  await db.delete(webhookEvents).where(and(lt(webhookEvents.receivedAt, cutoff), inArray(webhookEvents.status, ["processed", "ignored"])));
+  // Raw webhook bodies are kept for half a year for debugging; everything extracted from them is kept forever.
+  const webhookCutoff = new Date(Date.now() - 180 * 86_400_000).toISOString();
+  await db.delete(webhookEvents).where(and(lt(webhookEvents.receivedAt, webhookCutoff), inArray(webhookEvents.status, ["processed", "ignored"])));
   await db.delete(jobs).where(and(lt(jobs.updatedAt, cutoff), inArray(jobs.status, ["done", "cancelled"])));
   await db.delete(idempotencyKeys).where(lt(idempotencyKeys.createdAt, new Date(Date.now() - 7 * 86_400_000).toISOString()));
 }

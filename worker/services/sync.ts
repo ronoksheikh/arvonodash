@@ -2,8 +2,8 @@ import { desc, eq, and, inArray, lte, or, sql } from "drizzle-orm";
 import { inList, type DB } from "../db";
 import type { Env } from "../env";
 import { consignments, orderNotes, orders, payments, returns, syncRuns, trackingEvents, webhookEvents } from "../db/schema";
-import { fetchOrdersPage, normalizeRestOrder, shopifyConfigured } from "./shopify";
-import { refreshRiskFlags, upsertOrder } from "./orders";
+import { fetchOrdersPage, normalizeRestOrder, shopifyConfigured, shopifyGraphql } from "./shopify";
+import { markDeletedInShopify, refreshRiskFlags, upsertOrder } from "./orders";
 import { getSettings, getValue, setValue } from "./settings";
 import { applyCourierUpdate, findConsignment } from "./courier";
 import { logActivity } from "./activity";
@@ -139,7 +139,7 @@ export async function processShopifyEvent(db: DB, topic: string, payload: unknow
       return r.stale ? "ignored" : "processed";
     }
     case "orders/delete": {
-      await db.update(orders).set({ archived: true, updatedAt: nowIso() }).where(eq(orders.shopifyId, String(p.id)));
+      await markDeletedInShopify(db, String(p.id));
       return "processed";
     }
     default:
@@ -465,4 +465,48 @@ export async function quickSync(env: Env, db: DB) {
     syncRecentOpenOrders(env, db, { days: 2, maxPages: 2 }).catch((e: Error) => ({ error: e.message })),
   ]);
   return { reconcile, open };
+}
+
+const EXISTS_CURSOR = "shopify.existsCursor";
+
+/**
+ * Finds orders deleted in Shopify whose orders/delete webhook never arrived: asks Shopify for our
+ * live orders in batches (nodes() answers null for a deleted order). Walks the list with a cursor,
+ * so every live order is checked every few runs at one cheap GraphQL call per 100 orders.
+ */
+export async function verifyShopifyOrdersExist(env: Env, db: DB, opts: { batches?: number } = {}) {
+  if (!shopifyConfigured(env)) return { skipped: true };
+  const since = new Date(Date.now() - 45 * 86_400_000).toISOString();
+  let cursor = (await getValue<number>(db, EXISTS_CURSOR)) ?? 0;
+  let scanned = 0;
+  const deleted: number[] = [];
+  for (let b = 0; b < (opts.batches ?? 2); b++) {
+    const rows = await db
+      .select({ id: orders.id, shopifyId: orders.shopifyId })
+      .from(orders)
+      .where(
+        sql`${orders.id} > ${cursor} and ${orders.shopifyDeletedAt} is null and ${orders.archived} = 0 and ${orders.shopCreatedAt} >= ${since}
+          and ${orders.courierStage} not in ('delivered', 'partial_delivered', 'returned')`,
+      )
+      .orderBy(orders.id)
+      .limit(100)
+      .all();
+    if (!rows.length) {
+      cursor = 0; // wrapped around; start again next run
+      break;
+    }
+    const data = await shopifyGraphql<{ nodes: ({ id: string } | null)[] }>(env, db, `query Exists($ids: [ID!]!) { nodes(ids: $ids) { ... on Order { id } } }`, {
+      ids: rows.map((r) => `gid://shopify/Order/${r.shopifyId}`),
+    });
+    for (let i = 0; i < rows.length; i++) {
+      if (data.nodes[i] === null) {
+        const r = await markDeletedInShopify(db, rows[i].shopifyId, "system");
+        if (r) deleted.push(r.id);
+      }
+    }
+    scanned += rows.length;
+    cursor = rows[rows.length - 1].id;
+  }
+  await setValue(db, EXISTS_CURSOR, cursor);
+  return { scanned, processed: deleted.length, deleted };
 }

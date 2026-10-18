@@ -132,8 +132,18 @@ Status legend: [x] done · [~] partial / limited by API · [ ] not started
 - [x] Redesigned customer tracking page
 - [x] e2e: 57 checks · unit: 36 tests
 
+## Phase 5: lifecycle, SMS, branded tracking domain
+- [x] Journey tab: every event from every source in one timeline + time between milestones
+- [x] Ship-by date at booking (cut-off), automatic carry-over with count and history, undo handover, "rider has it, not confirmed"
+- [x] Handover filled in automatically when Steadfast picks up; `picked_up_unscanned` logged; missed pickups on the owner report
+- [x] Orders deleted in Shopify: webhook + 30-minute existence check; flagged until the parcel is stopped
+- [x] Parcels deleted in Steadfast: `deleted` status instead of `cancelled → unknown`; finished parcels never regress from a poll
+- [x] Customer SMS (sms.net.bd API, key as Worker secret, off by default): 7 moments, templates with placeholders, manual SMS, log, balance, test
+- [x] Tracking page in ARVONO branding (Instrument Sans / Anek Bangla, logo), English + Bangla
+- [x] Custom tracking domain (track.arvono.store): host-restricted, short links, domain check
+- [x] e2e: 65 checks · unit: 56 tests
+
 ## Ideas / next
 - [ ] Email the owner report daily (needs an email service — Cloudflare Email Routing could send to verified addresses)
-- [ ] SMS confirmation to customers (needs a BD SMS gateway — out of scope, no external services)
 - [ ] Shopify return creation (`returnCreate`) once the team wants returns mirrored in Shopify
 - [ ] Per-zone delivery-charge estimates once Steadfast publishes a pricing endpoint

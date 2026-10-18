@@ -18,6 +18,7 @@ export const PERMISSIONS = {
   "users.manage": "Staff accounts and permissions",
   "logs.view": "Activity logs and sync history",
   "reports.view": "Owner report (sales, returns, COD)",
+  "sms.send": "Send SMS to customers",
 } as const;
 
 export type Permission = keyof typeof PERMISSIONS;
@@ -40,8 +41,9 @@ export const ROLE_PERMISSIONS: Record<Role, Permission[]> = {
     "returns.manage",
     "export",
     "logs.view",
+    "sms.send",
   ],
-  caller: ["orders.view", "orders.call"],
+  caller: ["orders.view", "orders.call", "sms.send"],
   packer: ["orders.view", "export", "dispatch.manage"],
   viewer: ["orders.view", "cod.view", "logs.view", "reports.view"],
 };
@@ -75,6 +77,8 @@ export const STEADFAST_STATUSES: Record<string, string> = {
   cancelled: "Cancelled",
   unknown: "Unknown",
   exceptional: "Exceptional (lost / damaged)",
+  // Ours, not Steadfast's: the consignment no longer exists in Steadfast (deleted in the portal).
+  deleted: "Deleted in Steadfast",
 };
 
 export const FULFILLMENT_STATES = {
@@ -136,6 +140,7 @@ export const RISK_FLAGS: Record<string, string> = {
   courier_fraud: "Steadfast fraud check: poor delivery record or merchant reports — call first",
   cod_mismatch: "COD in Steadfast no longer matches the Shopify balance",
   combined_order_cancelled: "An order travelling in this parcel was cancelled — COD is now wrong",
+  deleted_in_shopify: "Order was deleted in Shopify — stop the parcel",
 };
 
 export const CALLING_STATUSES = {
@@ -183,7 +188,79 @@ export const DISPATCH_EVENTS: Record<string, string> = {
   sorted: "Scanned & sorted",
   unsorted: "Sorting undone",
   handed_over: "Handed to courier rider",
+  handover_undone: "Handover undone (rider didn't take it)",
+  carried_over: "Missed its pickup day — carried over",
+  picked_up_unscanned: "Picked up by Steadfast without a packing scan",
   dispatched: "Dispatched (picked up by Steadfast)",
   dispatch_undone: "Dispatch undone",
   courier_received: "Received by courier",
 };
+
+// ---------------------------------------------------------------------------
+// Customer SMS
+
+export const SMS_TRIGGERS = ["placed", "confirmed", "dispatched", "delivered", "on_hold", "returned", "cancelled"] as const;
+export type SmsTrigger = (typeof SMS_TRIGGERS)[number];
+
+export const SMS_TRIGGER_LABELS: Record<SmsTrigger, { label: string; hint: string }> = {
+  placed: { label: "Order placed", hint: "A new order arrives from Shopify" },
+  confirmed: { label: "Order confirmed", hint: "Confirmed on the call (or In progress in Shopify)" },
+  dispatched: { label: "Dispatched", hint: "Steadfast picked the parcel up" },
+  delivered: { label: "Delivered", hint: "Steadfast confirmed the delivery" },
+  on_hold: { label: "Delivery on hold", hint: "The rider put the delivery on hold" },
+  returned: { label: "Returned", hint: "Delivery failed and the parcel is coming back" },
+  cancelled: { label: "Order cancelled", hint: "Cancelled in Shopify or rejected on the call" },
+};
+
+/** Placeholders a template can use. Unknown ones are left as typed. */
+export const SMS_VARIABLES: Record<string, string> = {
+  name: "Customer first name",
+  full_name: "Customer full name",
+  order: "Order number (#1001)",
+  link: "Tracking link",
+  status: "Parcel status",
+  address: "Delivery address",
+  cod: "Cash to pay on delivery",
+  total: "Order total",
+  tracking_code: "Steadfast tracking code",
+  shop: "Shop name",
+  shop_phone: "Shop phone",
+};
+
+export const DEFAULT_SMS_TEMPLATES: Record<SmsTrigger, string> = {
+  placed: "Hi {name}, thanks for your order {order} at {shop}. We'll call you to confirm. Track: {link}",
+  confirmed: "Your order {order} is confirmed and being packed. Track: {link}",
+  dispatched: "Your parcel {order} is on the way with Steadfast. Please keep {cod} ready. Track: {link}",
+  delivered: "Your order {order} was delivered. Thank you for shopping with {shop}!",
+  on_hold: "Delivery of {order} is on hold. Please call {shop_phone} if you need help. Track: {link}",
+  returned: "Your parcel {order} could not be delivered and is returning to us. Call {shop_phone} to reorder.",
+  cancelled: "Your order {order} at {shop} has been cancelled. Call {shop_phone} with any questions.",
+};
+
+/** Provider result codes (the `error` field of the SMS API response). */
+export const SMS_ERROR_CODES: Record<number, string> = {
+  0: "Sent",
+  400: "Missing or invalid parameter",
+  403: "Permission denied",
+  404: "Resource not found",
+  405: "Authorization required (check the API key)",
+  409: "Unknown server error at the SMS provider",
+  410: "SMS account expired",
+  411: "Reseller account expired or suspended",
+  412: "Invalid schedule",
+  413: "Invalid sender ID",
+  414: "Empty message",
+  415: "Message too long",
+  416: "No valid number found",
+  417: "Insufficient SMS balance",
+  420: "Content blocked by the provider",
+  421: "Until the first recharge, SMS can only go to the registered phone number",
+};
+
+/** GSM text: 160 characters per SMS (153 when split). Bangla/emoji (Unicode): 70 (67 when split). */
+export function smsSegments(text: string): { unicode: boolean; length: number; segments: number } {
+  const unicode = /[^\x00-\x7F]/.test(text);
+  const length = [...text].length;
+  const [single, multi] = unicode ? [70, 67] : [160, 153];
+  return { unicode, length, segments: length === 0 ? 0 : length <= single ? 1 : Math.ceil(length / multi) };
+}
