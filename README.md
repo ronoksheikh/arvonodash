@@ -23,10 +23,10 @@ New order → Call customer → Confirmed (Shopify: In progress) → Admin books
 → Shopify fulfilled (tracking added) → Delivered / Returned
 ```
 
-Everything is synchronised automatically, with three exceptions that always stay manual:
-- the **calling confirmation**
-- **Steadfast booking**
-- **physical dispatch**
+Everything is synchronised automatically except the **calling confirmation** and **physical
+dispatch**. Booking happens automatically a few minutes after confirmation (default 10, set in
+Settings → Workflow); staff can cancel the timer or book immediately. Flagged orders always wait
+for a human.
 
 Each order keeps five separate states: calling, processing, Steadfast booking, label printing and
 dispatch. Shopify fulfillment and courier delivery are tracked on top of these.

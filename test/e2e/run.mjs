@@ -10,7 +10,18 @@ let SF_TOKEN = "";
 let cookie = "";
 let passed = 0;
 
-async function call(method, path, body, { auth = true, headers = {}, raw = false, jar = true } = {}) {
+async function call(method, path, body, opts = {}) {
+  const r = await callOnce(method, path, body, opts);
+  // The Vite dev server reloads the Worker the first time it discovers a lazily imported module
+  // and answers that one request with a plain-text 500 ("fetch failed"). Production is pre-bundled.
+  if (r.status === 500 && typeof r.body === "string") {
+    await new Promise((res) => setTimeout(res, 1500));
+    return callOnce(method, path, body, opts);
+  }
+  return r;
+}
+
+async function callOnce(method, path, body, { auth = true, headers = {}, raw = false, jar = true } = {}) {
   const res = await fetch(BASE + path, {
     method,
     headers: { "X-Requested-With": "arvono", ...(body !== undefined ? { "Content-Type": "application/json" } : {}), ...(auth && cookie ? { Cookie: cookie } : {}), ...headers },
@@ -541,6 +552,28 @@ await step("Steadfast return request for delivered parcel", async () => {
   assert.equal(again.status, 409);
 });
 
+await step("orders already shipped before ARVONO are linked, not queued", async () => {
+  const shipped = restOrder(4001, {
+    created_at: new Date(Date.now() - 5 * 86_400_000).toISOString(),
+    fulfillment_status: "fulfilled",
+    fulfillments: [{ status: "success", tracking_number: "LEGACY123", tracking_company: "Steadfast Courier", tracking_url: null }],
+    shipping_address: { name: "Old Buyer", address1: "House 1, Road 1, Mirpur", city: "Dhaka", phone: "01822000111" },
+  });
+  await shopifyWebhook("orders/create", shipped);
+  const other = restOrder(4002, { fulfillment_status: "fulfilled", fulfillments: [{ status: "success", tracking_number: "PTH-998877", tracking_company: "Pathao" }], shipping_address: { name: "Other Courier", address1: "House 2, Road 2, Banani", city: "Dhaka", phone: "01822000222" } });
+  await shopifyWebhook("orders/create", other);
+  const toCall = await call("GET", "/api/orders?tab=to_call");
+  assert.ok(!toCall.body.rows.some((r) => ["#4001", "#4002"].includes(r.name)), "shipped orders are not in the calling queue");
+  const o = (await call("GET", "/api/orders?search=%234001")).body.rows[0];
+  assert.equal(o.trackingCode, "LEGACY123");
+  assert.equal(o.labelStatus, "printed");
+  const r = await v1("GET", `/printable?upTo=${today}`);
+  assert.ok(!r.body.orders.some((x) => x.orderId === o.id), "never sent to the label printer");
+  await call("POST", "/api/sync/courier");
+  const d = await orderDetail(o.id);
+  assert.equal(d.order.courierStage, "delivered", "courier status fetched by tracking code");
+});
+
 await step("historical import pulls Shopify orders via GraphQL", async () => {
   const r = await call("POST", "/api/sync/import/start", { sinceDays: 30 });
   assert.equal(r.status, 200, JSON.stringify(r.body));
@@ -562,7 +595,7 @@ await step("search by tracking code, CSV export, dashboard, customers", async ()
   assert.equal(dash.status, 200);
   assert.ok(dash.body.today.orders >= 2);
   assert.ok(dash.body.pipeline.toCall >= 0);
-  assert.equal(dash.body.successRate, 50);
+  assert.equal(dash.body.successRate, 66.7, "2 delivered (incl. linked legacy parcel) vs 1 returned");
   const cust = await call("GET", "/api/customers?search=01812345678");
   assert.equal(cust.body.rows[0].orders, 2);
   const det = await call("GET", `/api/customers/${cust.body.rows[0].id}`);
@@ -614,6 +647,48 @@ await step("staff permissions are enforced", async () => {
   cookie = ownerCookie;
   const bad = await call("POST", "/api/auth/login", { email: "owner@arvono.test", password: "wrong-password" }, { jar: false });
   assert.equal(bad.status, 401);
+});
+
+await step("confirming starts the auto-booking timer; staff can cancel or book now", async () => {
+  await shopifyWebhook("orders/create", restOrder(5006, { shipping_address: { name: "Tanvir Ahmed", address1: "House 6, Road 6, Mohammadpur", city: "Dhaka", phone: "01933444555" } }));
+  const o = (await call("GET", "/api/orders?search=%235006")).body.rows[0];
+  assert.equal(o.customerOrders, 0, "new customer");
+  const r = await call("POST", `/api/orders/${o.id}/calling`, { status: "confirmed" });
+  assert.ok(r.body.autoBookAt, "timer started");
+  const mins = (Date.parse(r.body.autoBookAt) - Date.now()) / 60_000;
+  assert.ok(mins > 9 && mins <= 10.1, `10-minute default (${mins})`);
+  await call("POST", `/api/orders/${o.id}/auto-book`, { action: "cancel" });
+  let d = await orderDetail(o.id);
+  assert.equal(d.order.autoBookAt, null);
+  assert.match(d.order.autoBookNote, /cancelled/);
+  await call("PUT", "/api/settings", { autoBookDelayMinutes: 0 });
+  const restarted = await call("POST", `/api/orders/${o.id}/auto-book`, { action: "restart" });
+  assert.equal(restarted.status, 200, JSON.stringify(restarted.body));
+  await sleep(1100);
+  const cron = await fetch(`${BASE}/cdn-cgi/handler/scheduled?cron=*+*+*+*+*`);
+  assert.equal(cron.status, 200);
+  await sleep(1500);
+  d = await orderDetail(o.id);
+  assert.equal(d.order.courierStage, "booked", "auto-booked when the timer ended");
+  assert.equal(d.order.labelStatus, "unprinted");
+  const second = await fetch(`${BASE}/cdn-cgi/handler/scheduled?cron=*+*+*+*+*`);
+  assert.equal(second.status, 200);
+  await sleep(800);
+  const s = await mockState();
+  assert.equal(s.consignments.filter((c) => c.invoice.startsWith("5006")).length, 1, "booked exactly once");
+  await call("PUT", "/api/settings", { autoBookDelayMinutes: 10 });
+});
+
+await step("Shopify-app 'In progress' is picked up by dashboard sync even without a webhook", async () => {
+  const base = restOrder(5007, { shipping_address: { name: "App Confirm", address1: "House 7, Road 7, Uttara", city: "Dhaka", phone: "01944555666" } });
+  await shopifyWebhook("orders/create", base);
+  await fetch(`${MOCK}/__fo_status`, { method: "POST", body: JSON.stringify({ orderId: "5007", status: "IN_PROGRESS" }) });
+  await sleep(21_000); // quick-sync throttle window
+  const r = await call("POST", "/api/orders/sync-now");
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  const o = (await call("GET", "/api/orders?search=%235007")).body.rows[0];
+  assert.equal(o.callingStatus, "confirmed");
+  assert.ok(o.autoBookAt, "auto-booking timer started from Shopify confirmation");
 });
 
 await step("activity log records actions", async () => {

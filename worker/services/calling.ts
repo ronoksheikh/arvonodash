@@ -57,7 +57,11 @@ export async function setCallingStatus(
   });
   await logActivity(db, user, `calling.${status}`, { entityType: "order", entityId: orderId, orderId, details: input.note ? { note: input.note } : undefined });
   if (processingChanged && !order.cancelledAt) await queueProcessingSync(db, orderId);
-  return { processingStatus: processing, shopifySync: processingChanged };
+  const { scheduleAutoBook, cancelAutoBook } = await import("./autobook");
+  let autoBookAt: string | null = null;
+  if (status === "confirmed") autoBookAt = order.autoBookAt ?? (await scheduleAutoBook(db, orderId));
+  else await cancelAutoBook(db, orderId, null);
+  return { processingStatus: processing, shopifySync: processingChanged, autoBookAt };
 }
 
 export async function queueProcessingSync(db: DB, orderId: number) {
@@ -125,7 +129,7 @@ export async function applyShopifySideChanges(
 
   // Cancelled in Shopify → processing cancelled; label no longer printable.
   if (after.cancelledAt && after.processingStatus !== "cancelled") {
-    await db.update(orders).set({ processingStatus: "cancelled", shopifySyncStatus: "none" }).where(eq(orders.id, after.id));
+    await db.update(orders).set({ processingStatus: "cancelled", shopifySyncStatus: "none", autoBookAt: null, autoBookNote: "Order cancelled in Shopify" }).where(eq(orders.id, after.id));
     const { onNotPrintable } = await import("./dispatch");
     await onNotPrintable(db, after.id, "Order cancelled in Shopify", { name: "shopify" });
     if (before) await logActivity(db, "shopify", "order.cancelled_in_shopify", { entityType: "order", entityId: after.id, orderId: after.id });
@@ -144,6 +148,8 @@ export async function applyShopifySideChanges(
       .set({ callingStatus: "confirmed", processingStatus: "in_progress", confirmedAt: now, shopifySyncStatus: "synced", shopifySyncedAt: now })
       .where(eq(orders.id, after.id));
     await log("confirmed", "Marked In progress in Shopify");
+    const { scheduleAutoBook } = await import("./autobook");
+    await scheduleAutoBook(db, after.id);
     await logActivity(db, "shopify", "calling.confirmed", { entityType: "order", entityId: after.id, orderId: after.id, details: { source: "shopify" } });
     return;
   }
@@ -155,6 +161,8 @@ export async function applyShopifySideChanges(
       .set({ callingStatus: "call_again", processingStatus: "new", confirmedAt: null, confirmedBy: null, shopifySyncStatus: "none" })
       .where(and(eq(orders.id, after.id)));
     await log("call_again", "Changed back to Unfulfilled in Shopify");
+    const { cancelAutoBook } = await import("./autobook");
+    await cancelAutoBook(db, after.id, "Changed back to Unfulfilled in Shopify");
     await logActivity(db, "shopify", "calling.reverted_in_shopify", { entityType: "order", entityId: after.id, orderId: after.id });
   }
 }

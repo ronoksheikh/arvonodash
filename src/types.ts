@@ -61,9 +61,16 @@ export type OrderListRow = {
   labelStatus: string;
   dispatchStatus: string;
   cancelRequestedAt: string | null;
+  autoBookAt: string | null;
+  autoBookNote: string | null;
+  customerId: number | null;
+  customerOrders: number;
+  customerDelivered: number;
+  customerReturned: number;
+  customerFlag: string | null;
 };
 
-export type Order = Omit<OrderListRow, "itemCount" | "trackingCode" | "consignmentStatus" | "consignmentCod"> & {
+export type Order = Omit<OrderListRow, "itemCount" | "trackingCode" | "consignmentStatus" | "consignmentCod" | "customerOrders" | "customerDelivered" | "customerReturned" | "customerFlag"> & {
   orderNumber: number | null;
   shopUpdatedAt: string;
   cancelReason: string | null;

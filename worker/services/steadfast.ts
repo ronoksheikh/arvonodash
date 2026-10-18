@@ -134,6 +134,16 @@ export async function getStatusByInvoice(env: Env, invoice: string): Promise<str
   }
 }
 
+export async function getStatusByTrackingCode(env: Env, code: string): Promise<string | null> {
+  try {
+    const res = await request<{ status: number; delivery_status?: string }>(env, "GET", `/status_by_trackingcode/${encodeURIComponent(code)}`);
+    return res.delivery_status ?? null;
+  } catch (err) {
+    if (err instanceof HttpError && err.status === 422) return null;
+    throw err;
+  }
+}
+
 export async function getBalance(env: Env): Promise<number> {
   const res = await request<{ status: number; current_balance: number }>(env, "GET", "/get_balance");
   return toNumber(res.current_balance);

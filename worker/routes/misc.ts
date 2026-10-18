@@ -22,7 +22,8 @@ dashboardRoutes.get("/", async (c) => {
   const days = Math.min(90, Math.max(7, Number(c.req.query("days")) || 30));
   const today = startOfDayIso(tz);
   const since = startOfDayIso(tz, days - 1);
-  const live = and(eq(orders.archived, false), isNull(orders.cancelledAt));
+  // Live work queue: not archived, not cancelled, and not already fulfilled in Shopify outside ARVONO.
+  const live = and(eq(orders.archived, false), isNull(orders.cancelledAt), sql`coalesce(${orders.shopifyFulfillmentStatus}, '') not in ('fulfilled', 'partially_fulfilled', 'partial')`);
 
   const count = async (where: SQL | undefined) => (await db.select({ n: sql<number>`count(*)` }).from(orders).where(where).get())?.n ?? 0;
 
@@ -30,7 +31,7 @@ dashboardRoutes.get("/", async (c) => {
     count(and(live, eq(orders.courierStage, "unbooked"), inArray(orders.callingStatus, ["not_called", "no_answer", "call_again"]))),
     count(and(live, eq(orders.courierStage, "unbooked"), eq(orders.callingStatus, "confirmed"))),
     count(and(eq(orders.archived, false), gte(orders.shopCreatedAt, today))),
-    db.select({ v: sql<number>`coalesce(sum(${orders.total}), 0)` }).from(orders).where(and(live, gte(orders.shopCreatedAt, today))).get(),
+    db.select({ v: sql<number>`coalesce(sum(${orders.total}), 0)` }).from(orders).where(and(eq(orders.archived, false), isNull(orders.cancelledAt), gte(orders.shopCreatedAt, today))).get(),
     count(and(live, eq(orders.courierStage, "unbooked"))),
     count(and(eq(orders.archived, false), eq(orders.courierStage, "booked"))),
     count(and(eq(orders.archived, false), inArray(orders.courierStage, ["in_transit", "on_hold"]))),

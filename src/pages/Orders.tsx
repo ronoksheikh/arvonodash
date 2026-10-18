@@ -1,5 +1,6 @@
-import { useEffect, useMemo, useState } from "react";
-import { ActionIcon, Badge, Button, Checkbox, Group, Menu, Modal, ScrollArea, Select, Stack, Switch, Table, Tabs, Text, TextInput, Affix, Paper, Transition, Alert, List } from "@mantine/core";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { notifications } from "@mantine/notifications";
+import { Tooltip, ActionIcon, Anchor, Badge, Button, Checkbox, Group, Menu, Modal, ScrollArea, Select, Stack, Switch, Table, Tabs, Text, TextInput, Affix, Paper, Transition, Alert, List } from "@mantine/core";
 import { DatePickerInput } from "@mantine/dates";
 import { useDebouncedValue } from "@mantine/hooks";
 import { keepPreviousData, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
@@ -7,7 +8,7 @@ import { useSearchParams } from "react-router";
 import { PhoneCall, ArrowDownUp, Download, Filter, MoreHorizontal, Printer, Search, Send, Tag, X, CheckCircle2, XCircle, Archive, ShieldOff, ListChecks } from "lucide-react";
 import { api, post, qs, notifyError, notifySuccess } from "../api";
 import { useCan } from "../auth";
-import { CustomStatusBadge, DispatchBadge, EmptyState, ErrorState, FulfillmentBadge, LabelBadge, LoadingState, PageHeader, Panel, RiskBadge, ShopifySyncBadge, StageBadge, TableFooter, useStatuses } from "../components/ui";
+import { AutoBookChip, CustomerHistoryBadge, CustomStatusBadge, DispatchBadge, EmptyState, ErrorState, FulfillmentBadge, LabelBadge, LoadingState, PageHeader, Panel, RiskBadge, ShopifySyncBadge, StageBadge, TableFooter, useStatuses } from "../components/ui";
 import { CallingMenu } from "../components/Calling";
 import { OrderDrawer } from "../components/OrderDrawer";
 import { dateShort, money } from "../format";
@@ -82,6 +83,27 @@ export default function Orders() {
     refetchInterval: 30_000,
   });
   const rows = query.data?.rows ?? [];
+
+  // Notify when new orders arrive while the page is open.
+  const newestSeen = useRef<number | null>(null);
+  useEffect(() => {
+    const max = Math.max(0, ...rows.map((r) => r.id));
+    if (!rows.length) return;
+    if (newestSeen.current !== null && max > newestSeen.current) {
+      const fresh = rows.filter((r) => r.id > newestSeen.current!).length;
+      notifications.show({ color: "brand", title: "New orders", message: `${fresh} new order${fresh === 1 ? "" : "s"} from Shopify` });
+    }
+    newestSeen.current = Math.max(newestSeen.current ?? 0, max);
+  }, [rows]);
+
+  const quickConfirm = useMutation({
+    mutationFn: (id: number) => post<{ autoBookAt: string | null }>(`/orders/${id}/calling`, { status: "confirmed" }),
+    onSuccess: (r) => {
+      notifySuccess(r.autoBookAt ? "Confirmed — auto-booking in a few minutes" : "Confirmed");
+      invalidate();
+    },
+    onError: (e) => notifyError(e),
+  });
   const selectedRows = useMemo(() => rows.filter((r) => selected.has(r.id)), [rows, selected]);
 
   useEffect(() => setSelected(new Set()), [tab, filters.search, filters.statusId, page]);
@@ -151,7 +173,7 @@ export default function Orders() {
     <>
       <PageHeader
         title="Orders"
-        description="Shopify orders synced in real time. Booking with Steadfast is always a manual step."
+        description="Shopify orders synced in real time. Confirmed orders are booked with Steadfast after a short timer (or manually)."
         actions={
           <>
             {can("export") && (
@@ -262,9 +284,19 @@ export default function Orders() {
                         <Text size="xs" c="dimmed">{o.itemCount} item{o.itemCount === 1 ? "" : "s"}</Text>
                       </Table.Td>
                       <Table.Td><Text size="sm" c="dimmed" style={{ whiteSpace: "nowrap" }}>{dateShort(o.shopCreatedAt)}</Text></Table.Td>
-                      <Table.Td maw={240}>
-                        <Text size="sm" lineClamp={1}>{o.customerName ?? "—"}</Text>
-                        <Text size="xs" c={o.phone ? "dimmed" : "red"} className="mono">{o.phone ?? o.rawPhone ?? "No phone"}{o.city ? ` · ${o.city}` : ""}</Text>
+                      <Table.Td maw={260}>
+                        <Group gap={6} wrap="nowrap">
+                          <Text size="sm" lineClamp={1}>{o.customerName ?? "—"}</Text>
+                          <CustomerHistoryBadge orders={o.customerOrders} delivered={o.customerDelivered} returned={o.customerReturned} flag={o.customerFlag} />
+                        </Group>
+                        <Group gap={4} wrap="nowrap">
+                          {o.phone ? (
+                            <Anchor href={`tel:${o.phone}`} size="xs" className="mono" onClick={(e) => e.stopPropagation()}>{o.phone}</Anchor>
+                          ) : (
+                            <Text size="xs" c="red" className="mono">{o.rawPhone ?? "No phone"}</Text>
+                          )}
+                          {o.city && <Text size="xs" c="dimmed">· {o.city}</Text>}
+                        </Group>
                       </Table.Td>
                       <Table.Td ta="right">
                         <Text size="sm" fw={500} style={{ fontVariantNumeric: "tabular-nums" }}>{money(o.total)}</Text>
@@ -274,12 +306,23 @@ export default function Orders() {
                         {o.cancelledAt ? <Badge color="dark" size="sm">Cancelled</Badge> : <Badge color={o.financialStatus === "paid" ? "teal" : "gray"} size="sm" variant="outline">{o.financialStatus === "paid" ? "Prepaid" : o.outstanding > 0 ? "COD" : (o.financialStatus ?? "—")}</Badge>}
                       </Table.Td>
                       <Table.Td>
-                        <CallingMenu orderId={o.id} status={o.callingStatus} locked={o.courierStage !== "unbooked" || Boolean(o.cancelledAt)} onDone={invalidate} />
+                        <Group gap={4} wrap="nowrap">
+                          <CallingMenu orderId={o.id} status={o.callingStatus} locked={o.courierStage !== "unbooked" || Boolean(o.cancelledAt)} onDone={invalidate} />
+                          {tab === "to_call" && can("orders.call") && (
+                            <Tooltip label="Confirmed">
+                              <ActionIcon size="sm" color="teal" variant="light" aria-label="Confirm" loading={quickConfirm.isPending && quickConfirm.variables === o.id} onClick={(e) => { e.stopPropagation(); quickConfirm.mutate(o.id); }}>
+                                <CheckCircle2 size={14} />
+                              </ActionIcon>
+                            </Tooltip>
+                          )}
+                        </Group>
                         {o.callAttempts > 0 && <Text size="xs" c="dimmed" mt={2}>{o.callAttempts} call{o.callAttempts === 1 ? "" : "s"}{o.callbackAt ? ` · ${dateShort(o.callbackAt)}` : ""}</Text>}
                       </Table.Td>
                       <Table.Td>
                         <StageBadge stage={o.courierStage} />
                         {o.trackingCode && <Text size="xs" c="dimmed" className="mono" mt={2}>{o.trackingCode}</Text>}
+                        {o.autoBookAt && o.courierStage === "unbooked" && <div style={{ marginTop: 4 }}><AutoBookChip at={o.autoBookAt} /></div>}
+                        {!o.autoBookAt && o.autoBookNote && o.courierStage === "unbooked" && <Text size="xs" c="orange" lineClamp={2} maw={180}>{o.autoBookNote}</Text>}
                       </Table.Td>
                       <Table.Td>
                         {o.labelStatus === "not_ready" ? <Text size="xs" c="dimmed">—</Text> : (

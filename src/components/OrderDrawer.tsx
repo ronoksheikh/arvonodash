@@ -5,11 +5,11 @@ import {
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { modals } from "@mantine/modals";
 import {
-  AlertTriangle, Ban, ExternalLink, MapPin, MoreVertical, Package, Phone, RefreshCw, Send, Trash2, Truck, User, RotateCcw, CheckCircle2, ShieldCheck, Printer, MessageSquarePlus, PackageCheck,
+  AlertTriangle, Ban, ExternalLink, Timer, MapPin, MoreVertical, Package, Phone, RefreshCw, Send, Trash2, Truck, User, RotateCcw, CheckCircle2, ShieldCheck, Printer, MessageSquarePlus, PackageCheck,
 } from "lucide-react";
 import { api, del, notifyError, notifySuccess, patch, post, put } from "../api";
 import { useCan } from "../auth";
-import { CallingBadge, Copyable, CustomStatusBadge, DispatchBadge, ErrorState, FulfillmentBadge, KeyValue, LabelBadge, LoadingState, RiskBadge, ShopifySyncBadge, StageBadge, SteadfastStatusBadge, useStatuses, ReturnStatusBadge } from "./ui";
+import { useCountdown, CallingBadge, Copyable, CustomStatusBadge, DispatchBadge, ErrorState, FulfillmentBadge, KeyValue, LabelBadge, LoadingState, RiskBadge, ShopifySyncBadge, StageBadge, SteadfastStatusBadge, useStatuses, ReturnStatusBadge } from "./ui";
 import { CallingPanel } from "./Calling";
 import { ago, dateTime, money, titleCase } from "../format";
 import { DISPATCH_EVENTS, NOTE_KINDS, RISK_FLAGS, STEADFAST_STATUSES } from "../../shared/constants";
@@ -165,6 +165,9 @@ function OverviewTab({ d, refresh, goBooking }: { d: OrderDetail; refresh: () =>
     <Stack gap="lg">
       {!o.cancelledAt && (
         <CallingPanel orderId={o.id} status={o.callingStatus} attempts={o.callAttempts} callbackAt={o.callbackAt} locked={o.courierStage !== "unbooked"} calls={d.calls} onDone={refresh} />
+      )}
+      {o.courierStage === "unbooked" && !o.cancelledAt && o.callingStatus === "confirmed" && (
+        <AutoBookPanel orderId={o.id} at={o.autoBookAt} note={o.autoBookNote} onDone={refresh} />
       )}
       {o.riskFlags && o.riskFlags.length > 0 && !o.riskDismissed && (
         <Alert color="orange" variant="light" icon={<AlertTriangle size={18} />} title="Review before booking">
@@ -723,5 +726,36 @@ function CancelOrderModal({ orderId, name, opened, onClose, onDone }: { orderId:
         </Group>
       </Stack>
     </Modal>
+  );
+}
+
+function AutoBookPanel({ orderId, at, note, onDone }: { orderId: number; at: string | null; note: string | null; onDone: () => void }) {
+  const can = useCan();
+  const left = useCountdown(at);
+  const act = useMutation({
+    mutationFn: (action: "cancel" | "now" | "restart") => post<{ results?: { ok: boolean; error?: string; trackingCode?: string }[] }>(`/orders/${orderId}/auto-book`, { action }),
+    onSuccess: (r, action) => {
+      if (action === "now") {
+        const res = r.results?.[0];
+        res?.ok ? notifySuccess(`Tracking ${res.trackingCode}`, "Booked with Steadfast") : notifyError(new Error(res?.error ?? "Booking failed"));
+      }
+      onDone();
+    },
+    onError: (e) => notifyError(e),
+  });
+  return (
+    <Alert color={at ? "grape" : "gray"} variant="light" icon={<Timer size={18} />} title={at ? `Auto-booking in ${left}` : "Auto-booking off for this order"}>
+      <Text size="sm">{at ? "This confirmed order is sent to Steadfast automatically when the timer ends." : note ?? "Book it manually, or restart the timer."}</Text>
+      {can("courier.book") && (
+        <Group gap="xs" mt="sm">
+          <Button size="xs" leftSection={<Send size={14} />} loading={act.isPending && act.variables === "now"} onClick={() => act.mutate("now")}>Book now</Button>
+          {at ? (
+            <Button size="xs" variant="white" color="red" loading={act.isPending && act.variables === "cancel"} onClick={() => act.mutate("cancel")}>Cancel timer</Button>
+          ) : (
+            <Button size="xs" variant="white" loading={act.isPending && act.variables === "restart"} onClick={() => act.mutate("restart")}>Start timer</Button>
+          )}
+        </Group>
+      )}
+    </Alert>
   );
 }

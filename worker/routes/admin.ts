@@ -329,8 +329,8 @@ syncRoutes.use("*", requirePerm("sync.manage"));
 
 syncRoutes.post("/import/start", async (c) => {
   const db = getDb(c.env.DB);
-  const { sinceDays } = await c.req.json<{ sinceDays?: number | null }>();
-  const state = await startImport(db, sinceDays ?? null);
+  const { sinceDays, matchSteadfast } = await c.req.json<{ sinceDays?: number | null; matchSteadfast?: boolean }>();
+  const state = await startImport(db, sinceDays ?? null, matchSteadfast !== false);
   await logActivity(db, c.get("user"), "sync.import_started", { details: { sinceDays } });
   const step = await recordRun(db, "shopify_import", "manual", () => runImportStep(c.env, db, 3));
   return c.json({ state: { ...state, ...step }, step });

@@ -124,8 +124,9 @@ function graphql(query, variables) {
   }
   if (query.includes("query Orders")) {
     const after = variables.after ? Number(variables.after) : 0;
-    const page = shopifyOrders.slice(after, after + 2);
-    return { data: { orders: { nodes: page, pageInfo: { hasNextPage: after + 2 < shopifyOrders.length, endCursor: String(after + 2) } } }, extensions: { cost: { requestedQueryCost: 50, throttleStatus: { currentlyAvailable: 1900, restoreRate: 100, maximumAvailable: 2000 } } } };
+    const pool = String(variables.query ?? "").includes("status:open") ? Object.values(restOrders).filter((o) => !o.cancelled_at).reverse().map(restToGql) : shopifyOrders;
+    const page = pool.slice(after, after + 2);
+    return { data: { orders: { nodes: page, pageInfo: { hasNextPage: after + 2 < pool.length, endCursor: String(after + 2) } } }, extensions: { cost: { requestedQueryCost: 50, throttleStatus: { currentlyAvailable: 1900, restoreRate: 100, maximumAvailable: 2000 } } } };
   }
   if (query.includes("query Order(")) {
     const id = variables.id.split("/").pop();
@@ -192,6 +193,12 @@ const server = http.createServer(async (req, res) => {
     let m;
     if ((m = route.match(/^\/status_by_cid\/(\d+)$/))) {
       const c = state.consignments.find((x) => String(x.consignment_id) === m[1]);
+      return c ? json(res, 200, { status: 200, delivery_status: c.status }) : json(res, 404, { status: 404, message: "Not found" });
+    }
+    if ((m = route.match(/^\/status_by_trackingcode\/(.+)$/))) {
+      const code = decodeURIComponent(m[1]);
+      if (code === "LEGACY123") return json(res, 200, { status: 200, delivery_status: "delivered" });
+      const c = state.consignments.find((x) => x.tracking_code === code);
       return c ? json(res, 200, { status: 200, delivery_status: c.status }) : json(res, 404, { status: 404, message: "Not found" });
     }
     if ((m = route.match(/^\/status_by_invoice\/(.+)$/))) {

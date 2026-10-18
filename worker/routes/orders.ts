@@ -22,12 +22,15 @@ const TABS = ["all", "to_call", "ready", "booked", "in_transit", "delivered", "r
 
 
 
+// Orders fulfilled in Shopify outside ARVONO never belong in the calling/booking queues.
+const NOT_FULFILLED = sql`coalesce(${orders.shopifyFulfillmentStatus}, '') not in ('fulfilled', 'partially_fulfilled', 'partial')`;
+
 function tabCondition(tab: string): SQL | undefined {
   switch (tab) {
     case "to_call":
-      return and(inArray(orders.callingStatus, ["not_called", "no_answer", "call_again"]), eq(orders.courierStage, "unbooked"), isNull(orders.cancelledAt));
+      return and(inArray(orders.callingStatus, ["not_called", "no_answer", "call_again"]), eq(orders.courierStage, "unbooked"), isNull(orders.cancelledAt), NOT_FULFILLED);
     case "ready":
-      return and(eq(orders.callingStatus, "confirmed"), eq(orders.courierStage, "unbooked"), isNull(orders.cancelledAt));
+      return and(eq(orders.callingStatus, "confirmed"), eq(orders.courierStage, "unbooked"), isNull(orders.cancelledAt), NOT_FULFILLED);
     case "booked":
       return eq(orders.courierStage, "booked");
     case "in_transit":
@@ -118,6 +121,14 @@ const listColumns = {
   labelStatus: orders.labelStatus,
   dispatchStatus: orders.dispatchStatus,
   cancelRequestedAt: orders.cancelRequestedAt,
+  autoBookAt: orders.autoBookAt,
+  autoBookNote: orders.autoBookNote,
+  customerId: orders.customerId,
+  // Customer history (all their orders, by phone), for "new vs returning" at a glance.
+  customerOrders: sql<number>`(select count(*) from orders o2 where o2.customer_id = ${orders.customerId} and o2.id != ${orders.id})`,
+  customerDelivered: sql<number>`(select count(*) from orders o2 where o2.customer_id = ${orders.customerId} and o2.id != ${orders.id} and o2.courier_stage in ('delivered','partial_delivered'))`,
+  customerReturned: sql<number>`(select count(*) from orders o2 where o2.customer_id = ${orders.customerId} and o2.id != ${orders.id} and o2.courier_stage = 'returned')`,
+  customerFlag: sql<string | null>`(select flag from customers c2 where c2.id = ${orders.customerId})`,
   itemCount: sql<number>`(select coalesce(sum(json_extract(value, '$.quantity')), 0) from json_each(${orders.lineItems}))`,
   trackingCode: consignments.trackingCode,
   consignmentStatus: consignments.status,
@@ -232,6 +243,13 @@ async function loadOrder(db: DB, id: number) {
   if (!order) return null;
   return order;
 }
+
+/** Pull the latest from Shopify now (dashboard load/refresh). Throttled server-side. */
+orderRoutes.post("/sync-now", async (c) => {
+  const db = getDb(c.env.DB);
+  const { quickSync } = await import("../services/sync");
+  return c.json(await quickSync(c.env, db));
+});
 
 orderRoutes.get("/:id{[0-9]+}", async (c) => {
   const db = getDb(c.env.DB);
@@ -490,6 +508,7 @@ orderRoutes.post("/:id{[0-9]+}/cancel", requirePerm("orders.cancel"), async (c) 
     staffNote: body.staffNote,
   });
   await db.update(orders).set({ cancelRequestedAt: nowIso(), updatedAt: nowIso() }).where(eq(orders.id, id));
+  await db.update(orders).set({ autoBookAt: null, autoBookNote: "Cancellation requested" }).where(eq(orders.id, id));
   await logActivity(db, c.get("user"), "order.cancel_requested", { entityType: "order", entityId: id, orderId: id, details: { reason: body.reason, restock: body.restock ?? true, jobId: job?.id } });
   // Shopify cancels asynchronously; the orders/cancelled webhook (or a refresh) records completion.
   c.executionCtx.waitUntil(
@@ -530,4 +549,31 @@ orderRoutes.post("/:id{[0-9]+}/delete", requirePerm("orders.cancel"), async (c) 
     details: { deleted: result.deleted, archivedInShopify, shopifyMessage: result.error },
   });
   return c.json({ deleted: result.deleted, archivedInShopify, archivedHere: true, message: result.error ?? null });
+});
+
+// ---------------------------------------------------------------------------
+// Auto-booking timer controls
+
+orderRoutes.post("/:id{[0-9]+}/auto-book", requirePerm("courier.book"), async (c) => {
+  const db = getDb(c.env.DB);
+  const id = Number(c.req.param("id"));
+  const { action } = await c.req.json<{ action: "cancel" | "now" | "restart" }>();
+  const { cancelAutoBook, scheduleAutoBook } = await import("../services/autobook");
+  const user = c.get("user");
+  if (action === "cancel") {
+    await cancelAutoBook(db, id, `Timer cancelled by ${user.name}`);
+    await logActivity(db, user, "courier.auto_book_cancelled", { entityType: "order", entityId: id, orderId: id });
+    return c.json({ ok: true });
+  }
+  if (action === "restart") {
+    const at = await scheduleAutoBook(db, id);
+    if (!at) return c.json({ error: "Only confirmed, unbooked orders can be scheduled (and auto-booking must be enabled in Settings)" }, 400);
+    return c.json({ ok: true, autoBookAt: at });
+  }
+  if (action === "now") {
+    await cancelAutoBook(db, id, null);
+    const results = await bookOrders(c.env, db, user, [id], {}, (p) => c.executionCtx.waitUntil(p));
+    return c.json({ results });
+  }
+  return c.json({ error: "Unknown action" }, 400);
 });

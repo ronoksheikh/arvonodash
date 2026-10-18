@@ -83,6 +83,16 @@ Status legend: [x] done · [~] partial / limited by API · [ ] not started
 - [x] Connections (Shopify, Steadfast) configured from Settings; Steadfast webhook token auto-generated; optional AES-GCM at rest
 - [x] Webhook URLs derived from the serving domain
 
+## Phase 3 — smart sync & high-volume workflow
+- [x] Dashboard open/refresh pulls latest Shopify orders (throttled), then every minute while visible
+- [x] Cron re-reads recent open orders (catches "Mark as in progress" from the Shopify app without a webhook)
+- [x] Auto-booking timer after confirmation (default 10 min, configurable): countdown, cancel, book now, restart; flagged orders wait for review; claim is atomic (books once)
+- [x] Customer history badge in the order list (new / returning ×N with success %)
+- [x] Click-to-call phone links, one-click confirm in To call tab, new-order toast
+- [x] Orders shipped before ARVONO: linked to their Steadfast parcel via Shopify tracking, or matched by order number on import; kept out of work queues
+- [x] Work queues exclude orders already fulfilled in Shopify
+- [x] e2e: 46 checks
+
 ## Ideas / next
 - [ ] SMS confirmation to customers (needs a BD SMS gateway — out of scope, no external services)
 - [ ] Shopify return creation (`returnCreate`) once the team wants returns mirrored in Shopify

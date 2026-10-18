@@ -96,6 +96,10 @@ export async function upsertOrder(db: DB, input: NormalizedOrder, appSettings: A
   await refreshRiskFlags(db, id, appSettings);
   const after = await db.select().from(orders).where(eq(orders.id, id)).get();
   if (after) await applyShopifySideChanges(db, existing, after);
+  if (o.shipments.length || after?.shopifyFulfillmentStatus === "fulfilled") {
+    const { linkFromShopifyFulfillment } = await import("./legacy");
+    await linkFromShopifyFulfillment(db, id, o.shipments);
+  }
   return { id, created: !existing, stale: false };
 }
 

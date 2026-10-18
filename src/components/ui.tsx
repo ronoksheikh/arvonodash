@@ -1,6 +1,6 @@
-import type { ReactNode } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import { Alert, Badge, Button, Center, Group, Loader, Pagination, Paper, Stack, Text, ThemeIcon, Title, Tooltip, CopyButton, ActionIcon } from "@mantine/core";
-import { AlertTriangle, Check, Copy, Inbox, ShieldAlert } from "lucide-react";
+import { AlertTriangle, Check, Copy, Inbox, ShieldAlert, Timer } from "lucide-react";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "../api";
 import { CALLING_STATUSES, COURIER_STAGES, DISPATCH_STATUSES, FULFILLMENT_STATES, LABEL_STATUSES, RISK_FLAGS, SHOPIFY_SYNC_STATUSES, STEADFAST_STATUSES, RETURN_STATUSES } from "../../shared/constants";
@@ -202,3 +202,46 @@ export function ShopifySyncBadge({ status, error }: { status: string; error?: st
 
 /** Today's business date in Asia/Dhaka (UTC+6, no DST). */
 export const dhakaToday = (offsetDays = 0) => new Date(Date.now() + 6 * 3_600_000 + offsetDays * 86_400_000).toISOString().slice(0, 10);
+
+/** Live mm:ss countdown to an ISO time. */
+export function useCountdown(target: string | null | undefined) {
+  const [now, setNow] = useState(Date.now());
+  useEffect(() => {
+    if (!target) return;
+    const t = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(t);
+  }, [target]);
+  if (!target) return null;
+  const ms = Date.parse(target) - now;
+  if (ms <= 0) return "booking…";
+  const m = Math.floor(ms / 60_000);
+  const s = Math.floor((ms % 60_000) / 1000);
+  return `${m}:${String(s).padStart(2, "0")}`;
+}
+
+export function AutoBookChip({ at }: { at: string }) {
+  const left = useCountdown(at);
+  return (
+    <Tooltip label="Auto-books with Steadfast when the timer ends. Open the order to cancel or book now.">
+      <Badge size="sm" color="grape" variant="light" leftSection={<Timer size={11} />} style={{ fontVariantNumeric: "tabular-nums" }}>
+        {left}
+      </Badge>
+    </Tooltip>
+  );
+}
+
+/** New vs returning customer, with their delivery record. */
+export function CustomerHistoryBadge({ orders, delivered, returned, flag }: { orders: number; delivered: number; returned: number; flag?: string | null }) {
+  if (flag === "blocked") return <Badge size="xs" color="red">Blocked</Badge>;
+  if (!orders) return <Badge size="xs" color="cyan" variant="light">New customer</Badge>;
+  const finished = delivered + returned;
+  const rate = finished ? Math.round((delivered / finished) * 100) : null;
+  const color = rate === null ? "gray" : rate >= 80 ? "teal" : rate >= 50 ? "yellow" : "red";
+  return (
+    <Tooltip label={`${orders} previous order${orders === 1 ? "" : "s"} · ${delivered} delivered · ${returned} returned`}>
+      <Badge size="xs" color={flag === "vip" ? "grape" : color} variant="light">
+        {flag === "vip" ? "VIP · " : ""}Returning ×{orders}{rate !== null ? ` · ${rate}%` : ""}
+      </Badge>
+    </Tooltip>
+  );
+}

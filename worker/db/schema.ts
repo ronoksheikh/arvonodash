@@ -153,6 +153,9 @@ export const orders = sqliteTable(
     dispatchedAt: text("dispatched_at"),
     dispatchedBy: text("dispatched_by"),
     courierReceivedAt: text("courier_received_at"),
+    // Auto-booking: set when an order is confirmed; the cron books it once this time passes.
+    autoBookAt: text("auto_book_at"),
+    autoBookNote: text("auto_book_note"), // why auto-booking was skipped/cancelled
     // Courier & fulfillment (kept separate)
     courierStage: text("courier_stage").notNull().default("unbooked"), // unbooked|booked|in_transit|on_hold|delivered|partial_delivered|returned|cancelled|issue
     activeConsignmentId: integer("active_consignment_id"),

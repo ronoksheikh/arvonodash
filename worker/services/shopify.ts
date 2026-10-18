@@ -162,6 +162,8 @@ export type NormalizedOrder = {
   shopifyNote: string | null;
   noteAttributes: { name: string; value: string }[];
   sourceName: string | null;
+  /** Tracking numbers from fulfillments already created in Shopify (e.g. before ARVONO). */
+  shipments: { number: string; company: string | null; url: string | null }[];
 };
 
 const lower = (s: string | null | undefined) => (s ? s.toLowerCase() : null);
@@ -225,6 +227,12 @@ export function normalizeRestOrder(o: any): NormalizedOrder {
     shopifyNote: o.note ?? null,
     noteAttributes: (o.note_attributes ?? []).map((a: { name: string; value: unknown }) => ({ name: a.name, value: String(a.value ?? "") })),
     sourceName: o.source_name ?? null,
+    shipments: (o.fulfillments ?? [])
+      .filter((f: { status?: string }) => !f.status || ["success", "open", "pending"].includes(f.status))
+      .flatMap((f: { tracking_numbers?: string[]; tracking_number?: string | null; tracking_company?: string | null; tracking_urls?: string[]; tracking_url?: string | null }) => {
+        const numbers = f.tracking_numbers?.length ? f.tracking_numbers : f.tracking_number ? [f.tracking_number] : [];
+        return numbers.map((number, i) => ({ number, company: f.tracking_company ?? null, url: f.tracking_urls?.[i] ?? f.tracking_url ?? null }));
+      }),
   };
 }
 
@@ -242,6 +250,7 @@ const ORDER_FIELDS = /* GraphQL */ `
   customer { id displayName firstName lastName defaultPhoneNumber { phoneNumber } defaultEmailAddress { emailAddress } }
   shippingAddress { name firstName lastName address1 address2 city province zip country phone }
   billingAddress { name phone }
+  fulfillments(first: 10) { status trackingInfo(first: 5) { number company url } }
   lineItems(first: 100) {
     nodes {
       id title variantTitle sku quantity currentQuantity unfulfilledQuantity
@@ -302,6 +311,11 @@ export function normalizeGraphqlOrder(o: any): NormalizedOrder {
     shopifyNote: o.note ?? null,
     noteAttributes: (o.customAttributes ?? []).map((a: { key: string; value: string }) => ({ name: a.key, value: a.value ?? "" })),
     sourceName: o.sourceName ?? null,
+    shipments: (o.fulfillments ?? [])
+      .filter((f: { status?: string }) => !f.status || ["SUCCESS", "OPEN", "PENDING"].includes(f.status))
+      .flatMap((f: { trackingInfo?: { number: string | null; company: string | null; url: string | null }[] }) =>
+        (f.trackingInfo ?? []).filter((t) => t.number).map((t) => ({ number: t.number!, company: t.company ?? null, url: t.url ?? null })),
+      ),
   };
 }
 

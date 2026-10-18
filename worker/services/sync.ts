@@ -7,6 +7,8 @@ import { upsertOrder } from "./orders";
 import { getSettings, getValue, setValue } from "./settings";
 import { applyCourierUpdate, findConsignment } from "./courier";
 import { logActivity } from "./activity";
+import { matchByInvoice } from "./legacy";
+import { steadfastConfigured } from "./steadfast";
 import { enqueueJob } from "./jobs";
 import * as steadfast from "./steadfast";
 import { nowIso, toNumber } from "../lib/util";
@@ -30,11 +32,13 @@ export async function recordRun<T extends Record<string, unknown>>(db: DB, kind:
 // ---------------------------------------------------------------------------
 // Shopify historical import (resumable; a few pages per invocation)
 
-export type ImportState = { cursor: string | null; done: boolean; imported: number; since: string | null; startedAt: string; finishedAt?: string };
+export type ImportState = { cursor: string | null; done: boolean; imported: number; since: string | null; startedAt: string; finishedAt?: string; matchSteadfast?: boolean; linked?: number };
 const IMPORT_KEY = "shopify.import";
 
-export async function startImport(db: DB, sinceDays: number | null) {
+export async function startImport(db: DB, sinceDays: number | null, matchSteadfast = true) {
   const state: ImportState = {
+    matchSteadfast,
+    linked: 0,
     cursor: null,
     done: false,
     imported: 0,
@@ -60,7 +64,14 @@ export async function runImportStep(env: Env, db: DB, maxPages = 4) {
       first: 50,
     });
     for (const o of page.orders) {
-      await upsertOrder(db, o, appSettings);
+      const r = await upsertOrder(db, o, appSettings);
+      if (state.matchSteadfast && steadfastConfigured(env)) {
+        try {
+          if (await matchByInvoice(env, db, r.id)) state.linked = (state.linked ?? 0) + 1;
+        } catch {
+          // Matching is best-effort; the order simply stays in the calling queue.
+        }
+      }
       imported++;
     }
     pages++;
@@ -273,4 +284,40 @@ export async function syncPayments(env: Env, db: DB, maxPages = 2) {
 
 export async function latestRuns(db: DB, limit = 50) {
   return db.select().from(syncRuns).orderBy(desc(syncRuns.startedAt)).limit(limit).all();
+}
+
+/**
+ * Re-reads recent open orders through GraphQL. Catches changes that don't fire an order webhook
+ * or don't bump updated_at — notably "Mark as in progress" from the Shopify admin/mobile app.
+ */
+export async function syncRecentOpenOrders(env: Env, db: DB, opts: { days?: number; maxPages?: number } = {}) {
+  if (!shopifyConfigured(env)) return { skipped: true };
+  const appSettings = await getSettings(db);
+  const since = new Date(Date.now() - (opts.days ?? 3) * 86_400_000).toISOString();
+  let cursor: string | null = null;
+  let seen = 0;
+  for (let page = 0; page < (opts.maxPages ?? 4); page++) {
+    const r = await fetchOrdersPage(env, db, { after: cursor, search: `status:open created_at:>='${since}'`, first: 50 });
+    for (const o of r.orders) {
+      await upsertOrder(db, o, appSettings);
+      seen++;
+    }
+    cursor = r.pageInfo.endCursor;
+    if (!r.pageInfo.hasNextPage) break;
+  }
+  return { checked: seen };
+}
+
+const QUICK_KEY = "sync.quickAt";
+
+/** Called when the dashboard opens/refreshes. Throttled so many open tabs don't hammer Shopify. */
+export async function quickSync(env: Env, db: DB) {
+  const last = await getValue<string>(db, QUICK_KEY);
+  if (last && Date.now() - Date.parse(last) < 20_000) return { skipped: true, lastAt: last };
+  await setValue(db, QUICK_KEY, nowIso());
+  const [reconcile, open] = await Promise.all([
+    reconcileShopify(env, db, 2).catch((e: Error) => ({ error: e.message })),
+    syncRecentOpenOrders(env, db, { days: 2, maxPages: 2 }).catch((e: Error) => ({ error: e.message })),
+  ]);
+  return { reconcile, open };
 }

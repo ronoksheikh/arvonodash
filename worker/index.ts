@@ -15,7 +15,8 @@ import { codRoutes, customerRoutes, dashboardRoutes, returnRoutes } from "./rout
 import { logRoutes, pruneOldData, settingsRoutes, syncRoutes, userRoutes } from "./routes/admin";
 import { processJobs } from "./services/jobs";
 import { pollActiveConsignments } from "./services/courier";
-import { getImportState, reconcileShopify, recordRun, retryFailedWebhooks, runImportStep, syncPayments } from "./services/sync";
+import { getImportState, reconcileShopify, recordRun, retryFailedWebhooks, runImportStep, syncPayments, syncRecentOpenOrders } from "./services/sync";
+import { runAutoBookings } from "./services/autobook";
 import { shopifyConfigured } from "./services/shopify";
 import { steadfastConfigured } from "./services/steadfast";
 import { setValue } from "./services/settings";
@@ -69,6 +70,17 @@ async function scheduled(controller: ScheduledController, env: Env) {
   const now = new Date(controller.scheduledTime);
   const minute = now.getUTCMinutes();
   const hour = now.getUTCHours();
+  // Every minute: auto-booking timers. Everything else runs on the 5-minute beat.
+  try {
+    const r = await runAutoBookings(env, db);
+    if (r.processed) await db.insert(syncRuns).values({ kind: "auto_booking", trigger: "cron", status: r.skipped ? "partial" : "success", stats: r, startedAt: nowIso(), finishedAt: nowIso() });
+  } catch (err) {
+    await db.insert(syncRuns).values({ kind: "auto_booking", trigger: "cron", status: "failed", error: (err as Error).message, startedAt: nowIso(), finishedAt: nowIso() });
+  }
+  if (minute % 5 !== 0) {
+    await setValue(db, "cron.lastRun", nowIso());
+    return;
+  }
   const steps: [string, () => Promise<Record<string, unknown>>, boolean][] = [
     ["print_reservations", () => expireReservations(db).then((r) => ({ ...r, processed: r.expired })), true],
     ["jobs", () => processJobs(env, db, { limit: 25 }), true],
@@ -95,12 +107,14 @@ async function scheduled(controller: ScheduledController, env: Env) {
     const importState = await getImportState(db);
     if (importState && !importState.done) await recordRun(db, "shopify_import", "cron", () => runImportStep(env, db, 3)).catch(() => {});
     // Every 15 minutes: catch edits made in Shopify admin/mobile whose webhooks were missed.
-    if (minute % 15 < 5) await recordRun(db, "shopify_reconcile", "cron", () => reconcileShopify(env, db)).catch(() => {});
+    if (minute % 15 === 0) await recordRun(db, "shopify_reconcile", "cron", () => reconcileShopify(env, db)).catch(() => {});
+    // Shopify-app changes like "Mark as in progress" don't always fire a webhook.
+    await syncRecentOpenOrders(env, db, { days: 3, maxPages: 4 }).catch(() => {});
   }
-  if (steadfastConfigured(env) && minute < 5 && hour % 3 === 0) {
+  if (steadfastConfigured(env) && minute === 0 && hour % 3 === 0) {
     await recordRun(db, "payments", "cron", () => syncPayments(env, db, 2)).catch(() => {});
   }
-  if (minute < 5 && hour === 21) await pruneOldData(db); // ~03:00 Asia/Dhaka
+  if (minute === 0 && hour === 21) await pruneOldData(db); // ~03:00 Asia/Dhaka
   await setValue(db, "cron.lastRun", nowIso());
 }
 

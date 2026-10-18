@@ -23,6 +23,9 @@ type AppSettings = {
   highValueThreshold: number;
   duplicateWindowHours: number;
   autoCreateReturns: boolean;
+  autoBookEnabled: boolean;
+  autoBookDelayMinutes: number;
+  autoBookSkipFlagged: boolean;
   businessName: string;
   businessPhone: string;
   businessAddress: string;
@@ -289,6 +292,15 @@ function Workflow({ d }: { d: SettingsData }) {
         <SimpleGrid cols={{ base: 1, sm: 2 }} mt="md">
           <TextInput label="Tracking company name" description="Shown to customers in Shopify" value={s.trackingCompany} onChange={(e) => setS({ ...s, trackingCompany: e.currentTarget.value })} disabled={disabled} />
           <Switch mt={30} label="Send Shopify shipping confirmation to customer" checked={s.notifyCustomer} onChange={(e) => setS({ ...s, notifyCustomer: e.currentTarget.checked })} disabled={disabled} />
+        </SimpleGrid>
+      </Card>
+      <Card>
+        <Text fw={600} mb={4}>Auto-booking after confirmation</Text>
+        <Text size="sm" c="dimmed" mb="md">When an order is confirmed (here or by marking it In progress in Shopify), it is booked with Steadfast after this delay. Staff can cancel the timer or book immediately from the order.</Text>
+        <Switch label="Book confirmed orders automatically" checked={s.autoBookEnabled} onChange={(e) => setS({ ...s, autoBookEnabled: e.currentTarget.checked })} disabled={disabled} />
+        <SimpleGrid cols={{ base: 1, sm: 2 }} mt="sm">
+          <NumberInput label="Delay (minutes)" min={0} max={1440} value={s.autoBookDelayMinutes} onChange={(v) => setS({ ...s, autoBookDelayMinutes: Number(v) || 0 })} disabled={disabled || !s.autoBookEnabled} />
+          <Switch mt={30} label="Skip orders with risk flags (book them manually)" checked={s.autoBookSkipFlagged} onChange={(e) => setS({ ...s, autoBookSkipFlagged: e.currentTarget.checked })} disabled={disabled || !s.autoBookEnabled} />
         </SimpleGrid>
       </Card>
       <Card>

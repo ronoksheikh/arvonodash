@@ -183,7 +183,7 @@ async function bookOne(
   for (const c of existing) await db.update(consignments).set({ superseded: true }).where(eq(consignments.id, c.id));
   await db
     .update(orders)
-    .set({ courierStage: "booked", activeConsignmentId: reserved.id, booking: booking, bookedSource: shopifyContactKey(order), updatedAt: nowIso() })
+    .set({ courierStage: "booked", activeConsignmentId: reserved.id, booking: booking, bookedSource: shopifyContactKey(order), autoBookAt: null, autoBookNote: null, updatedAt: nowIso() })
     .where(eq(orders.id, order.id));
   await onBooked(db, order.id, reserved.id, user);
   await db.insert(trackingEvents).values({
@@ -343,8 +343,9 @@ export async function pollActiveConsignments(env: Env, db: DB, opts: { limit?: n
     try {
       let status: string | null;
       if (c.consignmentId) status = await steadfast.getStatusByConsignmentId(env, c.consignmentId);
-      else if (c.status === "unconfirmed") status = await steadfast.getStatusByInvoice(env, c.invoice);
-      else continue;
+      else if (c.trackingCode) status = await steadfast.getStatusByTrackingCode(env, c.trackingCode);
+      else if (c.status === "creating") continue; // booking in flight
+      else status = await steadfast.getStatusByInvoice(env, c.invoice);
       if (!status) {
         await db.update(consignments).set({ lastPolledAt: nowIso() }).where(eq(consignments.id, c.id));
         continue;
@@ -375,7 +376,23 @@ export async function findConsignment(db: DB, ref: { consignmentId?: string | nu
     }
   }
   if (ref.trackingCode) {
-    return (await db.select().from(consignments).where(eq(consignments.trackingCode, ref.trackingCode)).get()) ?? null;
+    const row = await db.select().from(consignments).where(eq(consignments.trackingCode, ref.trackingCode)).get();
+    if (row) return row;
+  }
+  if (ref.invoice) {
+    // Parcels booked before ARVONO use the order number as invoice.
+    const order = await db
+      .select({ active: orders.activeConsignmentId })
+      .from(orders)
+      .where(sql`${orders.name} in (${ref.invoice}, ${"#" + ref.invoice.replace(/^#/, "")})`)
+      .get();
+    if (order?.active) {
+      const row = await db.select().from(consignments).where(eq(consignments.id, order.active)).get();
+      if (row && !row.consignmentId) {
+        if (ref.consignmentId) await db.update(consignments).set({ consignmentId: ref.consignmentId }).where(eq(consignments.id, row.id));
+        return { ...row, consignmentId: ref.consignmentId ?? null };
+      }
+    }
   }
   return null;
 }

@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { AppShell, Avatar, Burger, Group, Menu, NavLink, ScrollArea, Stack, Text, TextInput, ActionIcon, useMantineColorScheme, useComputedColorScheme, Tooltip, Badge, Box, UnstyledButton } from "@mantine/core";
 import { useDisclosure, useHotkeys } from "@mantine/hooks";
 import { NavLink as RouterLink, Outlet, useLocation, useNavigate } from "react-router";
@@ -36,6 +36,29 @@ export function Layout() {
   const scheme = useComputedColorScheme("light");
   const [search, setSearch] = useState("");
   useHotkeys([["mod+K", () => document.getElementById("global-search")?.focus()]]);
+
+  // Pull the latest from Shopify whenever the dashboard opens or refreshes, then every minute
+  // while visible. Webhooks still do the real-time work; this catches anything they miss.
+  useEffect(() => {
+    if (!user?.permissions.includes("orders.view")) return;
+    const run = () => {
+      if (document.visibilityState !== "visible") return;
+      post("/orders/sync-now")
+        .then(() => {
+          qc.invalidateQueries({ queryKey: ["orders"] });
+          qc.invalidateQueries({ queryKey: ["nav-counts"] });
+          qc.invalidateQueries({ queryKey: ["dashboard"] });
+        })
+        .catch(() => {});
+    };
+    run();
+    const t = setInterval(run, 60_000);
+    document.addEventListener("visibilitychange", run);
+    return () => {
+      clearInterval(t);
+      document.removeEventListener("visibilitychange", run);
+    };
+  }, [user, qc]);
 
   const counts = useQuery({
     queryKey: ["nav-counts"],

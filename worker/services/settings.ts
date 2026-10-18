@@ -16,6 +16,9 @@ export type AppSettings = {
   highValueThreshold: number;
   duplicateWindowHours: number;
   autoCreateReturns: boolean;
+  autoBookEnabled: boolean;
+  autoBookDelayMinutes: number;
+  autoBookSkipFlagged: boolean;
   businessName: string;
   businessPhone: string;
   businessAddress: string;
@@ -32,6 +35,9 @@ export const DEFAULT_SETTINGS: AppSettings = {
   highValueThreshold: 10000,
   duplicateWindowHours: 72,
   autoCreateReturns: true,
+  autoBookEnabled: true,
+  autoBookDelayMinutes: 10,
+  autoBookSkipFlagged: true,
   businessName: "ARVONO",
   businessPhone: "",
   businessAddress: "",

@@ -19,7 +19,7 @@
   ],
   // Every 5 minutes: background jobs + courier status polling.
   // Hourly / daily work (Shopify reconciliation, COD settlements) is scheduled inside the handler.
-  "triggers": { "crons": ["*/5 * * * *"] },
+  "triggers": { "crons": ["* * * * *"] },
   // Shopify / Steadfast credentials are entered in the dashboard (Settings → Connections).
   // Worker secrets with the same names (wrangler secret put …) override them if you prefer.
   "vars": {
