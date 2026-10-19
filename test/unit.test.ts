@@ -5,6 +5,7 @@ import { stageForStatus, isPickedUpStatus, isFinalStatus, normalizeFraudScore, p
 import { shipByDate } from "../worker/services/pickup";
 import { renderTemplate } from "../worker/services/sms";
 import { smsSegments } from "../shared/constants";
+import { classifyChannel, utmFromAttributes, utmFromUrl } from "../shared/attribution";
 import { judgeFraud } from "../worker/services/fraud";
 import { DEFAULT_SETTINGS, normalizeBaseUrl } from "../worker/services/settings";
 import { partialOutcome } from "../shared/delivery";
@@ -218,4 +219,26 @@ describe("tracking domain", () => {
     ["", ""],
   ])("normalizes %s", (input, out) => expect(normalizeBaseUrl(input)).toBe(out));
   it.each(["http://track.arvono.store", "https://track.arvono.store/?x=1", "not a url at all"])("rejects %s", (input) => expect(normalizeBaseUrl(input)).toBeNull());
+});
+
+describe("order source", () => {
+  const visit = (v: Partial<import("../shared/attribution").Visit>) => ({ source: null, sourceType: null, sourceDescription: null, referrerUrl: null, landingPage: null, utm: null, occurredAt: null, ...v });
+  it("reads UTM tags from a landing path", () => expect(utmFromUrl("/p/x?utm_source=fb&utm_campaign=eid")).toMatchObject({ source: "fb", campaign: "eid", medium: null }));
+  it.each([
+    [{ utm: { source: "fb", medium: "paid", campaign: "x", content: null, term: null } }, "facebook_ads"],
+    [{ utm: { source: "facebook", medium: "social", campaign: null, content: null, term: null } }, "facebook"],
+    [{ utm: { source: "ig", medium: "cpc", campaign: null, content: null, term: null } }, "instagram_ads"],
+    [{ landingPage: "/?gclid=123" }, "google_ads"],
+    [{ landingPage: "/?fbclid=1", referrerUrl: "https://l.facebook.com/" }, "facebook"],
+    [{ source: "google", referrerUrl: "https://www.google.com/" }, "google"],
+    [{ referrerUrl: "https://someblog.com/post" }, "referral"],
+    [{ source: "direct" }, "direct"],
+    [{ utm: { source: "leads_list", medium: null, campaign: null, content: null, term: null } }, "referral"],
+  ])("classifies %j as %s", (v, expected) => expect(classifyChannel({ sourceName: "web", visit: visit(v as never) })).toBe(expected));
+  it("staff-made and POS orders", () => {
+    expect(classifyChannel({ sourceName: "shopify_draft_order", visit: null })).toBe("draft_order");
+    expect(classifyChannel({ sourceName: "pos", visit: null })).toBe("pos");
+    expect(classifyChannel({ sourceName: "web", visit: null })).toBe("unknown");
+  });
+  it("reads UTM cart attributes", () => expect(utmFromAttributes([{ name: "_utm_source", value: "tiktok" }])?.source).toBe("tiktok"));
 });

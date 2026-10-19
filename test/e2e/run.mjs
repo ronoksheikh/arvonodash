@@ -1190,6 +1190,47 @@ await step("journey: one timeline from every source, with milestones", async () 
   await call("PUT", "/api/settings", { smsEnabled: false, trackingBaseUrl: "" });
 });
 
+await step("order source: UTM tags from the webhook at once, then Shopify's customer journey; filters, report, CSV", async () => {
+  const o = await newOrder(6001, "+880 1755-600001", {
+    landing_site: "/products/panjabi?utm_source=fb&utm_medium=paid&utm_campaign=eid_sale&utm_content=video1&fbclid=abc",
+    referring_site: "https://l.facebook.com/",
+  });
+  let d = await orderDetail(o.id);
+  assert.equal(d.order.channel, "facebook_ads");
+  assert.equal(d.order.utmCampaign, "eid_sale");
+  assert.equal(d.order.attribution.from, "web");
+
+  // Shopify's journey arrives later and wins: first visit from Google, last (credited) from an Instagram ad.
+  const visit = (over) => ({ source: "instagram", sourceType: "AD", sourceDescription: null, referrerUrl: "https://instagram.com/", landingPage: "https://arvono.store/?utm_source=ig", occurredAt: new Date().toISOString(), utmParameters: { source: "ig", medium: "paid_social", campaign: "winter_drop", content: "reel2", term: null }, ...over });
+  await fetch(`${MOCK}/__journey`, { method: "POST", body: JSON.stringify({ id: 6001, journey: { ready: true, daysToConversion: 2, customerOrderIndex: 1, firstVisit: visit({ source: "google", sourceType: null, referrerUrl: "https://www.google.com/", utmParameters: null }), lastVisit: visit({}) } }) });
+  const run = await call("POST", "/api/sync/order-sources");
+  assert.ok(run.body.processed >= 1, JSON.stringify(run.body));
+  d = await orderDetail(o.id);
+  assert.equal(d.order.channel, "instagram_ads");
+  assert.equal(d.order.utmCampaign, "winter_drop");
+  assert.equal(d.order.attribution.from, "journey");
+  assert.equal(d.order.attribution.firstVisit.source, "google");
+  assert.equal(d.order.attribution.daysToConversion, 2);
+
+  // A later webhook with older data doesn't overwrite Shopify's journey.
+  await shopifyWebhook("orders/updated", restOrder(6001, { updated_at: new Date(Date.now() + 5000).toISOString(), landing_site: "/?utm_source=google", shipping_address: { name: "Rafiq Hasan", address1: "House 9, Road 2, Mirpur", city: "Dhaka", phone: "+880 1755-600001" } }));
+  assert.equal((await orderDetail(o.id)).order.channel, "instagram_ads");
+
+  const direct = await newOrder(6002, "+880 1755-600002");
+  assert.equal((await orderDetail(direct.id)).order.channel, "unknown", "no visit data yet");
+  const list = await call("GET", "/api/orders?channel=instagram_ads");
+  assert.deepEqual(list.body.rows.map((r) => r.id), [o.id]);
+  assert.equal(list.body.rows[0].utmCampaign, "winter_drop");
+  assert.ok((await call("GET", "/api/orders?campaign=winter_drop")).body.rows.some((r) => r.id === o.id));
+  const sources = await call("GET", "/api/orders/sources");
+  assert.ok(sources.body.campaigns.some((x) => x.campaign === "winter_drop"));
+  const today = (await call("GET", "/api/ops/pickup")).body.date;
+  const report = (await call("GET", `/api/ops/report?from=${today}&to=${today}`)).body;
+  assert.equal(report.sources.channels.find((x) => x.channel === "instagram_ads")?.orders, 1);
+  const csv = await call("GET", "/api/orders/export.csv?channel=instagram_ads", undefined, { raw: true });
+  assert.match(csv.body, /Instagram Ads,ig,paid_social,winter_drop,reel2/);
+});
+
 await step("activity log records actions", async () => {
   const a = await call("GET", "/api/logs/activity");
   const actions = new Set(a.body.rows.map((r) => r.action));

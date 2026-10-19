@@ -4,11 +4,31 @@ import { consignments, customers, customStatuses, orders } from "../db/schema";
 import type { NormalizedOrder } from "./shopify";
 import { getSettings, type AppSettings } from "./settings";
 import { logActivity } from "./activity";
+import { classifyChannel, creditedVisit, type Attribution } from "../../shared/attribution";
 import type { SessionUser } from "../env";
 import { cleanPhone, normalizeBdPhone, nowIso } from "../lib/util";
 import { applyShopifySideChanges } from "./calling";
 import { newTrackingToken } from "./tracking";
 import { getFraudCheck, judgeFraud, queueFraudCheck } from "./fraud";
+
+/** Shopify's journey (read later) beats the webhook's landing page; a GraphQL import brings none. */
+function pickAttribution(existing: Attribution | null, incoming: Attribution | undefined): Attribution | null {
+  if (!incoming || existing?.from === "journey") return existing;
+  if (incoming.from === "none" && existing) return existing;
+  return incoming;
+}
+
+/** Columns for the order's source: channel and the credited (last-click) UTM tags. */
+export function orderSource(sourceName: string | null, attribution: Attribution | null) {
+  const visit = creditedVisit(attribution);
+  return {
+    attribution,
+    channel: classifyChannel({ sourceName, visit }),
+    utmSource: visit?.utm?.source ?? null,
+    utmMedium: visit?.utm?.medium ?? null,
+    utmCampaign: visit?.utm?.campaign ?? null,
+  };
+}
 
 /** Insert or update an order from Shopify. Internal workflow fields are never overwritten. */
 export async function upsertOrder(db: DB, input: NormalizedOrder, appSettings: AppSettings) {
@@ -65,6 +85,7 @@ export async function upsertOrder(db: DB, input: NormalizedOrder, appSettings: A
     shopifyNote: o.shopifyNote,
     noteAttributes: o.noteAttributes,
     sourceName: o.sourceName,
+    ...orderSource(o.sourceName, pickAttribution(existing?.attribution ?? null, o.attribution)),
     updatedAt: now,
   };
 

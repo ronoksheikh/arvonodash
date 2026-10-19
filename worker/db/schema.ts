@@ -1,3 +1,4 @@
+import type { Attribution } from "../../shared/attribution";
 import { sqliteTable, text, integer, real, index, uniqueIndex } from "drizzle-orm/sqlite-core";
 
 // All timestamps are ISO-8601 UTC strings. Money is stored as REAL in BDT (store currency).
@@ -122,6 +123,14 @@ export const orders = sqliteTable(
     shopifyNote: text("shopify_note"),
     noteAttributes: text("note_attributes", { mode: "json" }).$type<{ name: string; value: string }[]>(),
     sourceName: text("source_name"),
+    // Where the order came from: our channel reading plus the credited (last-click) UTM tags, and
+    // the full Shopify customer journey in `attribution`. Filled from the webhook, then from Shopify's journey.
+    channel: text("channel"),
+    utmSource: text("utm_source"),
+    utmMedium: text("utm_medium"),
+    utmCampaign: text("utm_campaign"),
+    attribution: text("attribution", { mode: "json" }).$type<Attribution>(),
+    attributionCheckedAt: text("attribution_checked_at"), // Shopify journey read (null = still to read)
     // Internal workflow
     statusId: integer("status_id"), // custom status
     internalTags: text("internal_tags", { mode: "json" }).$type<string[]>(),
@@ -199,6 +208,8 @@ export const orders = sqliteTable(
     index("orders_pickup_idx").on(t.pickupId),
     index("orders_combined_idx").on(t.combinedIntoOrderId),
     index("orders_ship_by_idx").on(t.shipBy),
+    index("orders_channel_idx").on(t.channel, t.shopCreatedAt),
+    index("orders_campaign_idx").on(t.utmCampaign),
     uniqueIndex("orders_tracking_token_idx").on(t.trackingToken),
   ],
 );

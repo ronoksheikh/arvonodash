@@ -1,4 +1,5 @@
 import type { Env } from "../env";
+import { utmFromAttributes, utmFromUrl, type Attribution, type Visit } from "../../shared/attribution";
 import type { DB } from "../db";
 import type { LineItem } from "../db/schema";
 import { getValue, setValue } from "./settings";
@@ -162,6 +163,8 @@ export type NormalizedOrder = {
   shopifyNote: string | null;
   noteAttributes: { name: string; value: string }[];
   sourceName: string | null;
+  /** Webhook only: landing/referring site and UTM cart attributes. GraphQL imports leave it out (read later from the journey). */
+  attribution?: Attribution;
   /** Tracking numbers from fulfillments already created in Shopify (e.g. before ARVONO). */
   shipments: { number: string; company: string | null; url: string | null }[];
 };
@@ -227,6 +230,7 @@ export function normalizeRestOrder(o: any): NormalizedOrder {
     shopifyNote: o.note ?? null,
     noteAttributes: (o.note_attributes ?? []).map((a: { name: string; value: unknown }) => ({ name: a.name, value: String(a.value ?? "") })),
     sourceName: o.source_name ?? null,
+    attribution: restAttribution(o),
     shipments: (o.fulfillments ?? [])
       .filter((f: { status?: string }) => !f.status || ["success", "open", "pending"].includes(f.status))
       .flatMap((f: { tracking_numbers?: string[]; tracking_number?: string | null; tracking_company?: string | null; tracking_urls?: string[]; tracking_url?: string | null }) => {
@@ -234,6 +238,63 @@ export function normalizeRestOrder(o: any): NormalizedOrder {
         return numbers.map((number, i) => ({ number, company: f.tracking_company ?? null, url: f.tracking_urls?.[i] ?? f.tracking_url ?? null }));
       }),
   };
+}
+
+/** What a webhook payload says about the visit: landing page (with UTM tags), referring site, UTM cart attributes. */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function restAttribution(o: any): Attribution {
+  const landing: string | null = o.landing_site || null;
+  const referrer: string | null = o.referring_site || null;
+  const attrUtm = utmFromAttributes((o.note_attributes ?? []).map((a: { name: string; value: unknown }) => ({ name: String(a.name), value: String(a.value ?? "") })));
+  const utm = utmFromUrl(landing) ?? attrUtm;
+  const visit = landing || referrer || utm ? { source: null, sourceType: null, sourceDescription: null, referrerUrl: referrer, landingPage: landing, utm, occurredAt: null } : null;
+  return { from: !visit ? "none" : utm && utm === attrUtm ? "attributes" : "web", firstVisit: null, lastVisit: visit, daysToConversion: null, customerOrderIndex: null };
+}
+
+const VISIT_FIELDS = /* GraphQL */ `source sourceType sourceDescription referrerUrl landingPage occurredAt utmParameters { source medium campaign content term }`;
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function toVisit(v: any): Visit | null {
+  if (!v) return null;
+  const u = v.utmParameters;
+  return {
+    source: v.source ?? null,
+    sourceType: v.sourceType ?? null,
+    sourceDescription: v.sourceDescription ?? null,
+    referrerUrl: v.referrerUrl ?? null,
+    landingPage: v.landingPage ?? null,
+    utm: u && (u.source || u.medium || u.campaign || u.content || u.term) ? { source: u.source ?? null, medium: u.medium ?? null, campaign: u.campaign ?? null, content: u.content ?? null, term: u.term ?? null } : null,
+    occurredAt: v.occurredAt ?? null,
+  };
+}
+
+/**
+ * Shopify's customer journey (first and last visit, UTM tags, referrer) for up to 100 orders in one
+ * call. Its own query, so a problem here never affects the order sync. null = order not found.
+ */
+export async function fetchJourneys(env: Env, db: DB, shopifyIds: string[]): Promise<Map<string, { ready: boolean; attribution: Attribution | null } | null>> {
+  const data = await shopifyGraphql<{ nodes: ({ id: string; customerJourneySummary: unknown } | null)[] }>(
+    env,
+    db,
+    `query Journeys($ids: [ID!]!) { nodes(ids: $ids) { ... on Order { id customerJourneySummary {
+      ready daysToConversion customerOrderIndex firstVisit { ${VISIT_FIELDS} } lastVisit { ${VISIT_FIELDS} } } } } }`,
+    { ids: shopifyIds.map((id) => `gid://shopify/Order/${id}`) },
+  );
+  const out = new Map<string, { ready: boolean; attribution: Attribution | null } | null>();
+  shopifyIds.forEach((id, i) => {
+    const node = data.nodes[i];
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const j = node?.customerJourneySummary as any;
+    if (!node) return out.set(id, null);
+    if (!j) return out.set(id, { ready: false, attribution: null });
+    const firstVisit = toVisit(j.firstVisit);
+    const lastVisit = toVisit(j.lastVisit);
+    out.set(id, {
+      ready: Boolean(j.ready),
+      attribution: firstVisit || lastVisit ? { from: "journey", firstVisit, lastVisit, daysToConversion: j.daysToConversion ?? null, customerOrderIndex: j.customerOrderIndex ?? null } : null,
+    });
+  });
+  return out;
 }
 
 const ORDER_FIELDS = /* GraphQL */ `

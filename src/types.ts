@@ -1,3 +1,4 @@
+import type { Attribution } from "../shared/attribution";
 // API response shapes used by the dashboard.
 
 export type LineItem = {
@@ -69,6 +70,10 @@ export type OrderListRow = {
   customerReturned: number;
   customerFlag: string | null;
   combinedIntoOrderId: number | null;
+  channel: string | null;
+  utmSource: string | null;
+  utmMedium: string | null;
+  utmCampaign: string | null;
   /** Same customer's other confirmed orders still waiting for a parcel ("#1002, #1003"). */
   combinableWith: string | null;
   fraud: FraudSummary | null;
@@ -129,6 +134,7 @@ export type Order = Omit<OrderListRow, "itemCount" | "trackingCode" | "consignme
   dispatchedAt: string | null;
   shipBy: string | null;
   carryOverCount: number;
+  attribution: Attribution | null;
   shopifyDeletedAt: string | null;
 };
 

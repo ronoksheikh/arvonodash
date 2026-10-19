@@ -18,6 +18,7 @@ import { CREDENTIAL_KEYS, describeCredentials, loadCredentials, normalizeShopDom
 import { getBalance, steadfastConfigured } from "../services/steadfast";
 import { getImportState, latestRuns, reconcileShopify, recordRun, retryFailedWebhooks, runImportStep, startImport, syncPayments, verifyShopifyOrdersExist } from "../services/sync";
 import { rollOverMissedPickups } from "../services/pickup";
+import { syncAttribution } from "../services/attribution";
 import { processJobs, enqueueJob } from "../services/jobs";
 import { pollActiveConsignments } from "../services/courier";
 import { ALL_PERMISSIONS, ROLES, ROLE_PERMISSIONS } from "../../shared/constants";
@@ -399,6 +400,12 @@ syncRoutes.post("/courier", async (c) => {
 syncRoutes.post("/shopify-deleted", async (c) => {
   const db = getDb(c.env.DB);
   return c.json(await recordRun(db, "shopify_deleted", "manual", () => verifyShopifyOrdersExist(c.env, db, { batches: 5 })));
+});
+
+/** Reads Shopify's customer journey (order source, UTM tags) for orders that don't have it yet (also every 5 minutes). */
+syncRoutes.post("/order-sources", async (c) => {
+  const db = getDb(c.env.DB);
+  return c.json(await recordRun(db, "order_sources", "manual", () => syncAttribution(c.env, db, { batches: 5 })));
 });
 
 /** Moves parcels that missed their pickup day to today (also runs automatically after midnight). */

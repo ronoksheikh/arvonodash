@@ -5,13 +5,14 @@ import { DatePickerInput } from "@mantine/dates";
 import { useDebouncedValue } from "@mantine/hooks";
 import { keepPreviousData, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useSearchParams } from "react-router";
-import { Package, PhoneCall, ArrowDownUp, Download, Filter, MoreHorizontal, Printer, Search, Send, Tag, X, CheckCircle2, XCircle, Archive, ShieldOff, ListChecks } from "lucide-react";
+import { Package, PhoneCall, ArrowDownUp, Download, Filter, MoreHorizontal, Printer, Search, Send, Tag, X, CheckCircle2, XCircle, Archive, ShieldOff, ListChecks, Megaphone } from "lucide-react";
 import { api, post, qs, notifyError, notifySuccess } from "../api";
 import { useCan } from "../auth";
 import { AutoBookChip, CustomerHistoryBadge, CustomStatusBadge, DispatchBadge, EmptyState, ErrorState, FulfillmentBadge, LabelBadge, LoadingState, PageHeader, Panel, RiskBadge, ShopifySyncBadge, StageBadge, TableFooter, useStatuses } from "../components/ui";
 import { CallingMenu } from "../components/Calling";
 import { OrderDrawer } from "../components/OrderDrawer";
 import { FraudBadge } from "../components/Fraud";
+import { channelInfo, SourceBadge } from "../components/Source";
 import { dateShort, money } from "../format";
 import { CALLING_STATUSES } from "../../shared/constants";
 import type { OrderListRow } from "../types";
@@ -78,7 +79,14 @@ export default function Orders() {
     from: range[0] ? new Date(range[0]).toISOString() : null,
     to: range[1] ? new Date(new Date(range[1]).getTime() + 86_400_000 - 1).toISOString() : null,
     archived: params.get("archived"),
+    channel: params.get("channel"),
+    campaign: params.get("campaign"),
   };
+  const sources = useQuery({
+    queryKey: ["order-sources"],
+    queryFn: () => api<{ channels: { channel: string; count: number }[]; campaigns: { campaign: string; channel: string; count: number }[] }>("/orders/sources"),
+    staleTime: 300_000,
+  });
   const query = useQuery({
     queryKey: ["orders", filters],
     queryFn: () => api<ListResponse>(`/orders${qs({ ...filters, pageSize: 50 })}`),
@@ -238,6 +246,27 @@ export default function Orders() {
             onChange={(v) => set({ statusId: v, page: null })}
             w={180}
           />
+          <Select
+            placeholder="Any source"
+            leftSection={<Megaphone size={14} />}
+            clearable
+            searchable
+            data={(sources.data?.channels ?? []).map((x) => ({ value: x.channel, label: `${channelInfo(x.channel).label} (${x.count})` }))}
+            value={filters.channel}
+            onChange={(v) => set({ channel: v, page: null })}
+            w={190}
+          />
+          {(sources.data?.campaigns.length ?? 0) > 0 && (
+            <Select
+              placeholder="Any campaign"
+              clearable
+              searchable
+              data={(sources.data?.campaigns ?? []).map((x) => ({ value: x.campaign, label: `${x.campaign} (${x.count})` }))}
+              value={filters.campaign}
+              onChange={(v) => set({ campaign: v, page: null })}
+              w={210}
+            />
+          )}
           <DatePickerInput
             type="range"
             placeholder="Date range"
@@ -266,7 +295,7 @@ export default function Orders() {
         ) : rows.length === 0 ? (
           <EmptyState
             title="No orders found"
-            description={filters.search || filters.statusId || filters.flagged ? "Try clearing filters." : "Orders arrive automatically from Shopify webhooks. Import historical orders from Sync & webhooks."}
+            description={filters.search || filters.statusId || filters.flagged || filters.channel || filters.campaign ? "Try clearing filters." : "Orders arrive automatically from Shopify webhooks. Import historical orders from Sync & webhooks."}
           />
         ) : (
           <>
@@ -277,6 +306,7 @@ export default function Orders() {
                     <Table.Th w={40} pl="md"><Checkbox size="xs" checked={allChecked} indeterminate={selected.size > 0 && !allChecked} onChange={toggleAll} aria-label="Select all" /></Table.Th>
                     <Table.Th onClick={() => sortBy("name")} style={{ cursor: "pointer" }}>Order <ArrowDownUp size={11} /></Table.Th>
                     <Table.Th onClick={() => sortBy("created")} style={{ cursor: "pointer" }}>Date <ArrowDownUp size={11} /></Table.Th>
+                    <Table.Th miw={130}>Source</Table.Th>
                     <Table.Th onClick={() => sortBy("customer")} style={{ cursor: "pointer" }}>Customer <ArrowDownUp size={11} /></Table.Th>
                     <Table.Th ta="right" onClick={() => sortBy("total")} style={{ cursor: "pointer" }}>Total <ArrowDownUp size={11} /></Table.Th>
                     <Table.Th>Payment</Table.Th>
@@ -298,6 +328,7 @@ export default function Orders() {
                         <Text size="xs" c="dimmed">{o.itemCount} item{o.itemCount === 1 ? "" : "s"}</Text>
                       </Table.Td>
                       <Table.Td><Text size="sm" c="dimmed" style={{ whiteSpace: "nowrap" }}>{dateShort(o.shopCreatedAt)}</Text></Table.Td>
+                      <Table.Td><SourceBadge channel={o.channel} campaign={o.utmCampaign} source={o.utmSource} medium={o.utmMedium} /></Table.Td>
                       <Table.Td maw={260}>
                         <Group gap={6} wrap="nowrap">
                           <Text size="sm" lineClamp={1}>{o.customerName ?? "—"}</Text>

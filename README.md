@@ -27,6 +27,7 @@ Parcels not ready by the pickup move to the next day automatically and stay at t
 until they leave. See [docs/PARCEL_LIFECYCLE.md](docs/PARCEL_LIFECYCLE.md) for every step, what is
 recorded, and how deleted or cancelled orders and parcels are handled. Customer SMS:
 [docs/SMS.md](docs/SMS.md). Custom tracking domain: [docs/TRACKING_DOMAIN.md](docs/TRACKING_DOMAIN.md).
+Order source / UTM tracking: [docs/ORDER_SOURCE.md](docs/ORDER_SOURCE.md).
 
 Everything is synchronised automatically except the **calling confirmation** and **physical
 dispatch**. Booking happens automatically a few minutes after confirmation (default 10, set in
