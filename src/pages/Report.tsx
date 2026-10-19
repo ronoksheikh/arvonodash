@@ -1,11 +1,12 @@
 import { useState } from "react";
-import { Button, Card, Group, SegmentedControl, SimpleGrid, Stack, Table, Text, Title } from "@mantine/core";
+import { Button, Card, Group, ScrollArea, SegmentedControl, SimpleGrid, Stack, Table, Text, Title } from "@mantine/core";
 import { DatePickerInput } from "@mantine/dates";
 import { useQuery } from "@tanstack/react-query";
 import { Printer } from "lucide-react";
 import { api, qs } from "../api";
 import { dhakaToday, EmptyState, ErrorState, LoadingState, PageHeader, Panel } from "../components/ui";
 import { day, money, num } from "../format";
+import { channelInfo, SourceBadge } from "../components/Source";
 
 type Report = {
   from: string;
@@ -15,10 +16,13 @@ type Report = {
   courier: { booked: number; dispatched: number; delivered: number; returned: number; successRate: number | null };
   sameDay: { cutoffTime: string; beforeCutoff: number; sameDay: number; nextDay: number; notYet: number; rate: number | null; carriedOver: number; unscanned: number };
   money: { collected: number; deliveryCharges: number; paidOut: number; payouts: number; awaitingPayout: number; awaitingPayoutCount: number; withCourier: number; withCourierCount: number };
+  sources: { channels: (SourceRow & { channel: string })[]; campaigns: (SourceRow & { campaign: string; channel: string })[] };
   worstDistricts: { city: string; delivered: number; returned: number; returnRate: number | null }[];
   worstProducts: { title: string; delivered: number; returned: number; returnRate: number | null }[];
   callers: { name: string; calls: number; confirmed: number; noAnswer: number; rejected: number }[];
 };
+
+type SourceRow = { orders: number; value: number; confirmed: number; cancelled: number; delivered: number; returned: number; deliveredValue: number; confirmRate: number | null; returnRate: number | null };
 
 const PRESETS = [
   { value: "today", label: "Today" },
@@ -121,6 +125,20 @@ export default function ReportPage() {
             </SimpleGrid>
           </Section>
 
+          <Stack mb="lg">
+          <Panel>
+            <Text fw={600} p="md" pb={2}>Where orders come from</Text>
+            <Text size="xs" c="dimmed" px="md" pb="xs">Orders placed in this period, by source (Shopify customer journey and UTM tags). Return rate = returned ÷ (delivered + returned).</Text>
+            <SourceTable rows={r.sources.channels.map((x) => ({ key: x.channel, name: <SourceBadge channel={x.channel} />, ...x }))} />
+            {r.sources.campaigns.length > 0 && (
+              <>
+                <Text fw={600} size="sm" px="md" pt="md" pb="xs">Top campaigns</Text>
+                <SourceTable rows={r.sources.campaigns.map((x) => ({ key: x.campaign, name: <Group gap={6} wrap="nowrap"><Text size="sm" lineClamp={1}>{x.campaign}</Text><Text size="xs" c="dimmed" style={{ whiteSpace: "nowrap" }}>{channelInfo(x.channel).label}</Text></Group>, ...x }))} />
+              </>
+            )}
+          </Panel>
+          </Stack>
+
           <SimpleGrid cols={{ base: 1, lg: 2 }} mb="lg">
             <Panel>
               <Text fw={600} p="md" pb={2}>Worst districts for returns</Text>
@@ -197,5 +215,41 @@ function RateTable({ rows, label }: { rows: { name: string; delivered: number; r
         ))}
       </Table.Tbody>
     </Table>
+  );
+}
+
+function SourceTable({ rows }: { rows: (SourceRow & { key: string; name: React.ReactNode })[] }) {
+  if (!rows.length) return <EmptyState title="No orders in this period" />;
+  return (
+    <ScrollArea>
+      <Table className="app-table" verticalSpacing={8} miw={760}>
+        <Table.Thead>
+          <Table.Tr>
+            <Table.Th pl="md">Source</Table.Th>
+            <Table.Th ta="right">Orders</Table.Th>
+            <Table.Th ta="right">Value</Table.Th>
+            <Table.Th ta="right">Confirmed</Table.Th>
+            <Table.Th ta="right">Cancelled</Table.Th>
+            <Table.Th ta="right">Delivered</Table.Th>
+            <Table.Th ta="right">Returned</Table.Th>
+            <Table.Th ta="right" pr="md">Delivered value</Table.Th>
+          </Table.Tr>
+        </Table.Thead>
+        <Table.Tbody>
+          {rows.map((x) => (
+            <Table.Tr key={x.key} style={{ cursor: "default" }}>
+              <Table.Td pl="md" maw={260}>{x.name}</Table.Td>
+              <Table.Td ta="right"><Text size="sm" fw={600}>{num(x.orders)}</Text></Table.Td>
+              <Table.Td ta="right"><Text size="sm">{money(x.value)}</Text></Table.Td>
+              <Table.Td ta="right"><Text size="sm">{num(x.confirmed)} <Text span size="xs" c="dimmed">{pct(x.confirmRate)}</Text></Text></Table.Td>
+              <Table.Td ta="right"><Text size="sm" c={x.cancelled ? "red" : undefined}>{num(x.cancelled)}</Text></Table.Td>
+              <Table.Td ta="right"><Text size="sm">{num(x.delivered)}</Text></Table.Td>
+              <Table.Td ta="right"><Text size="sm" c={(x.returnRate ?? 0) >= 30 ? "red" : undefined}>{num(x.returned)} <Text span size="xs" c="dimmed">{pct(x.returnRate)}</Text></Text></Table.Td>
+              <Table.Td ta="right" pr="md"><Text size="sm">{money(x.deliveredValue)}</Text></Table.Td>
+            </Table.Tr>
+          ))}
+        </Table.Tbody>
+      </Table>
+    </ScrollArea>
   );
 }

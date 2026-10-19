@@ -1,4 +1,4 @@
-import { and, eq, sql, type AnyColumn } from "drizzle-orm";
+import { and, eq, isNotNull, sql, type AnyColumn } from "drizzle-orm";
 import { inList, type DB } from "../db";
 import { callLogs, consignments, dispatchEvents, orders, payments } from "../db/schema";
 import { businessDate, dayRange } from "./dispatch";
@@ -89,6 +89,41 @@ export async function ownerReport(db: DB, settings: AppSettings, offset: string,
     .all();
   const missCount = (e: string) => n(misses.find((m) => m.event === e)?.n);
 
+  // Where orders came from: per channel and per campaign, from order to delivery.
+  const sourceCols = {
+    orders: sql<number>`count(*)`,
+    value: sql<number>`sum(${orders.total})`,
+    confirmed: sql<number>`sum(case when ${orders.confirmedAt} is not null then 1 else 0 end)`,
+    cancelled: sql<number>`sum(case when ${orders.cancelledAt} is not null or ${orders.callingStatus} = 'rejected' then 1 else 0 end)`,
+    delivered: sql<number>`sum(case when ${orders.courierStage} in ('delivered', 'partial_delivered') then 1 else 0 end)`,
+    returned: sql<number>`sum(case when ${orders.courierStage} = 'returned' then 1 else 0 end)`,
+    deliveredValue: sql<number>`sum(case when ${orders.courierStage} = 'delivered' then ${orders.total} else 0 end)`,
+  };
+  const placed = and(eq(orders.archived, false), inRange(orders.shopCreatedAt));
+  const [byChannel, byCampaign] = await Promise.all([
+    db.select({ channel: sql<string>`coalesce(${orders.channel}, 'unknown')`, ...sourceCols }).from(orders).where(placed).groupBy(sql`coalesce(${orders.channel}, 'unknown')`).orderBy(sql`count(*) desc`).all(),
+    db
+      .select({ campaign: orders.utmCampaign, channel: sql<string>`max(${orders.channel})`, ...sourceCols })
+      .from(orders)
+      .where(and(placed, isNotNull(orders.utmCampaign)))
+      .groupBy(orders.utmCampaign)
+      .orderBy(sql`count(*) desc`)
+      .limit(15)
+      .all(),
+  ]);
+  const sourceRow = <T extends Record<string, unknown>>(r: T & { orders: number; confirmed: number; cancelled: number; delivered: number; returned: number; value: number; deliveredValue: number }) => ({
+    ...r,
+    orders: n(r.orders),
+    value: n(r.value),
+    confirmed: n(r.confirmed),
+    cancelled: n(r.cancelled),
+    delivered: n(r.delivered),
+    returned: n(r.returned),
+    deliveredValue: n(r.deliveredValue),
+    confirmRate: rate(n(r.confirmed), n(r.orders)),
+    returnRate: rate(n(r.returned), n(r.delivered) + n(r.returned)),
+  });
+
   // Where returns come from: at least the last 30 days so a single day still has enough history.
   const returnsFrom = new Date(Math.min(Date.parse(range.from), Date.parse(range.to) - 30 * DAY)).toISOString();
   const finished = sql`coalesce(${consignments.deliveredAt}, ${consignments.returnedAt}) >= ${returnsFrom} and coalesce(${consignments.deliveredAt}, ${consignments.returnedAt}) < ${range.to}`;
@@ -170,6 +205,7 @@ export async function ownerReport(db: DB, settings: AppSettings, offset: string,
       withCourier: n(money?.withCourier),
       withCourierCount: n(money?.withCourierCount),
     },
+    sources: { channels: byChannel.map(sourceRow), campaigns: byCampaign.map(sourceRow) },
     worstDistricts: districts.map((d) => ({ city: d.city || "Unknown", delivered: n(d.delivered), returned: n(d.returned), returnRate: rate(n(d.returned), n(d.delivered) + n(d.returned)) })),
     worstProducts: products.map((p) => ({ title: p.title || "Unknown", delivered: n(p.delivered), returned: n(p.returned), returnRate: rate(n(p.returned), n(p.delivered) + n(p.returned)) })),
     callers: callers.map((c) => ({ ...c, calls: n(c.calls), confirmed: n(c.confirmed), noAnswer: n(c.noAnswer), rejected: n(c.rejected) })),

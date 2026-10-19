@@ -10,6 +10,7 @@ import { webhookRoutes } from "./routes/webhooks";
 import { dispatchRoutes } from "./routes/dispatch";
 import { expireReservations } from "./services/dispatch";
 import { rollOverMissedPickups } from "./services/pickup";
+import { syncAttribution } from "./services/attribution";
 import { orderRoutes } from "./routes/orders";
 import { opsRoutes } from "./routes/ops";
 import { consignmentRoutes } from "./routes/consignments";
@@ -133,6 +134,11 @@ async function scheduled(controller: ScheduledController, env: Env) {
     if (minute % 30 === 0) {
       const r = await verifyShopifyOrdersExist(env, db).catch(() => null);
       if (r && "processed" in r && r.processed) await db.insert(syncRuns).values({ kind: "shopify_deleted", trigger: "cron", status: "success", stats: r, startedAt: nowIso(), finishedAt: nowIso() });
+    }
+    // Where new orders came from (Shopify builds the customer journey shortly after checkout).
+    const sources = await syncAttribution(env, db, { batches: 2 }).catch((err: Error) => ({ processed: 0, error: err.message }));
+    if (("processed" in sources && sources.processed) || "error" in sources) {
+      await db.insert(syncRuns).values({ kind: "order_sources", trigger: "cron", status: "error" in sources ? "failed" : "success", stats: sources, error: "error" in sources ? String(sources.error) : null, startedAt: nowIso(), finishedAt: nowIso() });
     }
     // Shopify-app changes like "Mark as in progress" don't always fire a webhook.
     await syncRecentOpenOrders(env, db, { days: 3, maxPages: 4 }).catch(() => {});

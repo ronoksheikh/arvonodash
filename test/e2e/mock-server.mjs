@@ -9,6 +9,8 @@ const state = {
 };
 // Orders deleted in the Shopify admin (the test deletes them); GraphQL answers null for these.
 const deletedOrders = new Set();
+// Shopify customer journeys by order id (set by the test).
+const journeys = {};
 // Next SMS API answer code (0 = success); set by the test to simulate provider errors.
 let smsCode = 0;
 // Steadfast fraud profiles by phone (set by the test); default is a good customer.
@@ -143,6 +145,13 @@ function graphql(query, variables) {
     const page = pool.slice(after, after + 2);
     return { data: { orders: { nodes: page, pageInfo: { hasNextPage: after + 2 < pool.length, endCursor: String(after + 2) } } }, extensions: { cost: { requestedQueryCost: 50, throttleStatus: { currentlyAvailable: 1900, restoreRate: 100, maximumAvailable: 2000 } } } };
   }
+  if (query.includes("customerJourneySummary")) {
+    return { data: { nodes: variables.ids.map((gid) => {
+      const id = gid.split("/").pop();
+      if (deletedOrders.has(id)) return null;
+      return { id: gid, customerJourneySummary: journeys[id] ?? { ready: true, daysToConversion: null, customerOrderIndex: 1, firstVisit: null, lastVisit: null } };
+    }) } };
+  }
   if (query.includes("nodes(ids:")) {
     return { data: { nodes: variables.ids.map((gid) => (deletedOrders.has(gid.split("/").pop()) ? null : { id: gid })) } };
   }
@@ -188,6 +197,11 @@ const server = http.createServer(async (req, res) => {
   }
   if (p === "/__delete_order" && req.method === "POST") {
     deletedOrders.add(String(JSON.parse(body).id));
+    return json(res, 200, { ok: true });
+  }
+  if (p === "/__journey" && req.method === "POST") {
+    const { id, journey } = JSON.parse(body);
+    journeys[String(id)] = journey;
     return json(res, 200, { ok: true });
   }
   if (p === "/__sms_code" && req.method === "POST") {

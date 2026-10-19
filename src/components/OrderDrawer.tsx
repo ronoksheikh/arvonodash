@@ -14,6 +14,7 @@ import { CallingPanel } from "./Calling";
 import { FraudCard } from "./Fraud";
 import { JourneyTab } from "./Journey";
 import { SmsTab } from "./Sms";
+import { SourceCard } from "./Source";
 import { PARTIAL_OUTCOME_LABEL } from "../../shared/delivery";
 import { ago, dateTime, money, titleCase } from "../format";
 import { DISPATCH_EVENTS, NOTE_KINDS, RISK_FLAGS, STEADFAST_STATUSES } from "../../shared/constants";
@@ -213,6 +214,8 @@ function OverviewTab({ d, refresh, goBooking }: { d: OrderDetail; refresh: () =>
       {o.shopifyDeletedAt && o.courierStage === "unbooked" && (
         <Alert color="gray" variant="light" title="Deleted in Shopify">This order no longer exists in Shopify. Nothing was sent to Steadfast, so there's nothing to stop.</Alert>
       )}
+
+      <SourceCard channel={o.channel} sourceName={o.sourceName} attribution={o.attribution} />
 
       <SimpleGrid cols={{ base: 1, sm: 2 }} spacing="md">
         <Card padding="md">

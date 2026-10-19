@@ -5,6 +5,7 @@ import { getDb, inList, pick, type DB } from "../db";
 import { activityLog, callLogs, consignments, customers, customStatuses, fraudChecks, orderNotes, orders, returns, trackingEvents, users, type BookingDetails } from "../db/schema";
 import { requirePerm } from "../lib/auth";
 import { csvEscape, nowIso, normalizeBdPhone } from "../lib/util";
+import { CHANNELS, creditedVisit, type Channel } from "../../shared/attribution";
 import { getSettings } from "../services/settings";
 import { logActivity } from "../services/activity";
 import { bookOrders, defaultBooking, effectiveBooking, queueFulfillment, validateBooking } from "../services/courier";
@@ -86,6 +87,12 @@ function filterConditions(q: Record<string, string | undefined>): SQL[] {
   if (q.from) conds.push(gte(orders.shopCreatedAt, q.from));
   if (q.to) conds.push(lte(orders.shopCreatedAt, q.to));
   if (q.customerId) conds.push(eq(orders.customerId, Number(q.customerId)));
+  if (q.channel) {
+    const list = q.channel.split(",");
+    // Orders not read yet have no channel; they count as unknown.
+    conds.push(list.includes("unknown") ? or(inArray(orders.channel, list), isNull(orders.channel))! : inArray(orders.channel, list));
+  }
+  if (q.campaign) conds.push(q.campaign === "none" ? isNull(orders.utmCampaign) : eq(orders.utmCampaign, q.campaign));
   if (q.ids) conds.push(inList(orders.id, q.ids.split(",").map(Number).filter(Boolean)));
   return conds;
 }
@@ -133,6 +140,10 @@ const listColumns = {
   autoBookNote: orders.autoBookNote,
   combinedIntoOrderId: orders.combinedIntoOrderId,
   customerId: orders.customerId,
+  channel: orders.channel,
+  utmSource: orders.utmSource,
+  utmMedium: orders.utmMedium,
+  utmCampaign: orders.utmCampaign,
   // Same customer's other confirmed orders still waiting for a parcel (can travel together).
   combinableWith: sql<string | null>`(select group_concat(o3.name, ', ') from orders o3 where o3.phone = ${orders.phone} and o3.id != ${orders.id}
     and o3.courier_stage = 'unbooked' and o3.calling_status = 'confirmed' and o3.cancelled_at is null and o3.archived = 0
@@ -185,23 +196,52 @@ orderRoutes.get("/", async (c) => {
   });
 });
 
+/**
+ * Each order with its active parcel. Read in two queries, not a join: the orders table alone is close
+ * to D1's 100-column limit for one result row.
+ */
+async function withActiveConsignment(db: ReturnType<typeof getDb>, list: (typeof orders.$inferSelect)[]) {
+  const ids = list.map((o) => o.activeConsignmentId).filter((x): x is number => x !== null);
+  const parcels = new Map<number, Pick<typeof consignments.$inferSelect, "consignmentId" | "trackingCode" | "status" | "codAmount" | "collectedAmount" | "deliveryCharge" | "paymentId" | "invoice" | "note">>();
+  for (let i = 0; i < ids.length; i += 500) {
+    const chunk = await db
+      .select({ ...pick(consignments, ["consignmentId", "trackingCode", "status", "codAmount", "collectedAmount", "deliveryCharge", "paymentId", "invoice", "note"]), rowId: consignments.id })
+      .from(consignments)
+      .where(inList(consignments.id, ids.slice(i, i + 500)))
+      .all();
+    for (const { rowId, ...c } of chunk) parcels.set(rowId, c);
+  }
+  return list.map((o) => ({ o, c: o.activeConsignmentId ? (parcels.get(o.activeConsignmentId) ?? null) : null }));
+}
+
+/** Channels and campaigns seen in the last 90 days, for the Source filter. */
+orderRoutes.get("/sources", async (c) => {
+  const db = getDb(c.env.DB);
+  const since = new Date(Date.now() - 90 * 86_400_000).toISOString();
+  const [channels, campaigns] = await Promise.all([
+    db.select({ channel: orders.channel, n: sql<number>`count(*)` }).from(orders).where(and(gte(orders.shopCreatedAt, since), eq(orders.archived, false))).groupBy(orders.channel).orderBy(sql`count(*) desc`).all(),
+    db
+      .select({ campaign: orders.utmCampaign, channel: sql<string>`max(${orders.channel})`, n: sql<number>`count(*)` })
+      .from(orders)
+      .where(and(gte(orders.shopCreatedAt, since), eq(orders.archived, false), isNotNull(orders.utmCampaign)))
+      .groupBy(orders.utmCampaign)
+      .orderBy(sql`count(*) desc`)
+      .limit(100)
+      .all(),
+  ]);
+  return c.json({ channels: channels.map((x) => ({ channel: x.channel ?? "unknown", count: Number(x.n) })), campaigns: campaigns.map((x) => ({ ...x, n: undefined, count: Number(x.n) })) });
+});
+
 orderRoutes.get("/export.csv", requirePerm("export"), async (c) => {
   const db = getDb(c.env.DB);
   const q = c.req.query();
   const where = and(...filterConditions(q), tabCondition(q.tab ?? "all"));
   const statuses = new Map((await db.select().from(customStatuses).all()).map((s) => [s.id, s.name]));
-  const rows = await db
-    .select({ o: orders, c: pick(consignments, ["consignmentId", "trackingCode", "status", "codAmount", "collectedAmount", "deliveryCharge", "paymentId", "invoice", "note"]) })
-    .from(orders)
-    .leftJoin(consignments, eq(consignments.id, orders.activeConsignmentId))
-    .where(where)
-    .orderBy(desc(orders.shopCreatedAt))
-    .limit(10_000)
-    .all();
+  const rows = await withActiveConsignment(db, await db.select().from(orders).where(where).orderBy(desc(orders.shopCreatedAt)).limit(10_000).all());
   const header = [
     "Order", "Created", "Calling", "Processing", "Customer", "Phone", "Address", "City", "Items", "Total", "COD due", "Payment", "Shopify fulfillment",
     "Status", "Tags", "Courier stage", "Consignment ID", "Tracking code", "Steadfast status", "COD booked", "Collected", "Delivery charge",
-    "Fulfillment", "Label", "Dispatch", "Settled payment", "Risk flags",
+    "Fulfillment", "Label", "Dispatch", "Settled payment", "Risk flags", "Source", "UTM source", "UTM medium", "UTM campaign", "UTM content", "Referrer", "Landing page",
   ];
   const lines = [header.join(",")];
   for (const { o, c: cn } of rows) {
@@ -212,6 +252,8 @@ orderRoutes.get("/export.csv", requirePerm("export"), async (c) => {
         o.total, o.outstanding, o.financialStatus, o.shopifyFulfillmentStatus, o.statusId ? statuses.get(o.statusId) : "",
         (o.internalTags ?? []).join("; "), o.courierStage, cn?.consignmentId, cn?.trackingCode, cn?.status, cn?.codAmount,
         cn?.collectedAmount, cn?.deliveryCharge, o.fulfillmentState, o.labelStatus, o.dispatchStatus, cn?.paymentId, o.riskDismissed ? "" : (o.riskFlags ?? []).join("; "),
+        o.channel ? CHANNELS[o.channel as Channel]?.label ?? o.channel : "", o.utmSource, o.utmMedium, o.utmCampaign,
+        creditedVisit(o.attribution)?.utm?.content, creditedVisit(o.attribution)?.referrerUrl, creditedVisit(o.attribution)?.landingPage,
       ]
         .map(csvEscape)
         .join(","),
@@ -231,12 +273,7 @@ orderRoutes.get("/print", requirePerm("export"), async (c) => {
   const db = getDb(c.env.DB);
   const ids = (c.req.query("ids") ?? "").split(",").map(Number).filter(Boolean).slice(0, 500);
   const appSettings = await getSettings(db);
-  const rows = await db
-    .select({ o: orders, c: pick(consignments, ["consignmentId", "trackingCode", "status", "codAmount", "collectedAmount", "deliveryCharge", "paymentId", "invoice", "note"]) })
-    .from(orders)
-    .leftJoin(consignments, eq(consignments.id, orders.activeConsignmentId))
-    .where(inList(orders.id, ids))
-    .all();
+  const rows = await withActiveConsignment(db, await db.select().from(orders).where(inList(orders.id, ids)).all());
   const byId = new Map(rows.map((r) => [r.o.id, r]));
   return c.json({
     business: { name: appSettings.businessName, phone: appSettings.businessPhone, address: appSettings.businessAddress },
