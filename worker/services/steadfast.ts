@@ -371,7 +371,8 @@ export function stageForStatus(status: string, wasPickedUp: boolean): CourierSta
 export function pollVerdict(current: { status: string; isFinal: boolean; pickedUpAt: string | null }, next: ParcelStatus): "apply" | "ignore" | "deleted" {
   // A booking still in flight isn't in Steadfast yet; "not found" there means nothing.
   if (current.status === "creating") return next === null ? "ignore" : "apply";
-  const neverTaken = !current.pickedUpAt && (current.status === "in_review" || current.status.startsWith("cancelled"));
+  // "unknown" before any pickup is how a deleted parcel looked before "deleted" existed.
+  const neverTaken = !current.pickedUpAt && (current.status === "in_review" || current.status.startsWith("cancelled") || current.status === "unknown");
   if (next === null) return current.pickedUpAt || current.status === "deleted" ? "ignore" : "deleted";
   if (neverTaken && next.startsWith("unknown")) return current.status === "deleted" ? "ignore" : "deleted";
   if (current.isFinal && !isFinalStatus(next)) return "ignore";

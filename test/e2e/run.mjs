@@ -1231,6 +1231,36 @@ await step("order source: UTM tags from the webhook at once, then Shopify's cust
   assert.match(csv.body, /Instagram Ads,ig,paid_social,winter_drop,reel2/);
 });
 
+await step("COD totals count only live parcels: cancelled, cancel-pending and deleted parcels drop out", async () => {
+  const totals = async () => {
+    const cod = (await call("GET", "/api/cod?days=7")).body.summary;
+    const dash = (await call("GET", "/api/dashboard?days=7")).body.cod;
+    return { booked: cod.booked, count: cod.bookedCount, pending: cod.pendingCollection, dashBooked: dash.booked, dashOut: dash.inTransit };
+  };
+  const sf = (path, body) => fetch(`${MOCK}/api/v1${path}`, { method: "POST", headers: { "Api-Key": "sf-key", "Secret-Key": "sf-secret" }, body: JSON.stringify(body) });
+  const before = await totals();
+  const a = await newOrder(6101, "+880 1755-610001");
+  const b = await newOrder(6102, "+880 1755-610002");
+  const c = await newOrder(6103, "+880 1755-610003");
+  const ca = await book(a.id);
+  const cb = await book(b.id);
+  const cc = await book(c.id);
+  const booked = await totals();
+  assert.equal(booked.pending - before.pending, 3750, "three live parcels are out with the courier");
+  assert.equal(booked.count - before.count, 3);
+
+  await sf("/__set_status", { consignment_id: Number(ca.consignmentId), status: "cancelled" }); // cancelled before pickup
+  await sf("/__set_status", { consignment_id: Number(cb.consignmentId), status: "cancelled_approval_pending" }); // rider/portal cancel waiting for approval
+  await fetch(`${MOCK}/api/v1/__delete_consignment`, { method: "POST", headers: { "Api-Key": "sf-key", "Secret-Key": "sf-secret" }, body: JSON.stringify({ consignment_id: Number(cc.consignmentId) }) });
+  await call("POST", "/api/consignments/refresh", { ids: [ca.id, cb.id, cc.id] });
+  const after = await totals();
+  assert.equal(after.pending, before.pending, `cancelled/deleted parcels are not "with courier": ${JSON.stringify({ before, after })}`);
+  assert.equal(after.dashOut, before.dashOut, "dashboard agrees");
+  assert.equal(after.booked - before.booked, 1250, "only the cancel-pending parcel still counts as booked");
+  assert.equal(after.dashBooked - before.dashBooked, 1250);
+  assert.equal(after.count - before.count, 1);
+});
+
 await step("activity log records actions", async () => {
   const a = await call("GET", "/api/logs/activity");
   const actions = new Set(a.body.rows.map((r) => r.action));

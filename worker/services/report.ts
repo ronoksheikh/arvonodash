@@ -3,6 +3,7 @@ import { inList, type DB } from "../db";
 import { callLogs, consignments, dispatchEvents, orders, payments } from "../db/schema";
 import { businessDate, dayRange } from "./dispatch";
 import { localTimeIso } from "./pickup";
+import { OPEN_PARCEL_SQL } from "./courier";
 import type { AppSettings } from "./settings";
 
 const DAY = 86_400_000;
@@ -47,8 +48,8 @@ export async function ownerReport(db: DB, settings: AppSettings, offset: string,
     .select({
       awaitingPayout: sql<number>`coalesce(sum(case when ${consignments.stage} in ('delivered', 'partial_delivered') and ${consignments.paymentId} is null then coalesce(${consignments.collectedAmount}, ${consignments.codAmount}) end), 0)`,
       awaitingPayoutCount: sql<number>`sum(case when ${consignments.stage} in ('delivered', 'partial_delivered') and ${consignments.paymentId} is null then 1 else 0 end)`,
-      withCourier: sql<number>`coalesce(sum(case when ${consignments.isFinal} = 0 and ${consignments.superseded} = 0 and ${consignments.pickedUpAt} is not null then ${consignments.codAmount} end), 0)`,
-      withCourierCount: sql<number>`sum(case when ${consignments.isFinal} = 0 and ${consignments.superseded} = 0 and ${consignments.pickedUpAt} is not null then 1 else 0 end)`,
+      withCourier: sql<number>`coalesce(sum(case when ${OPEN_PARCEL_SQL} and ${consignments.pickedUpAt} is not null then ${consignments.codAmount} end), 0)`,
+      withCourierCount: sql<number>`sum(case when ${OPEN_PARCEL_SQL} and ${consignments.pickedUpAt} is not null then 1 else 0 end)`,
     })
     .from(consignments)
     .get();
