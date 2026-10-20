@@ -14,6 +14,16 @@ import { HttpError, normalizeBdPhone, nowIso, toNumber, truncate } from "../lib/
 import { partialOutcome } from "../../shared/delivery";
 
 type OrderRow = typeof orders.$inferSelect;
+
+/**
+ * A parcel whose COD is still out there: really booked, not finished, not replaced by a rebooking,
+ * and not cancelled (or on its way to being cancelled) or deleted. Used by every money total.
+ */
+export const OPEN_PARCEL_SQL = sql`(${consignments.isFinal} = 0 and ${consignments.superseded} = 0 and ${consignments.consignmentId} is not null
+  and ${consignments.stage} not in ('cancelled', 'returned') and ${consignments.status} not like 'cancelled%' and ${consignments.status} != 'deleted')`;
+
+/** A consignment that really left with Steadfast's booking: not a failed booking, not cancelled or deleted before pickup. */
+export const REAL_PARCEL_SQL = sql`(${consignments.consignmentId} is not null and ${consignments.stage} != 'cancelled')`;
 type ConsignmentRow = typeof consignments.$inferSelect;
 
 /** Booking details shown in the editor: saved edits layered over values derived from the order. */

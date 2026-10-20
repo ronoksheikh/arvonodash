@@ -10,6 +10,7 @@ import { ATTENTION_SQL, customerHistory, refreshRiskFlags } from "../services/or
 import { getSettings } from "../services/settings";
 import { stuckParcels } from "../services/stuck";
 import * as steadfast from "../services/steadfast";
+import { OPEN_PARCEL_SQL, REAL_PARCEL_SQL } from "../services/courier";
 import { RETURN_FOLLOW_UPS, RETURN_STATUSES } from "../../shared/constants";
 
 // ---------------------------------------------------------------------------
@@ -49,9 +50,9 @@ dashboardRoutes.get("/", async (c) => {
   // COD (period, by consignment creation date)
   const cod = await db
     .select({
-      booked: sql<number>`coalesce(sum(${consignments.codAmount}), 0)`,
+      booked: sql<number>`coalesce(sum(case when ${REAL_PARCEL_SQL} then ${consignments.codAmount} end), 0)`,
       collected: sql<number>`coalesce(sum(case when ${consignments.stage} in ('delivered','partial_delivered') then coalesce(${consignments.collectedAmount}, ${consignments.codAmount}) end), 0)`,
-      inTransit: sql<number>`coalesce(sum(case when ${consignments.isFinal} = 0 then ${consignments.codAmount} end), 0)`,
+      inTransit: sql<number>`coalesce(sum(case when ${OPEN_PARCEL_SQL} then ${consignments.codAmount} end), 0)`,
       settled: sql<number>`coalesce(sum(case when ${consignments.paymentId} is not null then coalesce(${consignments.collectedAmount}, 0) end), 0)`,
       charges: sql<number>`coalesce(sum(${consignments.deliveryCharge}), 0)`,
     })
@@ -414,10 +415,10 @@ codRoutes.get("/", async (c) => {
   const live = and(eq(consignments.superseded, false), gte(consignments.createdAt, since));
   const summary = await db
     .select({
-      bookedCount: sql<number>`count(*)`,
-      booked: sql<number>`coalesce(sum(${consignments.codAmount}), 0)`,
+      bookedCount: sql<number>`coalesce(sum(case when ${REAL_PARCEL_SQL} then 1 else 0 end), 0)`,
+      booked: sql<number>`coalesce(sum(case when ${REAL_PARCEL_SQL} then ${consignments.codAmount} end), 0)`,
       collected: sql<number>`coalesce(sum(case when ${consignments.stage} in ('delivered','partial_delivered') then coalesce(${consignments.collectedAmount}, ${consignments.codAmount}) end), 0)`,
-      pendingCollection: sql<number>`coalesce(sum(case when ${consignments.isFinal} = 0 then ${consignments.codAmount} end), 0)`,
+      pendingCollection: sql<number>`coalesce(sum(case when ${OPEN_PARCEL_SQL} then ${consignments.codAmount} end), 0)`,
       lost: sql<number>`coalesce(sum(case when ${consignments.stage} = 'returned' then ${consignments.codAmount} end), 0)`,
       settled: sql<number>`coalesce(sum(case when ${consignments.paymentId} is not null then coalesce(${consignments.collectedAmount}, 0) end), 0)`,
       awaitingSettlement: sql<number>`coalesce(sum(case when ${consignments.stage} in ('delivered','partial_delivered') and ${consignments.paymentId} is null then coalesce(${consignments.collectedAmount}, ${consignments.codAmount}) end), 0)`,

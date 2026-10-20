@@ -186,6 +186,8 @@ describe("poll verdict (deleted / regressing parcels)", () => {
     expect(pollVerdict({ status: "delivered", isFinal: true, pickedUpAt: "2026-10-18T05:00:00Z" }, "pending")).toBe("ignore"));
   it("an already-deleted parcel stays deleted", () => expect(pollVerdict({ status: "deleted", isFinal: true, pickedUpAt: null }, "unknown")).toBe("ignore"));
   it("normal progress applies", () => expect(pollVerdict({ ...base, status: "in_review" }, "pending")).toBe("apply"));
+  it("an old record stuck at 'unknown' before pickup is recognised as deleted", () => expect(pollVerdict({ ...base, status: "unknown" }, "unknown")).toBe("deleted"));
+  it("a rider's 'unknown' report is not mistaken for a deletion", () => expect(pollVerdict({ ...base, status: "unknown_approval_pending" }, "unknown")).toBe("apply"));
   it("deleted maps to a cancelled, final stage", () => {
     expect(stageForStatus("deleted", false)).toBe("cancelled");
     expect(isFinalStatus("deleted")).toBe(true);
