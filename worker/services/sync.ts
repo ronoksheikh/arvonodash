@@ -347,7 +347,12 @@ export async function retryFailedWebhooks(db: DB, opts: { ids?: number[]; limit?
   for (const ev of rows) {
     try {
       const payload = JSON.parse(ev.payload);
-      const status = ev.provider === "shopify" ? await processShopifyEvent(db, ev.topic, payload) : await processSteadfastEvent(db, payload);
+      const status =
+        ev.provider === "shopify"
+          ? await processShopifyEvent(db, ev.topic, payload)
+          : ev.provider === "carrybee"
+            ? await (await import("./carrybeeEvents")).processCarrybeeEvent(db, payload)
+            : await processSteadfastEvent(db, payload);
       await db.update(webhookEvents).set({ status, error: null, attempts: ev.attempts + 1, processedAt: nowIso() }).where(eq(webhookEvents.id, ev.id));
       ok++;
     } catch (err) {

@@ -7,6 +7,8 @@ import { hmacSha256Base64, hmacSha256Hex, sha256Hex, timingSafeEqual } from "../
 import { nowIso } from "../lib/util";
 import { processShopifyEvent, processSteadfastEvent, STEADFAST_PARCEL_EVENTS, syncPayments, type SteadfastWebhook } from "../services/sync";
 import { processJobs } from "../services/jobs";
+import { webhookSecretMatches } from "../services/carrybee";
+import { processCarrybeeEvent, type CarrybeeWebhook } from "../services/carrybeeEvents";
 
 export const webhookRoutes = new Hono<AppEnv>();
 
@@ -16,7 +18,7 @@ export const webhookRoutes = new Hono<AppEnv>();
  */
 async function ingest(
   env: AppEnv["Bindings"],
-  provider: "shopify" | "steadfast",
+  provider: "shopify" | "steadfast" | "carrybee",
   externalId: string,
   topic: string,
   rawBody: string,
@@ -101,4 +103,26 @@ webhookRoutes.post("/steadfast", async (c) => {
   // A payout was made: pull it now instead of waiting for the 3-hourly sync.
   if (result === "processed" && type === "payment_request") c.executionCtx.waitUntil(syncPayments(c.env, getDb(c.env.DB), 1).catch(() => {}));
   return c.json({ status: "success", message: "Webhook received successfully." });
+});
+
+// Carrybee: the integration secret (Settings → Connections) arrives in X-CB-Webhook-Integration-Header.
+// Carrybee expects 202 Accepted with the same header echoed back; no signature scheme is documented.
+webhookRoutes.post("/carrybee", async (c) => {
+  const secret = c.env.CARRYBEE_WEBHOOK_SECRET;
+  if (!secret) return c.json({ error: "Webhook secret not configured" }, 503);
+  if (!webhookSecretMatches(c.env, c.req.header("X-CB-Webhook-Integration-Header"))) return c.json({ error: "Unauthorized" }, 401);
+  c.header("X-CB-Webhook-Integration-Header", secret);
+  const raw = await c.req.text();
+  let payload: CarrybeeWebhook;
+  try {
+    payload = raw.trim() ? JSON.parse(raw) : {};
+  } catch {
+    return c.json({ error: "Invalid JSON" }, 400);
+  }
+  if (!payload || typeof payload !== "object") return c.json({ error: "Invalid payload" }, 400);
+  // The integration check Carrybee sends when the URL is saved carries no parcel event.
+  if (!payload.event) return c.json({}, 202);
+  const result = await ingest(c.env, "carrybee", await sha256Hex(raw), payload.event, raw, () => processCarrybeeEvent(getDb(c.env.DB), payload));
+  if (result === "processed") c.executionCtx.waitUntil(processJobs(c.env, getDb(c.env.DB), { limit: 5 }));
+  return c.json({ result }, 202);
 });

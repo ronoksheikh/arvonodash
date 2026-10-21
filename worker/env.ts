@@ -14,6 +14,13 @@ export interface Env {
   STEADFAST_API_KEY?: string;
   STEADFAST_SECRET_KEY?: string;
   STEADFAST_WEBHOOK_TOKEN?: string;
+  // Carrybee courier (entered in Settings → Connections; Worker secrets with these names override)
+  CARRYBEE_CLIENT_ID?: string;
+  CARRYBEE_CLIENT_SECRET?: string;
+  CARRYBEE_CLIENT_CONTEXT?: string;
+  CARRYBEE_WEBHOOK_SECRET?: string;
+  // Test-only: point the Carrybee client at a mock server instead of the sandbox/production URL
+  CARRYBEE_BASE_URL?: string;
   // Customer SMS (sms.net.bd-compatible API). Key is a Worker secret only: `wrangler secret put SMS_API_KEY`.
   SMS_API_KEY?: string;
   SMS_SENDER_ID?: string; // approved sender ID, if the account has one

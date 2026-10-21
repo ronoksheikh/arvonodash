@@ -5,10 +5,11 @@ import {
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { modals } from "@mantine/modals";
 import {
-  AlertTriangle, Ban, ExternalLink, Timer, MapPin, MoreVertical, Package, Phone, RefreshCw, Send, Trash2, Truck, User, RotateCcw, CheckCircle2, ShieldCheck, Printer, MessageSquarePlus, PackageCheck, Link2, Check,
+  AlertTriangle, Ban, ExternalLink, Timer, MapPin, MoreVertical, Package, Phone, RefreshCw, Send, Trash2, Truck, User, RotateCcw, CheckCircle2, ShieldCheck, Printer, MessageSquarePlus, PackageCheck, Link2, Check, XCircle,
 } from "lucide-react";
 import { api, del, notifyError, notifySuccess, patch, post, put } from "../api";
 import { useCan } from "../auth";
+import { useBookingCourier } from "../courier";
 import { useCountdown, CallingBadge, Copyable, CustomStatusBadge, DispatchBadge, ErrorState, FulfillmentBadge, KeyValue, LabelBadge, LoadingState, RiskBadge, ShopifySyncBadge, StageBadge, SteadfastStatusBadge, useStatuses, ReturnStatusBadge } from "./ui";
 import { CallingPanel } from "./Calling";
 import { FraudCard } from "./Fraud";
@@ -16,6 +17,7 @@ import { JourneyTab } from "./Journey";
 import { SmsTab } from "./Sms";
 import { SourceCard } from "./Source";
 import { PARTIAL_OUTCOME_LABEL } from "../../shared/delivery";
+import { CARRYBEE_STATUSES, COURIERS, courierName, type CourierId } from "../../shared/couriers";
 import { ago, dateTime, money, titleCase } from "../format";
 import { DISPATCH_EVENTS, NOTE_KINDS, RISK_FLAGS, STEADFAST_STATUSES } from "../../shared/constants";
 import type { Booking, OrderDetail } from "../types";
@@ -212,7 +214,7 @@ function OverviewTab({ d, refresh, goBooking }: { d: OrderDetail; refresh: () =>
         </Alert>
       )}
       {o.shopifyDeletedAt && o.courierStage === "unbooked" && (
-        <Alert color="gray" variant="light" title="Deleted in Shopify">This order no longer exists in Shopify. Nothing was sent to Steadfast, so there's nothing to stop.</Alert>
+        <Alert color="gray" variant="light" title="Deleted in Shopify">This order no longer exists in Shopify. Nothing was sent to the courier, so there's nothing to stop.</Alert>
       )}
 
       <SourceCard channel={o.channel} sourceName={o.sourceName} attribution={o.attribution} />
@@ -334,6 +336,7 @@ function OverviewTab({ d, refresh, goBooking }: { d: OrderDetail; refresh: () =>
 function BookingTab({ d, refresh, goCourier }: { d: OrderDetail; refresh: () => void; goCourier: () => void }) {
   const o = d.order;
   const can = useCan();
+  const courier = useBookingCourier();
   const editable = o.courierStage === "unbooked" && can("orders.edit");
   const [form, setForm] = useState<Booking>(d.booking);
   const [partial, setPartial] = useState<boolean>(Boolean(d.booking.lineItems?.length));
@@ -433,7 +436,7 @@ function BookingTab({ d, refresh, goCourier }: { d: OrderDetail; refresh: () => 
         </div>
       </SimpleGrid>
       <TextInput label="Item description" maxLength={250} value={form.itemDescription ?? ""} onChange={(e) => setForm({ ...form, itemDescription: e.currentTarget.value || undefined })} disabled={!editable} />
-      <Textarea label="Rider instructions / note" description="Sent to Steadfast as the consignment note" autosize minRows={2} value={form.note ?? ""} onChange={(e) => setForm({ ...form, note: e.currentTarget.value || undefined })} disabled={!editable} />
+      <Textarea label="Rider instructions / note" description={`Sent to ${courier.label} as the parcel note`} autosize minRows={2} value={form.note ?? ""} onChange={(e) => setForm({ ...form, note: e.currentTarget.value || undefined })} disabled={!editable} />
 
       {d.combineCandidates.length > 0 && (
         <Card padding="md" style={{ borderLeft: "4px solid var(--mantine-color-grape-5)" }}>
@@ -496,7 +499,7 @@ function BookingTab({ d, refresh, goCourier }: { d: OrderDetail; refresh: () => 
           {editable && <Button variant="default" disabled={!dirty} loading={save.isPending} onClick={() => save.mutate()}>Save</Button>}
           {can("courier.book") && (
             <Button leftSection={<Send size={15} />} disabled={Boolean(o.cancelledAt) || o.callingStatus !== "confirmed"} loading={book.isPending} onClick={confirmBook}>
-              {combineIds.length ? `Send ${combineIds.length + 1} orders as one parcel` : "Send to Steadfast"}
+              {combineIds.length ? `Send ${combineIds.length + 1} orders as one parcel` : `Send to ${courier.label}`}
             </Button>
           )}
         </Group>
@@ -509,6 +512,7 @@ function CourierTab({ d, refresh }: { d: OrderDetail; refresh: () => void }) {
   const o = d.order;
   const can = useCan();
   const [returnFor, setReturnFor] = useState<number | null>(null);
+  const [cancelFor, setCancelFor] = useState<number | null>(null);
   const [statusFor, setStatusFor] = useState<number | null>(null);
   const [message, setMessage] = useState("");
 
@@ -527,7 +531,7 @@ function CourierTab({ d, refresh }: { d: OrderDetail; refresh: () => void }) {
   });
 
   if (!d.consignments.length) {
-    return <Text c="dimmed" size="sm">No consignment yet. Use the Booking tab to send this order to Steadfast.</Text>;
+    return <Text c="dimmed" size="sm">No consignment yet. Use the Booking tab to send this order to the courier.</Text>;
   }
 
   return (
@@ -598,7 +602,8 @@ function CourierTab({ d, refresh }: { d: OrderDetail; refresh: () => void }) {
                 </Group>
               </div>
               <Group gap="xs">
-                <SteadfastStatusBadge status={c.status} />
+                <Badge size="sm" variant="outline" color={c.courier === "carrybee" ? "orange" : "gray"}>{COURIERS[c.courier as CourierId]?.label ?? c.courier}</Badge>
+                <SteadfastStatusBadge status={c.status} courier={c.courier} />
                 {can("courier.manage") && (
                   <Menu position="bottom-end">
                     <Menu.Target><ActionIcon variant="default" aria-label="Consignment actions"><MoreVertical size={15} /></ActionIcon></Menu.Target>
@@ -606,7 +611,10 @@ function CourierTab({ d, refresh }: { d: OrderDetail; refresh: () => void }) {
                       <Menu.Item leftSection={<RefreshCw size={14} />} onClick={() => action.mutate({ path: "/consignments/refresh", body: { ids: [c.id] } })}>Refresh status</Menu.Item>
                       <Menu.Item leftSection={<MessageSquarePlus size={14} />} onClick={() => setStatusFor(-c.id)}>Add delivery note</Menu.Item>
                       <Menu.Item leftSection={<CheckCircle2 size={14} />} onClick={() => setStatusFor(c.id)}>Set status manually</Menu.Item>
-                      {["delivered", "partial_delivered"].includes(c.stage) && !ret?.steadfastReturnId && (
+                      {c.courier === "carrybee" && !c.isFinal && c.consignmentId && (
+                        <Menu.Item color="red" leftSection={<XCircle size={14} />} onClick={() => setCancelFor(c.id)}>Cancel parcel at Carrybee</Menu.Item>
+                      )}
+                      {c.courier === "steadfast" && ["delivered", "partial_delivered"].includes(c.stage) && !ret?.steadfastReturnId && (
                         <Menu.Item leftSection={<RotateCcw size={14} />} onClick={() => setReturnFor(c.id)}>Request return from customer</Menu.Item>
                       )}
                       {["returned", "cancelled"].includes(c.stage) && !c.superseded && (
@@ -642,14 +650,14 @@ function CourierTab({ d, refresh }: { d: OrderDetail; refresh: () => void }) {
               </Alert>
             )}
             {c.codChangedFrom !== null && c.codChangedFrom !== undefined && (
-              <Text size="xs" c="orange" mt="sm">COD was changed in the Steadfast portal (was {money(c.codChangedFrom)}).</Text>
+              <Text size="xs" c="orange" mt="sm">COD was changed in the {COURIERS[c.courier as CourierId]?.label ?? "courier"} portal (was {money(c.codChangedFrom)}).</Text>
             )}
             {c.note && <Text size="xs" c="dimmed" mt="sm">Note: {c.note}</Text>}
             {ret && <Group gap={6} mt="sm"><Text size="xs" c="dimmed">Return:</Text><ReturnStatusBadge status={ret.status} />{ret.steadfastReturnStatus && <Badge size="xs" variant="outline">Steadfast: {ret.steadfastReturnStatus}</Badge>}</Group>}
             <Divider my="md" />
             <Timeline bulletSize={18} lineWidth={2} active={0}>
               {events.map((e) => (
-                <Timeline.Item key={e.id} title={<Group gap={6}><Text size="sm" fw={500}>{e.status ? STEADFAST_STATUSES[e.status] ?? titleCase(e.status) : e.kind === "tracking" ? "Tracking update" : "Note"}</Text><Badge size="xs" variant="outline" color="gray">{e.source}</Badge></Group>}>
+                <Timeline.Item key={e.id} title={<Group gap={6}><Text size="sm" fw={500}>{e.status ? (c.courier === "carrybee" ? CARRYBEE_STATUSES[e.status] : STEADFAST_STATUSES[e.status]) ?? titleCase(e.status) : e.kind === "tracking" ? "Tracking update" : "Note"}</Text><Badge size="xs" variant="outline" color="gray">{e.source}</Badge></Group>}>
                   {e.message && <Text size="sm" c="dimmed">{e.message}</Text>}
                   <Text size="xs" c="dimmed" mt={2}>{dateTime(e.occurredAt)}</Text>
                 </Timeline.Item>
@@ -660,6 +668,15 @@ function CourierTab({ d, refresh }: { d: OrderDetail; refresh: () => void }) {
         );
       })}
 
+      <Modal opened={cancelFor !== null} onClose={() => setCancelFor(null)} title="Cancel this parcel at Carrybee">
+        <Stack>
+          <Text size="sm" c="dimmed">Sends a cancellation to Carrybee. Before pickup the parcel is cancelled at once and the order can be booked again; after pickup Carrybee decides and its answer arrives by webhook.</Text>
+          <Textarea label="Reason (sent to Carrybee)" value={message} onChange={(e) => setMessage(e.currentTarget.value)} autosize minRows={2} maxLength={190} />
+          <Group justify="flex-end">
+            <Button color="red" disabled={!message.trim()} loading={action.isPending} onClick={() => action.mutate({ path: `/consignments/${cancelFor}/cancel`, body: { reason: message } }, { onSuccess: () => { setCancelFor(null); setMessage(""); notifySuccess("Cancellation sent to Carrybee"); } })}>Cancel parcel</Button>
+          </Group>
+        </Stack>
+      </Modal>
       <Modal opened={returnFor !== null} onClose={() => setReturnFor(null)} title="Request return via Steadfast">
         <Stack>
           <Text size="sm" c="dimmed">Creates a Steadfast return request for this delivered parcel. Refunds and restocking are never done automatically.</Text>
@@ -671,6 +688,7 @@ function CourierTab({ d, refresh }: { d: OrderDetail; refresh: () => void }) {
       </Modal>
       <StatusModal
         consignmentId={statusFor}
+        courier={d.consignments.find((x) => x.id === Math.abs(statusFor ?? 0))?.courier ?? "steadfast"}
         onClose={() => setStatusFor(null)}
         onSubmit={(body) => action.mutate(
           statusFor! < 0 ? { path: `/consignments/${-statusFor!}/note`, body } : { path: `/consignments/${statusFor}/status`, body },
@@ -682,7 +700,7 @@ function CourierTab({ d, refresh }: { d: OrderDetail; refresh: () => void }) {
   );
 }
 
-function StatusModal({ consignmentId, onClose, onSubmit, loading }: { consignmentId: number | null; onClose: () => void; onSubmit: (body: { status?: string; message?: string; collectedAmount?: number }) => void; loading: boolean }) {
+function StatusModal({ consignmentId, courier, onClose, onSubmit, loading }: { consignmentId: number | null; courier: string; onClose: () => void; onSubmit: (body: { status?: string; message?: string; collectedAmount?: number }) => void; loading: boolean }) {
   const noteOnly = consignmentId !== null && consignmentId < 0;
   const [status, setStatus] = useState<string | null>(null);
   const [message, setMessage] = useState("");
@@ -692,9 +710,9 @@ function StatusModal({ consignmentId, onClose, onSubmit, loading }: { consignmen
       <Stack>
         {!noteOnly && (
           <>
-            <Text size="sm" c="dimmed">Use when Steadfast support confirmed a status that has not arrived via webhook. Logged in the timeline with your name.</Text>
-            <Select label="Status" data={Object.entries(STEADFAST_STATUSES).map(([value, label]) => ({ value, label }))} value={status} onChange={setStatus} />
-            {status?.includes("delivered") && <NumberInput label="Collected amount (৳)" value={collected} onChange={setCollected} min={0} />}
+            <Text size="sm" c="dimmed">Use when {courierName(courier)} support confirmed a status that has not arrived via webhook. Logged in the timeline with your name.</Text>
+            <Select label="Status" data={Object.entries(courier === "carrybee" ? CARRYBEE_STATUSES : STEADFAST_STATUSES).map(([value, label]) => ({ value, label }))} value={status} onChange={setStatus} />
+            {(status?.includes("deliver") || status === "paid-return") && <NumberInput label="Collected amount (৳)" value={collected} onChange={setCollected} min={0} />}
           </>
         )}
         <Textarea label={noteOnly ? "Note" : "Reason"} value={message} onChange={(e) => setMessage(e.currentTarget.value)} autosize minRows={2} />
@@ -814,7 +832,7 @@ function AutoBookPanel({ orderId, at, note, onDone }: { orderId: number; at: str
   });
   return (
     <Alert color={at ? "grape" : "gray"} variant="light" icon={<Timer size={18} />} title={at ? `Auto-booking in ${left}` : "Auto-booking off for this order"}>
-      <Text size="sm">{at ? "This confirmed order is sent to Steadfast automatically when the timer ends." : note ?? "Book it manually, or restart the timer."}</Text>
+      <Text size="sm">{at ? "This confirmed order is sent to the courier automatically when the timer ends." : note ?? "Book it manually, or restart the timer."}</Text>
       {can("courier.book") && (
         <Group gap="xs" mt="sm">
           <Button size="xs" leftSection={<Send size={14} />} loading={act.isPending && act.variables === "now"} onClick={() => act.mutate("now")}>Book now</Button>

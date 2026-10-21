@@ -9,6 +9,10 @@ import { logActivity } from "../services/activity";
 import { applyCourierUpdate, detachCombined, pollActiveConsignments } from "../services/courier";
 import { onNotPrintable } from "../services/dispatch";
 import * as steadfast from "../services/steadfast";
+import * as carrybee from "../services/carrybee";
+import { getSettings } from "../services/settings";
+import { CARRYBEE_STATUSES } from "../../shared/couriers";
+import { STEADFAST_STATUSES } from "../../shared/constants";
 
 export const consignmentRoutes = new Hono<AppEnv>();
 
@@ -58,7 +62,7 @@ consignmentRoutes.get("/", async (c) => {
       orderName: r.orderName,
       fulfillmentState: r.fulfillmentState,
       orderCancelledAt: r.orderCancelledAt,
-      trackingUrl: r.c.trackingCode ? steadfast.trackingUrl(c.env, r.c.trackingCode) : null,
+      trackingUrl: r.c.trackingCode && r.c.courier === "steadfast" ? steadfast.trackingUrl(c.env, r.c.trackingCode) : null,
     })),
     total: total?.n ?? 0,
     page,
@@ -93,6 +97,8 @@ consignmentRoutes.post("/:id{[0-9]+}/status", requirePerm("courier.manage"), asy
   if (!row) return c.json({ error: "Consignment not found" }, 404);
   const { status, message, collectedAmount } = await c.req.json<{ status: string; message?: string; collectedAmount?: number }>();
   if (!status) return c.json({ error: "Status is required" }, 400);
+  const known = row.courier === "carrybee" ? CARRYBEE_STATUSES : STEADFAST_STATUSES;
+  if (!(status in known)) return c.json({ error: `Unknown ${row.courier} status "${status}"` }, 400);
   const user = c.get("user");
   await applyCourierUpdate(db, row, { status, message: message ? `${message} (manual: ${user.name})` : `Manually set by ${user.name}`, codAmount: collectedAmount ?? null, source: "manual" }, user);
   return c.json({ ok: true });
@@ -117,11 +123,37 @@ consignmentRoutes.post("/:id{[0-9]+}/note", requirePerm("courier.manage"), async
   return c.json({ ok: true });
 });
 
+/**
+ * Cancels a Carrybee parcel through Carrybee's API (Steadfast has no cancel API). Before pickup the
+ * parcel is cancelled here at once; after pickup the request is recorded and the outcome arrives by webhook.
+ */
+consignmentRoutes.post("/:id{[0-9]+}/cancel", requirePerm("courier.manage"), async (c) => {
+  const db = getDb(c.env.DB);
+  const row = await db.select().from(consignments).where(eq(consignments.id, Number(c.req.param("id")))).get();
+  if (!row?.consignmentId) return c.json({ error: "Consignment not found" }, 404);
+  if (row.courier !== "carrybee") return c.json({ error: "Steadfast parcels are cancelled in the Steadfast portal" }, 400);
+  if (row.isFinal) return c.json({ error: "This parcel is already finished" }, 409);
+  const body = await c.req.json<{ reason?: string }>().catch(() => ({}) as { reason?: string });
+  const reason = body.reason?.trim();
+  if (!reason) return c.json({ error: "A reason is required" }, 400);
+  try {
+    await carrybee.cancelOrder(c.env, (await getSettings(db)).carrybeeEnvironment, row.consignmentId, reason);
+  } catch (err) {
+    return c.json({ error: (err as Error).message }, err instanceof HttpError ? (err.status as 400) : 500);
+  }
+  const user = c.get("user");
+  if (!row.pickedUpAt) await applyCourierUpdate(db, row, { status: "cancelled", message: `Cancelled by ${user.name}: ${reason}`, source: "manual" }, user);
+  else await db.insert(trackingEvents).values({ consignmentRowId: row.id, orderId: row.orderId, kind: "tracking", message: `Cancellation requested by ${user.name}: ${reason}`, source: "manual", occurredAt: nowIso(), createdAt: nowIso() });
+  await logActivity(db, user, "courier.cancelled", { entityType: "consignment", entityId: row.consignmentId, orderId: row.orderId, details: { courier: "carrybee", reason, pickedUp: Boolean(row.pickedUpAt) } });
+  return c.json({ ok: true, cancelled: !row.pickedUpAt });
+});
+
 /** Steadfast return request for a delivered parcel (customer return after delivery). */
 consignmentRoutes.post("/:id{[0-9]+}/return-request", requirePerm("courier.manage"), async (c) => {
   const db = getDb(c.env.DB);
   const row = await db.select().from(consignments).where(eq(consignments.id, Number(c.req.param("id")))).get();
   if (!row?.consignmentId) return c.json({ error: "Consignment not found" }, 404);
+  if (row.courier !== "steadfast") return c.json({ error: "Return requests are a Steadfast feature; for Carrybee parcels arrange the return in the Carrybee panel" }, 400);
   const { reason } = await c.req.json<{ reason?: string }>();
   const existing = await db
     .select()
@@ -170,8 +202,14 @@ consignmentRoutes.post("/:id{[0-9]+}/discard", requirePerm("courier.manage"), as
   const row = await db.select().from(consignments).where(eq(consignments.id, Number(c.req.param("id")))).get();
   if (!row) return c.json({ error: "Consignment not found" }, 404);
   if (row.consignmentId || row.status !== "unconfirmed") return c.json({ error: "Only unconfirmed bookings can be discarded" }, 400);
-  const status = await steadfast.getStatusByInvoice(c.env, row.invoice);
-  if (status) return c.json({ error: `Steadfast has this invoice (status: ${status}). Check the Steadfast panel instead.` }, 409);
+  // Only discard when the courier confirms it never received this booking.
+  if (row.courier === "carrybee") {
+    const found = await carrybee.getOrderDetails(c.env, (await getSettings(db)).carrybeeEnvironment, row.invoice);
+    if (found) return c.json({ error: `Carrybee has this order (consignment ${found.consignment_id ?? "?"}). Check the Carrybee panel instead.` }, 409);
+  } else {
+    const status = await steadfast.getStatusByInvoice(c.env, row.invoice);
+    if (status) return c.json({ error: `Steadfast has this invoice (status: ${status}). Check the Steadfast panel instead.` }, 409);
+  }
   await db.update(consignments).set({ superseded: true, stage: "cancelled", status: "discarded", isFinal: true }).where(eq(consignments.id, row.id));
   await db.update(orders).set({ courierStage: "unbooked", activeConsignmentId: null }).where(and(eq(orders.id, row.orderId), eq(orders.activeConsignmentId, row.id)));
   await detachCombined(db, row.id);

@@ -1,3 +1,4 @@
+import { COURIERS, type CourierId } from "../../shared/couriers";
 import { and, desc, eq, inArray, sql } from "drizzle-orm";
 import type { DB } from "../db";
 import { inList } from "../db";
@@ -69,6 +70,7 @@ export async function stuckParcels(db: DB, settings: AppSettings, opts: { includ
       trackingCode: consignments.trackingCode,
       status: consignments.status,
       stage: consignments.stage,
+      courier: consignments.courier,
       lastMessage: consignments.lastMessage,
       lastStatusAt: consignments.lastStatusAt,
       pickedUpAt: consignments.pickedUpAt,
@@ -112,9 +114,11 @@ export async function stuckParcels(db: DB, settings: AppSettings, opts: { includ
     const transitDays = r.pickedUpAt ? (now.getTime() - Date.parse(r.pickedUpAt)) / DAY : null;
     const silentDays = lastUpdate ? (now.getTime() - Date.parse(lastUpdate)) / DAY : null;
 
-    if (!r.pickedUpAt && r.status === "in_review") {
+    const courier = COURIERS[r.courier as CourierId]?.label ?? "the courier";
+    // Not picked up yet ("in review" at Steadfast; created / pickup requested at Carrybee).
+    if (!r.pickedUpAt && r.stage === "booked") {
       if (r.handedOverAt && now.getTime() - Date.parse(r.handedOverAt) > handoverMs) {
-        reasons.push({ code: "not_received", text: `Handed to the rider ${Math.floor((now.getTime() - Date.parse(r.handedOverAt)) / 3_600_000)}h ago, but Steadfast still shows "in review"` });
+        reasons.push({ code: "not_received", text: `Handed to the rider ${Math.floor((now.getTime() - Date.parse(r.handedOverAt)) / 3_600_000)}h ago, but ${courier} hasn't confirmed the pickup` });
       } else if (!r.handedOverAt && r.dispatchStatus === "sorted" && r.sortedAt && now.getTime() - Date.parse(r.sortedAt) > DAY) {
         reasons.push({ code: "waiting_pickup", text: "Scanned and ready more than a day ago, but not collected" });
       }
@@ -126,7 +130,7 @@ export async function stuckParcels(db: DB, settings: AppSettings, opts: { includ
       reasons.push({ code: "unconfirmed", text: `Rider marked it ${what} ${Math.floor((now.getTime() - Date.parse(r.lastStatusAt)) / DAY)} days ago; Steadfast hasn't confirmed yet` });
     }
     if (r.pickedUpAt && silentDays !== null && silentDays >= settings.stuckNoUpdateDays) {
-      reasons.push({ code: "no_update", text: `No update from Steadfast for ${Math.floor(silentDays)} days` });
+      reasons.push({ code: "no_update", text: `No update from ${courier} for ${Math.floor(silentDays)} days` });
     }
     if (transitDays !== null && transitDays > exp.days && r.stage === "in_transit") {
       reasons.push({ code: "slow_transit", text: `${Math.floor(transitDays)} days with the courier; ${r.city ?? "this area"} usually takes ${exp.days} (${exp.basis})` });

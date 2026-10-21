@@ -219,10 +219,11 @@ export const consignments = sqliteTable(
   {
     id: integer("id").primaryKey({ autoIncrement: true }),
     orderId: integer("order_id").notNull(),
+    courier: text("courier").notNull().default("steadfast"), // steadfast | carrybee
     invoice: text("invoice").notNull().unique(),
-    consignmentId: text("consignment_id").unique(), // Steadfast id
+    consignmentId: text("consignment_id").unique(), // the courier's parcel id (Steadfast or Carrybee)
     trackingCode: text("tracking_code"),
-    status: text("status").notNull().default("in_review"), // raw Steadfast status
+    status: text("status").notNull().default("in_review"), // the courier's raw status (Steadfast status, or Carrybee event without "order.")
     stage: text("stage").notNull().default("booked"),
     recipientName: text("recipient_name").notNull(),
     recipientPhone: text("recipient_phone").notNull(),

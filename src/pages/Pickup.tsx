@@ -42,7 +42,7 @@ type Plan = {
 };
 
 const STAGES: { key: Stage; label: string; color: string; hint: string }[] = [
-  { key: "needs_booking", label: "Not booked", color: "orange", hint: "Confirmed, not sent to Steadfast yet" },
+  { key: "needs_booking", label: "Not booked", color: "orange", hint: "Confirmed, not sent to the courier yet" },
   { key: "needs_label", label: "Label not printed", color: "orange", hint: "Booked, label still to print" },
   { key: "needs_scan", label: "Not scanned", color: "orange", hint: "Printed, not scanned at packing" },
   { key: "ready", label: "Ready (scanned)", color: "teal", hint: "Scanned, waiting for the rider" },

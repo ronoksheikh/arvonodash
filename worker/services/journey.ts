@@ -1,6 +1,7 @@
 import { asc, eq, or } from "drizzle-orm";
 import type { DB } from "../db";
 import { activityLog, callLogs, consignments, dispatchEvents, orderNotes, orders, returns, smsMessages, trackingEvents } from "../db/schema";
+import { CARRYBEE_STATUSES, COURIERS, type CourierId } from "../../shared/couriers";
 import { DISPATCH_EVENTS, NOTE_KINDS, SMS_TRIGGER_LABELS, STEADFAST_STATUSES, type SmsTrigger } from "../../shared/constants";
 
 /**
@@ -72,13 +73,15 @@ export async function buildJourney(db: DB, order: typeof orders.$inferSelect) {
       push({ at: c.createdAt, source: "booking", title: c.orderId === order.id ? "Booked with Steadfast" : "Added to a combined parcel", detail: [c.consignmentId && `CID ${c.consignmentId}`, c.trackingCode, `invoice ${c.invoice}`, `COD ৳${c.codAmount}`].filter(Boolean).join(" · "), actor: null });
     }
     if (c.superseded) push({ at: c.updatedAt, source: "booking", title: "Consignment replaced by a rebooking", detail: c.invoice, actor: null, tone: "warn" });
-    if (c.settledAt) push({ at: c.settledAt, source: "courier", title: "COD paid out by Steadfast", detail: c.paymentId ? `Payment ${c.paymentId}` : null, actor: null, tone: "good" });
+    if (c.settledAt) push({ at: c.settledAt, source: "courier", title: `COD paid out by ${COURIERS[c.courier as CourierId]?.label ?? "the courier"}`, detail: c.paymentId ? `Payment ${c.paymentId}` : null, actor: null, tone: "good" });
   }
   for (const d of dispatch) {
     push({ at: d.createdAt, source: "warehouse", title: DISPATCH_EVENTS[d.event] ?? d.event, detail: d.note, actor: d.actor, tone: d.event === "carried_over" || d.event === "picked_up_unscanned" ? "warn" : undefined });
   }
   for (const t of tracking) {
-    const title = t.kind === "status" ? `Steadfast: ${STEADFAST_STATUSES[t.status ?? ""] ?? t.status}` : (t.message ?? "Courier update");
+    const courier = cons.find((c) => c.id === t.consignmentRowId)?.courier ?? "steadfast";
+    const label = courier === "carrybee" ? CARRYBEE_STATUSES[t.status ?? ""] : STEADFAST_STATUSES[t.status ?? ""];
+    const title = t.kind === "status" ? `${COURIERS[courier as CourierId]?.label ?? courier}: ${label ?? t.status}` : (t.message ?? "Courier update");
     push({ at: t.occurredAt, source: "courier", title, detail: t.kind === "status" ? t.message : null, actor: t.source, tone: t.status === "delivered" ? "good" : t.status === "cancelled" || t.status === "deleted" ? "bad" : undefined });
   }
   for (const r of rets) {

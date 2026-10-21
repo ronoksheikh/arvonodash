@@ -8,6 +8,7 @@ import { useSearchParams } from "react-router";
 import { Package, PhoneCall, ArrowDownUp, Download, Filter, MoreHorizontal, Printer, Search, Send, Tag, X, CheckCircle2, XCircle, Archive, ShieldOff, ListChecks, Megaphone } from "lucide-react";
 import { api, post, qs, notifyError, notifySuccess } from "../api";
 import { useCan } from "../auth";
+import { useBookingCourier } from "../courier";
 import { AutoBookChip, CustomerHistoryBadge, CustomStatusBadge, DispatchBadge, EmptyState, ErrorState, FulfillmentBadge, LabelBadge, LoadingState, PageHeader, Panel, RiskBadge, ShopifySyncBadge, StageBadge, TableFooter, useStatuses } from "../components/ui";
 import { CallingMenu } from "../components/Calling";
 import { OrderDrawer } from "../components/OrderDrawer";
@@ -37,6 +38,7 @@ type BookRequest = { ids: number[]; allowRisky: boolean; combine: boolean };
 export default function Orders() {
   const [params, setParams] = useSearchParams();
   const can = useCan();
+  const courier = useBookingCourier();
   const qc = useQueryClient();
   const statuses = useStatuses();
   const tab = params.get("tab") ?? "all";
@@ -430,7 +432,7 @@ export default function Orders() {
                   )}
                   {can("courier.book") && (
                     <Button size="xs" leftSection={<Send size={14} />} disabled={!bookable.length} onClick={() => setBookOpen(true)}>
-                      Send to Steadfast{bookable.length !== selected.size && bookable.length ? ` (${bookable.length})` : ""}
+                      Send to {courier.label}{bookable.length !== selected.size && bookable.length ? ` (${bookable.length})` : ""}
                     </Button>
                   )}
                   {can("orders.edit") && (
@@ -512,6 +514,7 @@ export default function Orders() {
 }
 
 function BookModal({ opened, onClose, rows, skipped, loading, onConfirm }: { opened: boolean; onClose: () => void; rows: OrderListRow[]; skipped: number; loading: boolean; onConfirm: (req: BookRequest) => void }) {
+  const courier = useBookingCourier();
   const [allowRisky, setAllowRisky] = useState(false);
   const [combine, setCombine] = useState(true);
   const [skipFraud, setSkipFraud] = useState(true);
@@ -532,7 +535,7 @@ function BookModal({ opened, onClose, rows, skipped, loading, onConfirm }: { ope
   const noPhone = toBook.filter((r) => !r.phone);
   const cod = toBook.reduce((s, r) => s + Math.max(0, r.outstanding), 0);
   return (
-    <Modal opened={opened} onClose={onClose} title={<Text fw={600}>Send to Steadfast</Text>} size="lg">
+    <Modal opened={opened} onClose={onClose} title={<Text fw={600}>Send to {courier.fullName}</Text>} size="lg">
       <Stack>
         <Group grow>
           <Paper withBorder p="sm" radius="md"><Text size="xs" c="dimmed">Orders</Text><Text fw={700} fz="xl">{toBook.length}</Text></Paper>

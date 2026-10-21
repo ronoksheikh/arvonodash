@@ -6,6 +6,8 @@ import { createFulfillment, getFulfillmentOrders } from "./shopify";
 import { getSettings } from "./settings";
 import { logActivity } from "./activity";
 import { trackingUrl } from "./steadfast";
+import { publicTrackingUrl } from "./tracking";
+import { courierName } from "../../shared/couriers";
 import { nowIso, PermanentError } from "../lib/util";
 
 const FULFILLABLE_STATUSES = new Set(["OPEN", "IN_PROGRESS"]);
@@ -71,7 +73,11 @@ export async function fulfillOrder(env: Env, db: DB, orderId: number, consignmen
   }
 
   const appSettings = await getSettings(db);
-  const tracking = { company: appSettings.trackingCompany, number: consignment.trackingCode, url: trackingUrl(env, consignment.trackingCode) };
+  // Carrybee has no public tracking page, so customers get our own tracking link instead.
+  const tracking =
+    consignment.courier === "carrybee"
+      ? { company: courierName("carrybee"), number: consignment.trackingCode, url: order.trackingToken ? await publicTrackingUrl(db, appSettings, order.trackingToken) : null }
+      : { company: appSettings.trackingCompany, number: consignment.trackingCode, url: trackingUrl(env, consignment.trackingCode) };
   const fulfillmentIds = [...(order.shopifyFulfillmentIds ?? [])];
   for (const step of plan) {
     try {

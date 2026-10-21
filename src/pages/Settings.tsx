@@ -13,6 +13,7 @@ import { FULFILLMENT_TRIGGERS, PERMISSIONS } from "../../shared/constants";
 import type { CustomStatus } from "../types";
 import { SmsSettings, type SmsSettingsData, type SmsStatus } from "./settings/SmsSettings";
 import { TrackingSettings } from "./settings/TrackingSettings";
+import { CarrybeeCard, CourierSwitch, type CourierSettings } from "./settings/CarrybeeSettings";
 
 type AppSettings = {
   fulfillmentTrigger: keyof typeof FULFILLMENT_TRIGGERS;
@@ -48,16 +49,18 @@ type AppSettings = {
   autoCombine: boolean;
   trackingBaseUrl: string;
   storeUrl: string;
-} & SmsSettingsData;
+} & SmsSettingsData & CourierSettings;
 type SettingsData = {
   settings: AppSettings;
   credentials: Record<string, CredInfo> | null;
   steadfastWebhookToken: string | null;
+  carrybeeWebhookSecret: string | null;
   encryptedAtRest: boolean;
   statuses: CustomStatus[];
   connections: {
     shopify: { configured: boolean; shopDomain: string; apiVersion: string; authMode: string; webhookSecret: boolean; webhookUrl: string };
     steadfast: { configured: boolean; baseUrl: string; webhookToken: boolean; webhookUrl: string };
+    carrybee: { configured: boolean; webhookUrl: string };
   };
   sync: Record<string, unknown>;
   sms: SmsStatus;
@@ -184,6 +187,11 @@ function Connections({ d }: { d: SettingsData }) {
 
   return (
     <SimpleGrid cols={{ base: 1, lg: 2 }} spacing="md">
+      <CourierSwitch
+        settings={d.settings}
+        ready={{ steadfast: steadfast.configured, carrybee: d.connections.carrybee.configured && Boolean(d.settings.carrybeeStoreId) }}
+        disabled={disabled}
+      />
       <Card>
         <Group justify="space-between" mb="md">
           <Text fw={600}>Shopify</Text>
@@ -284,6 +292,14 @@ function Connections({ d }: { d: SettingsData }) {
           )}
         </Stack>
       </Card>
+      <CarrybeeCard
+        settings={d.settings}
+        creds={creds}
+        configured={d.connections.carrybee.configured}
+        webhookUrl={d.connections.carrybee.webhookUrl}
+        webhookSecret={d.carrybeeWebhookSecret}
+        disabled={disabled}
+      />
       <Card style={{ gridColumn: "1 / -1" }}>
         <Text fw={600} mb="xs">Security & background sync</Text>
         <Text size="sm" c="dimmed">

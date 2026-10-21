@@ -475,7 +475,7 @@ export async function createFulfillment(
   input: {
     fulfillmentOrderId: string;
     lineItems?: { id: string; quantity: number }[];
-    tracking: { company: string; number: string; url: string };
+    tracking: { company: string; number: string; url: string | null };
     notifyCustomer: boolean;
   },
 ) {
@@ -498,7 +498,7 @@ export async function createFulfillment(
             ...(input.lineItems ? { fulfillmentOrderLineItems: input.lineItems } : {}),
           },
         ],
-        trackingInfo: input.tracking,
+        trackingInfo: { company: input.tracking.company, number: input.tracking.number, ...(input.tracking.url ? { url: input.tracking.url } : {}) },
         notifyCustomer: input.notifyCustomer,
       },
     },
