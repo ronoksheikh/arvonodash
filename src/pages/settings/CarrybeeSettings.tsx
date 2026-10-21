@@ -60,13 +60,14 @@ export function CourierSwitch({ settings, ready, disabled }: { settings: Courier
   );
 }
 
-export function CarrybeeCard({ settings, creds, configured, webhookUrl, webhookSecret, lastWebhook, disabled }: {
+export function CarrybeeCard({ settings, creds, configured, webhookUrl, webhookSecret, lastWebhook, setupUntil, disabled }: {
   settings: CourierSettings;
   creds: Record<string, CredInfo> | null;
   configured: boolean;
   webhookUrl: string;
   webhookSecret: string | null;
-  lastWebhook: { ok: boolean; at: string; reason: "mismatch" | "missing" | null; receivedHint: string | null } | null;
+  lastWebhook: { ok: boolean; at: string; reason: "mismatch" | "missing" | null; receivedHint: string | null; setupCheck?: boolean } | null;
+  setupUntil: string | null;
   disabled: boolean;
 }) {
   const qc = useQueryClient();
@@ -95,6 +96,13 @@ export function CarrybeeCard({ settings, creds, configured, webhookUrl, webhookS
     onSuccess: () => { notifySuccess("New secret generated — update it on Carrybee's Webhook Integration page"); refresh(); },
     onError: (e) => notifyError(e),
   });
+
+  const openWindow = useMutation({
+    mutationFn: () => post<{ until: string }>("/settings/carrybee/webhook-setup"),
+    onSuccess: () => { notifySuccess("Setup window open for 10 minutes — press Add Webhook at Carrybee now"); refresh(); },
+    onError: (e) => notifyError(e),
+  });
+  const windowOpen = Boolean(setupUntil && setupUntil > new Date().toISOString());
 
   const keys = ["CARRYBEE_CLIENT_ID", "CARRYBEE_CLIENT_SECRET", "CARRYBEE_CLIENT_CONTEXT"];
   const dirty = keys.some((k) => form[k]?.trim());
@@ -182,16 +190,27 @@ export function CarrybeeCard({ settings, creds, configured, webhookUrl, webhookS
             <Button size="xs" disabled={(form.CARRYBEE_WEBHOOK_SECRET?.trim().length ?? 0) < 16} loading={saveCreds.isPending} onClick={() => saveCreds.mutate({ CARRYBEE_WEBHOOK_SECRET: form.CARRYBEE_WEBHOOK_SECRET.trim() })}>Save secret</Button>
           </Group>
         )}
-        <Text size="xs" c="dimmed">3. Save the webhook at Carrybee. Its check is answered with 202 and this secret.</Text>
+        <Text size="xs" c="dimmed">3. Carrybee's "Add Webhook" check doesn't send the secret, so open the setup window here first, then press Add Webhook at Carrybee within 10 minutes.</Text>
+        {!disabled && (
+          <Group gap="xs">
+            <Button size="xs" variant="light" loading={openWindow.isPending} disabled={!webhookSecret} onClick={() => openWindow.mutate()}>
+              Open 10-minute setup window
+            </Button>
+            {windowOpen && <Text size="xs" c="teal">Open until {new Date(setupUntil!).toLocaleTimeString()} — press Add Webhook at Carrybee now.</Text>}
+          </Group>
+        )}
+        <Text size="xs" c="dimmed">Real parcel updates always need the secret header; only the one setup check is answered without it.</Text>
         <Text size="xs" c="dimmed" mt={4}>Secret saved here now</Text>
         {webhookSecret ? <Copyable value={webhookSecret} /> : <Text size="sm" c="dimmed">Hidden</Text>}
         {lastWebhook && (
           lastWebhook.ok ? (
-            <Alert color="teal" variant="light" p="xs">Last Carrybee webhook accepted {ago(lastWebhook.at)}.</Alert>
+            <Alert color="teal" variant="light" p="xs">{lastWebhook.setupCheck ? "Carrybee's setup check passed" : "Last Carrybee webhook accepted"} {ago(lastWebhook.at)}.</Alert>
           ) : (
             <Alert color="red" variant="light" p="xs" title={`Last Carrybee webhook rejected ${ago(lastWebhook.at)}`}>
               {lastWebhook.reason === "missing"
-                ? "It arrived without the X-CB-Webhook-Integration-Header secret."
+                ? lastWebhook.setupCheck
+                  ? "Carrybee's setup check arrived without the secret header. Open the setup window above, then press Add Webhook at Carrybee again."
+                  : "A parcel update arrived without the X-CB-Webhook-Integration-Header secret, so it was refused. Statuses still update by polling every few minutes."
                 : `The secret it carried (ending ${lastWebhook.receivedHint}) doesn't match the one saved here. Paste Carrybee's secret above and save, then try again at Carrybee.`}
             </Alert>
           )

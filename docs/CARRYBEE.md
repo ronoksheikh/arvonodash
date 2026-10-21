@@ -18,9 +18,14 @@ delivered or returned. You can switch back at any time.
 4. **Webhook**: in Carrybee → Webhook Integration, paste the Webhook URL
    (`https://<dashboard>/webhooks/carrybee`). Copy the **integration secret Carrybee shows there**
    (a UUID like `40489fe0-…`) into *Carrybee's integration secret* in our Settings and save it,
-   then save the webhook at Carrybee and subscribe to all events. Carrybee's check expects
-   `202` with that secret in `X-CB-Webhook-Integration-Header`; if it fails, Settings shows why
-   the last webhook was rejected (missing header, or a secret that doesn't match).
+   then press **Open 10-minute setup window** in our Settings and, within 10 minutes, press
+   **Add Webhook** at Carrybee (all events ticked).
+
+   Why the window: Carrybee's check (`{"event": "webhook.integration"}`) arrives **without** the
+   secret header, yet expects `202` with the secret in `X-CB-Webhook-Integration-Header`. Answering
+   that to anyone would hand the secret out, so it is answered only while the window is open, and
+   only once. Real parcel events always need the header. Settings shows the last accepted or
+   rejected webhook and why (missing header, or a secret that doesn't match).
 5. Switch **Courier for new bookings** to Carrybee. It refuses until steps 2–3 are done.
 
 ## How bookings are sent

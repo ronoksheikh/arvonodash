@@ -12,7 +12,7 @@ import { getSmsBalance, renderTemplate, sendManualSms, smsLog, smsStatus, smsVar
 import { forgetTrackingHost, instanceId } from "../services/tracking";
 import { smsSegments } from "../../shared/constants";
 import { logActivity } from "../services/activity";
-import { getSettings, saveSettings, getValue, getValues } from "../services/settings";
+import { getSettings, saveSettings, getValue, getValues, setValue } from "../services/settings";
 import { diagnoseShopify, getShopInfo, listWebhookSubscriptions, registerWebhooks, resetShopifyToken, shopifyConfigured } from "../services/shopify";
 import { CREDENTIAL_KEYS, describeCredentials, loadCredentials, normalizeShopDomain, saveCredentials, type Credentials } from "../services/credentials";
 import { getBalance, steadfastConfigured } from "../services/steadfast";
@@ -55,6 +55,7 @@ settingsRoutes.get("/", async (c) => {
         configured: carrybeeConfigured(c.env),
         webhookUrl: `${origin}/webhooks/carrybee`,
         lastWebhook: await getValue<carrybee.CarrybeeWebhookStatus>(db, carrybee.CARRYBEE_WEBHOOK_STATUS),
+        setupUntil: await getValue<string>(db, carrybee.CARRYBEE_SETUP_WINDOW),
       },
       steadfast: {
         configured: steadfastConfigured(c.env),
@@ -194,6 +195,15 @@ settingsRoutes.post("/test/carrybee", requirePerm("settings.manage"), async (c) 
   } catch (err) {
     return c.json({ ok: false, error: (err as Error).message });
   }
+});
+
+/** Opens a 10-minute window in which Carrybee's "Add Webhook" check is answered (it sends no secret). */
+settingsRoutes.post("/carrybee/webhook-setup", requirePerm("settings.manage"), async (c) => {
+  const db = getDb(c.env.DB);
+  const until = new Date(Date.now() + 10 * 60_000).toISOString();
+  await setValue(db, carrybee.CARRYBEE_SETUP_WINDOW, until);
+  await logActivity(db, c.get("user"), "settings.carrybee_webhook_setup_opened", { details: { until } });
+  return c.json({ until });
 });
 
 settingsRoutes.post("/connections/regenerate-carrybee-secret", requirePerm("settings.manage"), async (c) => {
