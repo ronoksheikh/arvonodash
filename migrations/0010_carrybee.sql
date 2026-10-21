@@ -1,0 +1,1 @@
+ALTER TABLE `consignments` ADD `courier` text DEFAULT 'steadfast' NOT NULL;

@@ -1,3 +1,4 @@
+import { CARRYBEE_STATUSES } from "../../shared/couriers";
 import { useEffect, useState, type ReactNode } from "react";
 import { Alert, Badge, Button, Center, Group, Loader, Pagination, Paper, Stack, Text, ThemeIcon, Title, Tooltip, CopyButton, ActionIcon } from "@mantine/core";
 import { AlertTriangle, Check, Copy, Inbox, ShieldAlert, Timer } from "lucide-react";
@@ -34,9 +35,17 @@ export function StageBadge({ stage, size = "sm" }: { stage: string; size?: "xs" 
   );
 }
 
-export function SteadfastStatusBadge({ status }: { status: string }) {
-  const label = STEADFAST_STATUSES[status] ?? titleCase(status);
-  const color = status.startsWith("delivered") ? "teal" : status.startsWith("partial") ? "lime" : status.startsWith("cancelled") ? "red" : status === "hold" ? "yellow" : status === "pending" ? "indigo" : status.startsWith("unknown") || status === "unconfirmed" ? "orange" : "blue";
+/** A courier's raw parcel status (Steadfast or Carrybee). */
+export function SteadfastStatusBadge({ status, courier }: { status: string; courier?: string | null }) {
+  const label = (courier === "carrybee" ? CARRYBEE_STATUSES[status] : STEADFAST_STATUSES[status]) ?? STEADFAST_STATUSES[status] ?? CARRYBEE_STATUSES[status] ?? titleCase(status);
+  const color =
+    status.startsWith("delivered") || status === "exchange" ? "teal"
+    : status.startsWith("partial") || status === "paid-return" ? "lime"
+    : status.startsWith("cancelled") || status === "pickup-cancelled" || status === "deleted" || status.startsWith("returned") ? "red"
+    : status === "hold" || status === "delivery-on-hold" || status === "delivery-failed" ? "yellow"
+    : status === "pending" || ["picked", "in-transit", "at-the-sorting-hub", "at-central-warehouse", "on-the-way-to-central-warehouse", "received-at-last-mile-hub", "assigned-for-delivery"].includes(status) ? "indigo"
+    : status.startsWith("unknown") || status === "unconfirmed" ? "orange"
+    : "blue";
   return (
     <Badge color={color} size="sm">
       {label}

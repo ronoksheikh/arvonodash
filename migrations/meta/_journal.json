@@ -71,6 +71,13 @@
       "when": 1792451405791,
       "tag": "0009_repair_deleted_parcels",
       "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "6",
+      "when": 1792568679142,
+      "tag": "0010_carrybee",
+      "breakpoints": true
     }
   ]
 }

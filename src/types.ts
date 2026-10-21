@@ -144,6 +144,7 @@ export type DispatchEvent = { id: number; orderId: number; event: string; jobId:
 export type Consignment = {
   id: number;
   orderId: number;
+  courier: string;
   invoice: string;
   consignmentId: string | null;
   trackingCode: string | null;

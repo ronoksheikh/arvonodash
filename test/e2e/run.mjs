@@ -1261,6 +1261,114 @@ await step("COD totals count only live parcels: cancelled, cancel-pending and de
   assert.equal(after.count - before.count, 1);
 });
 
+await step("Carrybee is off by default and can't be switched on until it's connected", async () => {
+  const st = (await call("GET", "/api/settings")).body;
+  assert.equal(st.settings.courier, "steadfast");
+  assert.equal(st.connections.carrybee.configured, false);
+  assert.match(st.carrybeeWebhookSecret, /^[a-f0-9]{48}$/, "a webhook secret is generated to paste into Carrybee");
+  const r = await call("PUT", "/api/settings", { courier: "carrybee" });
+  assert.equal(r.status, 400);
+  assert.equal((await call("GET", "/api/settings")).body.settings.courier, "steadfast");
+});
+
+let cbSecret = "";
+const carrybeeHook = (payload, secret = cbSecret) =>
+  call("POST", "/webhooks/carrybee", payload, { auth: false, headers: { "X-CB-Webhook-Integration-Header": secret } });
+
+await step("connect Carrybee from Settings, pick the store, switch new bookings to it", async () => {
+  await call("PUT", "/api/settings/connections", { CARRYBEE_CLIENT_ID: "cb-id", CARRYBEE_CLIENT_SECRET: "cb-secret", CARRYBEE_CLIENT_CONTEXT: "cb-context" });
+  const t = await call("POST", "/api/settings/test/carrybee");
+  assert.equal(t.body.ok, true, JSON.stringify(t.body));
+  assert.equal(t.body.stores[0].id, "store-1");
+  await call("PUT", "/api/settings", { carrybeeStoreId: "store-1", carrybeeDefaultWeightGrams: 700 });
+  const sw = await call("PUT", "/api/settings", { courier: "carrybee" });
+  assert.equal(sw.status, 200, JSON.stringify(sw.body));
+  const st = (await call("GET", "/api/settings")).body;
+  assert.equal(st.settings.courier, "carrybee");
+  assert.equal(JSON.stringify(st.credentials).includes("cb-secret"), false, "credentials are only shown masked");
+  cbSecret = st.carrybeeWebhookSecret;
+});
+
+await step("Carrybee booking, webhooks from pickup to delivery and payout, out-of-order events", async () => {
+  const o = await newOrder(6201, "+880 1755-620001");
+  const c = await book(o.id);
+  assert.equal(c.courier, "carrybee");
+  assert.match(c.consignmentId, /^FX\d+$/);
+  assert.equal(c.trackingCode, c.consignmentId, "the consignment ID doubles as the tracking code");
+  assert.equal(c.deliveryCharge, 85, "delivery fee + COD fee");
+  const sent = (await mockState()).carrybee.orders.find((x) => x.consignment_id === c.consignmentId);
+  assert.equal(sent.store_id, "store-1");
+  assert.equal(sent.item_weight, 700);
+  assert.equal(sent.collectable_amount, 1250);
+  assert.equal(sent.merchant_order_id, c.invoice);
+  assert.equal(sent.city_id, 14, "city/zone resolved from the address");
+
+  // Webhook security and handshake
+  assert.equal((await carrybeeHook({ event: "order.picked", consignment_id: c.consignmentId }, "wrong-secret")).status, 401);
+  const hello = await carrybeeHook({});
+  assert.equal(hello.status, 202, "integration check is acknowledged");
+  assert.equal(hello.headers.get("X-CB-Webhook-Integration-Header"), cbSecret, "the secret is echoed back as Carrybee requires");
+
+  const base = { store_id: "store-1", consignment_id: c.consignmentId, merchant_order_id: c.invoice };
+  const at = (min) => new Date(Date.now() + min * 60_000).toISOString();
+  assert.equal((await carrybeeHook({ ...base, event: "order.picked", timestamptz: at(1) })).status, 202);
+  let d = await orderDetail(o.id);
+  assert.equal(d.order.courierStage, "in_transit");
+  assert.equal(d.order.dispatchStatus, "dispatched", "picked up by Carrybee = dispatched");
+  await carrybeeHook({ ...base, event: "order.assigned-for-delivery", timestamptz: at(2), attempt: 1, agent_name: "Rahim Uddin", agent_phone: "01700000000" });
+  const delivered = { ...base, event: "order.delivered", timestamptz: at(3), collected_amount: 1250, attempt: 1 };
+  await carrybeeHook(delivered);
+  d = await orderDetail(o.id);
+  assert.equal(d.order.courierStage, "delivered");
+  assert.equal(d.consignments[0].collectedAmount, 1250);
+  assert.ok(d.events.some((e) => /Rahim Uddin 01700000000/.test(e.message ?? "")), "rider shown in the timeline");
+  // A late event never re-opens a delivered parcel.
+  await carrybeeHook({ ...base, event: "order.in-transit", timestamptz: at(1.5) });
+  assert.equal((await orderDetail(o.id)).order.courierStage, "delivered");
+  // Duplicate delivery is stored once.
+  const dup = await carrybeeHook(delivered);
+  assert.equal(dup.body.result, "duplicate");
+  await carrybeeHook({ ...base, event: "order.paid", invoice_id: "IX5001", timestamptz: at(4) });
+  d = await orderDetail(o.id);
+  assert.equal(d.consignments[0].paymentId, "IX5001");
+  const track = (await call("GET", `/api/public/track/${d.trackingPageUrl.split("/t/")[1]}`, undefined, { auth: false })).body;
+  assert.equal(track.courier.name, "Carrybee");
+  assert.ok(track.timeline.some((e) => e.title === "Sent to Carrybee"));
+});
+
+await step("Carrybee: cancel before pickup, polling fallback, and switching back to Steadfast", async () => {
+  const o = await newOrder(6202, "+880 1755-620002");
+  const c = await book(o.id);
+  const before = (await call("GET", "/api/cod?days=7")).body.summary.pendingCollection;
+  const noReason = await call("POST", `/api/consignments/${c.id}/cancel`, {});
+  assert.equal(noReason.status, 400);
+  const r = await call("POST", `/api/consignments/${c.id}/cancel`, { reason: "Customer cancelled on the phone" });
+  assert.equal(r.body.cancelled, true);
+  assert.equal((await mockState()).carrybee.cancelled.at(-1).reason, "Customer cancelled on the phone");
+  const d = await orderDetail(o.id);
+  assert.equal(d.order.courierStage, "cancelled");
+  assert.equal((await call("GET", "/api/cod?days=7")).body.summary.pendingCollection, before - 1250, "no longer counted as with the courier");
+
+  // A missed webhook: the poller reads Carrybee's details.
+  const o2 = await newOrder(6203, "+880 1755-620003");
+  const c2 = await book(o2.id);
+  await fetch(`${MOCK}/__carrybee`, { method: "POST", body: JSON.stringify({ id: c2.consignmentId, transfer_status: "Picked Up" }) });
+  await call("POST", "/api/consignments/refresh", { ids: [c2.id] });
+  assert.equal((await orderDetail(o2.id)).order.courierStage, "in_transit");
+
+  // Steadfast return requests don't apply to Carrybee parcels.
+  assert.equal((await call("POST", `/api/consignments/${c2.id}/return-request`, { reason: "x" })).status, 400);
+
+  const back = await call("PUT", "/api/settings", { courier: "steadfast" });
+  assert.equal(back.status, 200);
+  const o3 = await newOrder(6204, "+880 1755-620004");
+  const c3 = await book(o3.id);
+  assert.equal(c3.courier, "steadfast", "new bookings follow the switch");
+  await fetch(`${MOCK}/__carrybee`, { method: "POST", body: JSON.stringify({ id: c2.consignmentId, transfer_status: "Delivered", collected_amount: "1250" }) });
+  await call("POST", "/api/consignments/refresh", { ids: [c2.id] });
+  assert.equal((await orderDetail(o2.id)).order.courierStage, "delivered", "parcels already with Carrybee keep updating after switching back");
+});
+
 await step("activity log records actions", async () => {
   const a = await call("GET", "/api/logs/activity");
   const actions = new Set(a.body.rows.map((r) => r.action));

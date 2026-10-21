@@ -6,7 +6,9 @@ const PORT = Number(process.env.MOCK_PORT ?? 8790);
 const state = {
   fulfillments: [], tags: [], consignments: [], tokenRequests: 0, webhooks: [], returnRequests: [], progressReports: [], reopened: [], cancelled: [], deleteAttempts: [], closed: [],
   markedPaid: [], fraudCalls: {}, historyCalls: 0, sms: [],
+  carrybee: { orders: [], cancelled: [], addressLookups: 0 },
 };
+let nextCb = 5000;
 // Orders deleted in the Shopify admin (the test deletes them); GraphQL answers null for these.
 const deletedOrders = new Set();
 // Shopify customer journeys by order id (set by the test).
@@ -207,6 +209,51 @@ const server = http.createServer(async (req, res) => {
   if (p === "/__sms_code" && req.method === "POST") {
     smsCode = Number(JSON.parse(body).code);
     return json(res, 200, { ok: true });
+  }
+
+  // Carrybee API v2 (shapes from the Carrybee docs)
+  if (p.startsWith("/cb/api/v2/")) {
+    if (req.headers["client-id"] !== "cb-id" || req.headers["client-secret"] !== "cb-secret" || req.headers["client-context"] !== "cb-context") {
+      return json(res, 401, { error: true, message: "Unauthenticated" });
+    }
+    const route = p.slice("/cb/api/v2".length);
+    let m;
+    if (route === "/stores" && req.method === "GET") {
+      return json(res, 200, { error: false, message: "Store list", data: { stores: [{ id: "store-1", name: "ARVONO Mirpur", contact_person_name: "Rafiq", contact_person_number: "01800000000", address: "Mirpur 10", city_id: 14, zone_id: 151, area_id: 5100, is_active: true, is_approved: true, is_default_pickup_store: true, is_default_return_store: false, pending_count: 0 }] } });
+    }
+    if (route === "/address-details" && req.method === "POST") {
+      state.carrybee.addressLookups++;
+      return json(res, 200, { error: false, message: "Address details", data: { city_id: 14, zone_id: 286 } });
+    }
+    if (route === "/orders" && req.method === "POST") {
+      const input = JSON.parse(body);
+      const causes = {};
+      for (const f of ["store_id", "recipient_phone", "recipient_name", "recipient_address", "item_weight"]) if (!input[f]) causes[f] = [{ type: "required" }];
+      if (input.store_id && input.store_id !== "store-1") causes.store_id = [{ type: "exists" }];
+      if (Object.keys(causes).length) return json(res, 422, { error: true, message: "Validation error", causes });
+      const order = { ...input, consignment_id: `FX${nextCb++}`, transfer_status: "Pending" };
+      state.carrybee.orders.push(order);
+      return json(res, 201, { error: false, message: "Order created successfully", data: { order: { consignment_id: order.consignment_id, store_id: input.store_id, merchant_order_id: input.merchant_order_id, collectable_amount: String(input.collectable_amount), cod_fee: 15, delivery_fee: "70" } } });
+    }
+    if ((m = route.match(/^\/orders\/([^/]+)\/details$/))) {
+      const id = decodeURIComponent(m[1]);
+      const o = state.carrybee.orders.find((x) => x.consignment_id === id || x.merchant_order_id === id);
+      if (!o) return json(res, 404, { error: true, message: "Order not found" });
+      return json(res, 200, { error: false, message: "Order details", data: { transfer_status: o.transfer_status, consignment_id: o.consignment_id, merchant_order_id: o.merchant_order_id, collectable_amount: String(o.collectable_amount), collected_amount: o.collected_amount ?? "0", payment_status: o.payment_status ?? "unpaid", invoice_id: o.invoice_id ?? null, updated_at: new Date().toISOString() } });
+    }
+    if ((m = route.match(/^\/orders\/([^/]+)\/cancel$/)) && req.method === "POST") {
+      const input = JSON.parse(body || "{}");
+      if (!input.cancellation_reason) return json(res, 422, { error: true, message: "Validation error", causes: { cancellation_reason: [{ type: "required" }] } });
+      state.carrybee.cancelled.push({ id: decodeURIComponent(m[1]), reason: input.cancellation_reason });
+      return json(res, 202, { error: false, message: "Cancellation confirmed", data: null });
+    }
+  }
+  if (p === "/__carrybee" && req.method === "POST") {
+    // Test helper: change what Carrybee's details endpoint reports for an order.
+    const { id, ...patch } = JSON.parse(body);
+    const o = state.carrybee.orders.find((x) => x.consignment_id === id);
+    if (o) Object.assign(o, patch);
+    return json(res, 200, { ok: Boolean(o) });
   }
 
   // SMS API (sms.net.bd shape): form-encoded api_key, msg, to

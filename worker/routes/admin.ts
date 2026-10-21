@@ -16,6 +16,8 @@ import { getSettings, saveSettings, getValues } from "../services/settings";
 import { diagnoseShopify, getShopInfo, listWebhookSubscriptions, registerWebhooks, resetShopifyToken, shopifyConfigured } from "../services/shopify";
 import { CREDENTIAL_KEYS, describeCredentials, loadCredentials, normalizeShopDomain, saveCredentials, type Credentials } from "../services/credentials";
 import { getBalance, steadfastConfigured } from "../services/steadfast";
+import * as carrybee from "../services/carrybee";
+import { carrybeeConfigured } from "../services/carrybee";
 import { getImportState, latestRuns, reconcileShopify, recordRun, retryFailedWebhooks, runImportStep, startImport, syncPayments, verifyShopifyOrdersExist } from "../services/sync";
 import { rollOverMissedPickups } from "../services/pickup";
 import { syncAttribution } from "../services/attribution";
@@ -37,6 +39,8 @@ settingsRoutes.get("/", async (c) => {
     statuses: await db.select().from(customStatuses).orderBy(customStatuses.sortOrder).all(),
     credentials: c.get("user").permissions.includes("settings.manage") ? await describeCredentials(c.env) : null,
     steadfastWebhookToken: c.get("user").permissions.includes("settings.manage") ? c.env.STEADFAST_WEBHOOK_TOKEN ?? null : null,
+    // Shown so it can be pasted into Carrybee's Webhook Integration page.
+    carrybeeWebhookSecret: c.get("user").permissions.includes("settings.manage") ? c.env.CARRYBEE_WEBHOOK_SECRET ?? null : null,
     encryptedAtRest: Boolean(c.env.APP_ENCRYPTION_KEY),
     connections: {
       shopify: {
@@ -46,6 +50,10 @@ settingsRoutes.get("/", async (c) => {
         authMode: c.env.SHOPIFY_ACCESS_TOKEN ? "access_token" : "client_credentials",
         webhookSecret: Boolean(c.env.SHOPIFY_WEBHOOK_SECRET || c.env.SHOPIFY_CLIENT_SECRET),
         webhookUrl: `${origin}/webhooks/shopify`,
+      },
+      carrybee: {
+        configured: carrybeeConfigured(c.env),
+        webhookUrl: `${origin}/webhooks/carrybee`,
       },
       steadfast: {
         configured: steadfastConfigured(c.env),
@@ -112,7 +120,10 @@ settingsRoutes.put("/connections", requirePerm("settings.manage"), async (c) => 
   if (typeof body.STEADFAST_WEBHOOK_TOKEN === "string" && body.STEADFAST_WEBHOOK_TOKEN.trim().length < 16) {
     return c.json({ error: "Webhook token must be at least 16 characters" }, 400);
   }
-  if (body.STEADFAST_WEBHOOK_TOKEN === null) return c.json({ error: "The webhook token can be changed but not removed" }, 400);
+  if (body.STEADFAST_WEBHOOK_TOKEN === null || body.CARRYBEE_WEBHOOK_SECRET === null) return c.json({ error: "The webhook secret can be changed but not removed" }, 400);
+  if (typeof body.CARRYBEE_WEBHOOK_SECRET === "string" && body.CARRYBEE_WEBHOOK_SECRET.trim().length < 16) {
+    return c.json({ error: "Webhook secret must be at least 16 characters" }, 400);
+  }
   if (next.SHOPIFY_SHOP_DOMAIN && !/^[a-z0-9][a-z0-9-]*\.myshopify\.com$/.test(next.SHOPIFY_SHOP_DOMAIN)) {
     return c.json({ error: "Store domain must be the permanent *.myshopify.com domain (e.g. arvono.myshopify.com)" }, 400);
   }
@@ -135,6 +146,18 @@ settingsRoutes.post("/connections/regenerate-webhook-token", requirePerm("settin
 settingsRoutes.put("/", requirePerm("settings.manage"), async (c) => {
   const db = getDb(c.env.DB);
   const body = await c.req.json();
+  // Switching couriers only once the new one can actually take bookings.
+  const current = await getSettings(db);
+  if (body.courier === "carrybee") {
+    const storeId = typeof body.carrybeeStoreId === "string" ? body.carrybeeStoreId : current.carrybeeStoreId;
+    if (!carrybeeConfigured(c.env) || !storeId) return c.json({ error: "Connect Carrybee first: save its credentials and choose a pickup store in Settings → Connections" }, 400);
+  }
+  if (body.courier === "steadfast" && current.courier !== "steadfast" && !steadfastConfigured(c.env)) {
+    return c.json({ error: "Steadfast isn't connected: add its API keys in Settings → Connections first" }, 400);
+  }
+  if (body.courier && body.courier !== current.courier) {
+    await logActivity(db, c.get("user"), "settings.courier_switched", { details: { from: current.courier, to: body.courier } });
+  }
   const saved = await saveSettings(db, body);
   forgetTrackingHost();
   await logActivity(db, c.get("user"), "settings.updated", { details: body });
@@ -159,6 +182,25 @@ settingsRoutes.post("/test/steadfast", requirePerm("settings.manage"), async (c)
   } catch (err) {
     return c.json({ ok: false, error: (err as Error).message });
   }
+});
+
+/** Carrybee connection test: the store list needs valid credentials for the chosen environment. */
+settingsRoutes.post("/test/carrybee", requirePerm("settings.manage"), async (c) => {
+  const db = getDb(c.env.DB);
+  try {
+    const stores = await carrybee.listStores(c.env, (await getSettings(db)).carrybeeEnvironment);
+    return c.json({ ok: true, stores });
+  } catch (err) {
+    return c.json({ ok: false, error: (err as Error).message });
+  }
+});
+
+settingsRoutes.post("/connections/regenerate-carrybee-secret", requirePerm("settings.manage"), async (c) => {
+  const db = getDb(c.env.DB);
+  const current = await loadCredentials(c.env, true);
+  await saveCredentials(c.env, { ...current, CARRYBEE_WEBHOOK_SECRET: randomToken(24) });
+  await logActivity(db, c.get("user"), "settings.carrybee_secret_regenerated");
+  return c.json({ ok: true });
 });
 
 settingsRoutes.post("/shopify/webhooks", requirePerm("settings.manage"), async (c) => {

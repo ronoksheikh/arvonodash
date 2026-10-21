@@ -101,7 +101,7 @@ export default function ReportPage() {
                 tone={r.sameDay.carriedOver ? "bad" : undefined}
                 hint={`parcel-days carried over${r.sameDay.unscanned ? ` · ${r.sameDay.unscanned} left without a packing scan` : ""}`}
               />
-              <Stat label="Sent to Steadfast" value={num(r.courier.booked)} />
+              <Stat label="Sent to courier" value={num(r.courier.booked)} />
               <Stat label="Picked up (dispatched)" value={num(r.courier.dispatched)} />
               <Stat label="Delivered" value={num(r.courier.delivered)} />
               <Stat label="Returned" value={num(r.courier.returned)} tone={r.courier.returned ? "bad" : undefined} hint={r.courier.returned ? "failed deliveries" : undefined} />

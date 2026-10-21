@@ -16,6 +16,10 @@ export type Credentials = {
   STEADFAST_API_KEY?: string;
   STEADFAST_SECRET_KEY?: string;
   STEADFAST_WEBHOOK_TOKEN?: string;
+  CARRYBEE_CLIENT_ID?: string;
+  CARRYBEE_CLIENT_SECRET?: string;
+  CARRYBEE_CLIENT_CONTEXT?: string;
+  CARRYBEE_WEBHOOK_SECRET?: string;
 };
 
 export const CREDENTIAL_KEYS: (keyof Credentials)[] = [
@@ -27,8 +31,12 @@ export const CREDENTIAL_KEYS: (keyof Credentials)[] = [
   "STEADFAST_API_KEY",
   "STEADFAST_SECRET_KEY",
   "STEADFAST_WEBHOOK_TOKEN",
+  "CARRYBEE_CLIENT_ID",
+  "CARRYBEE_CLIENT_SECRET",
+  "CARRYBEE_CLIENT_CONTEXT",
+  "CARRYBEE_WEBHOOK_SECRET",
 ];
-const SECRET_KEYS = new Set<keyof Credentials>(["SHOPIFY_CLIENT_SECRET", "SHOPIFY_ACCESS_TOKEN", "SHOPIFY_WEBHOOK_SECRET", "STEADFAST_SECRET_KEY", "STEADFAST_WEBHOOK_TOKEN", "STEADFAST_API_KEY"]);
+const SECRET_KEYS = new Set<keyof Credentials>(["SHOPIFY_CLIENT_SECRET", "SHOPIFY_ACCESS_TOKEN", "SHOPIFY_WEBHOOK_SECRET", "STEADFAST_SECRET_KEY", "STEADFAST_WEBHOOK_TOKEN", "STEADFAST_API_KEY", "CARRYBEE_CLIENT_SECRET", "CARRYBEE_CLIENT_CONTEXT", "CARRYBEE_WEBHOOK_SECRET"]);
 
 const ROW_KEY = "credentials";
 let cache: { at: number; value: Credentials } | null = null;
@@ -65,9 +73,9 @@ export async function loadCredentials(env: Env, fresh = false): Promise<Credenti
     const sealed = JSON.parse(row.value) as string;
     value = await unseal(env, sealed);
   }
-  if (!value.STEADFAST_WEBHOOK_TOKEN) {
-    // Generated once so the Steadfast webhook can be configured without any manual secret.
-    value = { ...value, STEADFAST_WEBHOOK_TOKEN: randomToken(24) };
+  if (!value.STEADFAST_WEBHOOK_TOKEN || !value.CARRYBEE_WEBHOOK_SECRET) {
+    // Generated once so the courier webhooks can be configured without inventing a secret.
+    value = { ...value, STEADFAST_WEBHOOK_TOKEN: value.STEADFAST_WEBHOOK_TOKEN || randomToken(24), CARRYBEE_WEBHOOK_SECRET: value.CARRYBEE_WEBHOOK_SECRET || randomToken(24) };
     await saveCredentials(env, value);
   }
   cache = { at: Date.now(), value };

@@ -10,3 +10,7 @@
 # SMS_API_KEY=
 # SMS_SENDER_ID=
 # SMS_API_URL=https://api.sms.net.bd
+# Carrybee (normally entered in Settings → Connections)
+# CARRYBEE_CLIENT_ID=
+# CARRYBEE_CLIENT_SECRET=
+# CARRYBEE_CLIENT_CONTEXT=

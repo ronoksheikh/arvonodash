@@ -5,6 +5,7 @@ import { stageForStatus, isPickedUpStatus, isFinalStatus, normalizeFraudScore, p
 import { shipByDate } from "../worker/services/pickup";
 import { renderTemplate } from "../worker/services/sms";
 import { smsSegments } from "../shared/constants";
+import { carrybeeRules, normalizeStatus as cbNormalize } from "../worker/services/carrybee";
 import { classifyChannel, utmFromAttributes, utmFromUrl } from "../shared/attribution";
 import { judgeFraud } from "../worker/services/fraud";
 import { DEFAULT_SETTINGS, normalizeBaseUrl } from "../worker/services/settings";
@@ -243,4 +244,33 @@ describe("order source", () => {
     expect(classifyChannel({ sourceName: "web", visit: null })).toBe("unknown");
   });
   it("reads UTM cart attributes", () => expect(utmFromAttributes([{ name: "_utm_source", value: "tiktok" }])?.source).toBe("tiktok"));
+});
+
+describe("Carrybee statuses", () => {
+  it("normalizes webhook events and detail statuses", () => {
+    expect(cbNormalize("order.picked")).toBe("picked");
+    expect(cbNormalize("Picked Up")).toBe("picked");
+    expect(cbNormalize("order.partial-delivery")).toBe("partial-delivery");
+    expect(cbNormalize("Delivery On Hold")).toBe("delivery-on-hold");
+    expect(cbNormalize("order.paid")).toBe("paid");
+    expect(cbNormalize("Pending")).toBeNull(); // unknown wording: wait for the webhook
+  });
+  it.each([
+    ["created", "booked", false, false],
+    ["pickup-requested", "booked", false, false],
+    ["picked", "in_transit", true, false],
+    ["assigned-for-delivery", "in_transit", true, false],
+    ["delivery-on-hold", "on_hold", true, false],
+    ["delivered", "delivered", true, true],
+    ["partial-delivery", "partial_delivered", true, true],
+    ["paid-return", "partial_delivered", true, true],
+    ["returned", "returned", true, true],
+    ["returned-to-merchant", "returned", true, true],
+    ["pickup-cancelled", "cancelled", false, true],
+    ["cancelled", "cancelled", false, true],
+  ])("%s → %s", (status, stage, picked, final) => {
+    expect(carrybeeRules.stageFor(status)).toBe(stage);
+    expect(carrybeeRules.isPickedUp(status)).toBe(picked);
+    expect(carrybeeRules.isFinal(status)).toBe(final);
+  });
 });

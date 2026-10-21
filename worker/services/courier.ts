@@ -3,6 +3,8 @@ import { inList, type DB } from "../db";
 import type { Env, SessionUser } from "../env";
 import { consignments, customers, customStatuses, orders, returns, trackingEvents, type BookingDetails } from "../db/schema";
 import * as steadfast from "./steadfast";
+import * as carrybee from "./carrybee";
+import { courierName, type CourierId } from "../../shared/couriers";
 import { enqueueJob } from "./jobs";
 import { getSettings, type AppSettings } from "./settings";
 import { logActivity, type Actor } from "./activity";
@@ -21,6 +23,12 @@ type OrderRow = typeof orders.$inferSelect;
  */
 export const OPEN_PARCEL_SQL = sql`(${consignments.isFinal} = 0 and ${consignments.superseded} = 0 and ${consignments.consignmentId} is not null
   and ${consignments.stage} not in ('cancelled', 'returned') and ${consignments.status} not like 'cancelled%' and ${consignments.status} != 'deleted')`;
+
+/** How a courier's raw statuses translate to our stages. */
+export function statusRules(courier: string) {
+  if (courier === "carrybee") return carrybee.carrybeeRules;
+  return { isPickedUp: steadfast.isPickedUpStatus, isFinal: steadfast.isFinalStatus, stageFor: (status: string, wasPickedUp = false) => steadfast.stageForStatus(status, wasPickedUp) };
+}
 
 /** A consignment that really left with Steadfast's booking: not a failed booking, not cancelled or deleted before pickup. */
 export const REAL_PARCEL_SQL = sql`(${consignments.consignmentId} is not null and ${consignments.stage} != 'cancelled')`;
@@ -130,6 +138,49 @@ export async function bookOrders(
   return results;
 }
 
+/** Creates the parcel with the chosen courier. Throws HttpError like the courier clients do. */
+async function createAtCourier(env: Env, courier: CourierId, appSettings: AppSettings, invoice: string, booking: BookingDetails, order: OrderRow) {
+  if (courier === "carrybee") {
+    const env2 = appSettings.carrybeeEnvironment;
+    // City/zone help Carrybee route the parcel; when it can't read the address it still accepts the order without them.
+    const place = await carrybee.resolveAddress(env, env2, booking.recipientAddress);
+    const quantity = booking.totalLot || order.lineItems.reduce((q, li) => q + li.quantity, 0) || 1;
+    const c = await carrybee.createOrder(env, env2, {
+      store_id: appSettings.carrybeeStoreId,
+      merchant_order_id: invoice,
+      delivery_type: appSettings.carrybeeExpress ? 2 : 1,
+      product_type: 1,
+      recipient_phone: booking.recipientPhone,
+      recipient_secendary_phone: booking.alternativePhone || undefined,
+      recipient_name: booking.recipientName.trim().slice(0, 99),
+      recipient_address: booking.recipientAddress.trim().slice(0, 200),
+      ...(place ?? {}),
+      special_instruction: booking.note ? truncate(booking.note, 250) : undefined,
+      product_description: booking.itemDescription ? truncate(booking.itemDescription, 250) : undefined,
+      item_weight: appSettings.carrybeeDefaultWeightGrams,
+      item_quantity: Math.min(200, Math.max(1, quantity)),
+      collectable_amount: Math.round(toNumber(booking.codAmount)),
+      is_closed_box: false,
+    });
+    // Carrybee has no separate tracking code: the consignment ID is what labels, scans and Shopify use.
+    return { consignmentId: c.consignment_id, trackingCode: c.consignment_id, status: "created", deliveryCharge: c.deliveryFee };
+  }
+  const c = await steadfast.createOrder(env, {
+    invoice,
+    recipient_name: booking.recipientName.trim(),
+    recipient_phone: booking.recipientPhone,
+    alternative_phone: booking.alternativePhone || undefined,
+    recipient_email: booking.recipientEmail || undefined,
+    recipient_address: booking.recipientAddress.trim(),
+    cod_amount: toNumber(booking.codAmount),
+    note: booking.note || undefined,
+    item_description: booking.itemDescription || undefined,
+    total_lot: booking.totalLot || undefined,
+    delivery_type: booking.deliveryType ?? 0,
+  });
+  return { consignmentId: String(c.consignment_id), trackingCode: c.tracking_code, status: c.status || "in_review", deliveryCharge: null };
+}
+
 async function bookOne(
   env: Env,
   db: DB,
@@ -177,6 +228,11 @@ async function bookOne(
   const errors = validateBooking(booking);
   if (errors.length) return { ...base, ok: false, error: errors.join("; ") };
 
+  const courier: CourierId = appSettings.courier;
+  if (courier === "carrybee" && (!carrybee.carrybeeConfigured(env) || !appSettings.carrybeeStoreId)) {
+    return { ...base, ok: false, error: "Carrybee is selected but not connected: add the credentials and pickup store in Settings → Connections" };
+  }
+
   const attempt = (await db.select({ n: sql<number>`count(*)` }).from(consignments).where(eq(consignments.orderId, order.id)).get())?.n ?? 0;
   const invoice = invoiceFor(order, appSettings, attempt, extras);
   const now = nowIso();
@@ -186,6 +242,7 @@ async function bookOne(
     .insert(consignments)
     .values({
       orderId: order.id,
+      courier,
       invoice,
       status: "creating",
       stage: "booked",
@@ -205,7 +262,7 @@ async function bookOne(
     .get();
   if (!reserved) return { ...base, ok: false, error: "A booking for this order is already in progress" };
 
-  // Claim the combined orders before calling Steadfast, so no other booking can take them meanwhile.
+  // Claim the combined orders before calling the courier, so no other booking can take them meanwhile.
   if (extras.length) {
     const claimed = await db
       .update(orders)
@@ -220,21 +277,9 @@ async function bookOne(
     }
   }
 
-  let created: steadfast.CreatedConsignment;
+  let created: { consignmentId: string; trackingCode: string; status: string; deliveryCharge: number | null };
   try {
-    created = await steadfast.createOrder(env, {
-      invoice,
-      recipient_name: booking.recipientName.trim(),
-      recipient_phone: booking.recipientPhone,
-      alternative_phone: booking.alternativePhone || undefined,
-      recipient_email: booking.recipientEmail || undefined,
-      recipient_address: booking.recipientAddress.trim(),
-      cod_amount: toNumber(booking.codAmount),
-      note: booking.note || undefined,
-      item_description: booking.itemDescription || undefined,
-      total_lot: booking.totalLot || undefined,
-      delivery_type: booking.deliveryType ?? 0,
-    });
+    created = await createAtCourier(env, courier, appSettings, invoice, booking, order);
   } catch (err) {
     const definite = err instanceof HttpError && (err.status === 422 || err.status === 502 || err.status === 503 && /not configured/.test(err.message));
     if (definite) {
@@ -245,14 +290,14 @@ async function bookOne(
       await db.update(consignments).set({ status: "unconfirmed", stage: "issue", lastMessage: (err as Error).message }).where(eq(consignments.id, reserved.id));
       await db.update(orders).set({ courierStage: "issue", activeConsignmentId: reserved.id }).where(eq(orders.id, order.id));
     }
-    await logActivity(db, user, "courier.booking_failed", { entityType: "order", entityId: order.id, orderId: order.id, details: { invoice, error: (err as Error).message } });
+    await logActivity(db, user, "courier.booking_failed", { entityType: "order", entityId: order.id, orderId: order.id, details: { invoice, courier, error: (err as Error).message } });
     return { ...base, ok: false, error: (err as Error).message };
   }
 
-  const consignmentId = String(created.consignment_id);
+  const consignmentId = created.consignmentId;
   await db
     .update(consignments)
-    .set({ consignmentId, trackingCode: created.tracking_code, status: created.status || "in_review", lastStatusAt: now, updatedAt: nowIso() })
+    .set({ consignmentId, trackingCode: created.trackingCode, status: created.status, deliveryCharge: created.deliveryCharge, lastStatusAt: now, updatedAt: nowIso() })
     .where(eq(consignments.id, reserved.id));
   for (const c of existing) await db.update(consignments).set({ superseded: true }).where(eq(consignments.id, c.id));
   await db
@@ -277,8 +322,8 @@ async function bookOne(
     consignmentRowId: reserved.id,
     orderId: order.id,
     kind: "system",
-    status: created.status || "in_review",
-    message: `Booked with Steadfast by ${user.name} (invoice ${invoice}, COD ৳${toNumber(booking.codAmount)}${extras.length ? `, combined with ${extras.map((x) => x.name).join(", ")}` : ""})`,
+    status: created.status,
+    message: `Booked with ${courierName(courier)} by ${user.name} (invoice ${invoice}, COD ৳${toNumber(booking.codAmount)}${extras.length ? `, combined with ${extras.map((x) => x.name).join(", ")}` : ""})`,
     source: "api",
     occurredAt: now,
     createdAt: now,
@@ -287,7 +332,7 @@ async function bookOne(
     entityType: "consignment",
     entityId: consignmentId,
     orderId: order.id,
-    details: { invoice, trackingCode: created.tracking_code, cod: booking.codAmount, combined: extras.map((x) => x.name) },
+    details: { invoice, courier, trackingCode: created.trackingCode, cod: booking.codAmount, combined: extras.map((x) => x.name) },
   });
 
   if (appSettings.shopifyBookedTag) {
@@ -295,7 +340,7 @@ async function bookOne(
   }
   if (appSettings.fulfillmentTrigger === "on_booking") await queueFulfillment(db, order.id, reserved.id);
 
-  return { ...base, ok: true, trackingCode: created.tracking_code, consignmentId, combinedWith: extras.map((x) => x.name) };
+  return { ...base, ok: true, trackingCode: created.trackingCode, consignmentId, combinedWith: extras.map((x) => x.name) };
 }
 
 /** Releases orders that were combined into a parcel (booking failed, discarded or released). */
@@ -321,14 +366,22 @@ export async function applyCourierUpdate(
   db: DB,
   c: ConsignmentRow,
   update: { status?: string | null; message?: string | null; codAmount?: number | null; deliveryCharge?: number | null; occurredAt?: string | null; source: "webhook" | "poll" | "manual" },
-  actor: Actor = "steadfast",
+  actor: Actor = c.courier === "carrybee" ? "carrybee" : "steadfast",
 ): Promise<boolean> {
   const now = nowIso();
   const occurredAt = steadfast.parseSteadfastTime(update.occurredAt) ?? now;
+  const rules = statusRules(c.courier);
   const newStatus = update.status?.toLowerCase().trim() || null;
   const statusChanged = Boolean(newStatus && newStatus !== c.status);
 
   if (!statusChanged && !update.message) {
+    await db.update(consignments).set({ lastPolledAt: now }).where(eq(consignments.id, c.id));
+    return false;
+  }
+
+  // Carrybee doesn't promise event order: a finished parcel never goes back to an open status.
+  if (statusChanged && c.courier === "carrybee" && c.isFinal && !rules.isFinal(newStatus!)) {
+    await db.insert(trackingEvents).values({ consignmentRowId: c.id, orderId: c.orderId, kind: "tracking", status: null, message: update.message ?? `Late update ignored: ${newStatus}`, source: update.source, occurredAt, createdAt: now });
     await db.update(consignments).set({ lastPolledAt: now }).where(eq(consignments.id, c.id));
     return false;
   }
@@ -344,11 +397,11 @@ export async function applyCourierUpdate(
   if (update.deliveryCharge !== null && update.deliveryCharge !== undefined) patch.deliveryCharge = update.deliveryCharge;
 
   let stage = c.stage;
-  const firstPickup = Boolean(statusChanged && !c.pickedUpAt && steadfast.isPickedUpStatus(newStatus!));
+  const firstPickup = Boolean(statusChanged && !c.pickedUpAt && rules.isPickedUp(newStatus!));
   if (statusChanged) {
-    const pickedUp = Boolean(c.pickedUpAt) || steadfast.isPickedUpStatus(newStatus!);
-    stage = steadfast.stageForStatus(newStatus!, pickedUp);
-    Object.assign(patch, { status: newStatus!, stage, lastStatusAt: occurredAt, isFinal: steadfast.isFinalStatus(newStatus!) });
+    const pickedUp = Boolean(c.pickedUpAt) || rules.isPickedUp(newStatus!);
+    stage = rules.stageFor(newStatus!, pickedUp);
+    Object.assign(patch, { status: newStatus!, stage, lastStatusAt: occurredAt, isFinal: rules.isFinal(newStatus!) });
     if (firstPickup) patch.pickedUpAt = occurredAt;
     if ((stage === "delivered" || stage === "partial_delivered") && !c.deliveredAt) patch.deliveredAt = occurredAt;
     if (stage === "returned" && !c.returnedAt) patch.returnedAt = occurredAt;
@@ -388,13 +441,13 @@ export async function applyCourierUpdate(
     if (firstPickup) await onCourierReceived(db, order.id, c.id, occurredAt);
     if (stage === "cancelled") await onNotPrintable(db, order.id, "Consignment cancelled before pickup", { name: "steadfast" });
     // Parcel finished: parcel-level warnings (deleted/cancelled in Shopify, COD mismatch) no longer apply.
-    if (steadfast.isFinalStatus(newStatus!)) await refreshRiskFlags(db, order.id, appSettings);
+    if (rules.isFinal(newStatus!)) await refreshRiskFlags(db, order.id, appSettings);
 
     const trigger = appSettings.fulfillmentTrigger;
     const shouldFulfill =
       order.fulfillmentState !== "fulfilled" &&
       order.fulfillmentState !== "skipped" &&
-      ((trigger === "on_pickup" && (firstPickup || (steadfast.isPickedUpStatus(newStatus!) && order.fulfillmentState === "none"))) ||
+      ((trigger === "on_pickup" && (firstPickup || (rules.isPickedUp(newStatus!) && order.fulfillmentState === "none"))) ||
         (trigger === "on_delivery" && (stage === "delivered" || stage === "partial_delivered")));
     if (shouldFulfill && c.trackingCode) await queueFulfillment(db, order.id, c.id);
 
@@ -493,6 +546,11 @@ export async function pollActiveConsignments(env: Env, db: DB, opts: { limit?: n
   for (const c of rows) {
     try {
       if (c.status === "creating" && !c.consignmentId && !c.trackingCode) continue; // booking in flight
+      if (c.courier === "carrybee") {
+        if (await pollCarrybee(env, db, c)) changed++;
+        continue;
+      }
+      if (!steadfast.steadfastConfigured(env)) continue;
       const status = await steadfast.getParcelStatus(env, c);
       if (status === undefined) {
         await db.update(consignments).set({ lastPolledAt: nowIso() }).where(eq(consignments.id, c.id));
@@ -523,6 +581,39 @@ export async function pollActiveConsignments(env: Env, db: DB, opts: { limit?: n
     }
   }
   return { checked: rows.length, changed, errors };
+}
+
+/**
+ * Carrybee fallback for missed webhooks: reads the parcel's details. Its status vocabulary isn't
+ * published, so only statuses we recognise are applied; anything else just waits for the webhook.
+ */
+async function pollCarrybee(env: Env, db: DB, c: ConsignmentRow): Promise<boolean> {
+  const now = nowIso();
+  if (!carrybee.carrybeeConfigured(env)) return false;
+  const environment = (await getSettings(db)).carrybeeEnvironment;
+  const details = await carrybee.getOrderDetails(env, environment, c.consignmentId ?? c.invoice);
+  if (!details) {
+    await db.update(consignments).set({ lastPolledAt: now }).where(eq(consignments.id, c.id));
+    return false;
+  }
+  let row = c;
+  if (!c.consignmentId && details.consignment_id) {
+    // A booking whose answer was lost (timeout): Carrybee has it, so it is booked after all.
+    const id = String(details.consignment_id);
+    await db.update(consignments).set({ consignmentId: id, trackingCode: id, status: "created", stage: "booked", lastMessage: null }).where(eq(consignments.id, c.id));
+    await db.update(orders).set({ courierStage: "booked" }).where(and(eq(orders.activeConsignmentId, c.id), eq(orders.courierStage, "issue")));
+    row = { ...c, consignmentId: id, trackingCode: id, status: "created", stage: "booked" };
+  }
+  if (details.payment_status && /paid/i.test(details.payment_status) && details.invoice_id && !row.paymentId) {
+    await db.update(consignments).set({ paymentId: String(details.invoice_id), settledAt: now }).where(eq(consignments.id, c.id));
+  }
+  const status = carrybee.normalizeStatus(details.transfer_status);
+  if (!status || carrybee.CARRYBEE_INFO_EVENTS.has(status)) {
+    await db.update(consignments).set({ lastPolledAt: now }).where(eq(consignments.id, c.id));
+    return row !== c;
+  }
+  const collected = details.collected_amount !== undefined && details.collected_amount !== null && details.collected_amount !== "" ? toNumber(details.collected_amount) : null;
+  return applyCourierUpdate(db, row, { status, message: details.reason || null, codAmount: collected, occurredAt: details.updated_at ?? null, source: "poll" }, "carrybee");
 }
 
 /**

@@ -3,6 +3,7 @@ import type { DB } from "../db";
 import { callLogs, consignments, orders, trackingEvents } from "../db/schema";
 import { getSettings, getValue, setValue, type AppSettings } from "./settings";
 import { partialOutcome } from "../../shared/delivery";
+import { COURIERS, courierName, type CourierId } from "../../shared/couriers";
 
 /**
  * Customer-facing order tracking (/t/<token>). The token is 80 random bits, so the link can't be
@@ -141,11 +142,11 @@ export async function buildTracking(db: DB, token: string) {
     timeline.push({
       at: c.createdAt,
       kind: "booked",
-      title: "Sent to Steadfast Courier",
+      title: `Sent to ${courierName(c.courier)}`,
       detail: c.trackingCode ? `Courier tracking code ${c.trackingCode}` : null,
       tone: "info",
     });
-    if (c.pickedUpAt) timeline.push({ at: c.pickedUpAt, kind: "picked_up", title: "Picked up by Steadfast — on the way", tone: "info" });
+    if (c.pickedUpAt) timeline.push({ at: c.pickedUpAt, kind: "picked_up", title: `Picked up by ${COURIERS[c.courier as CourierId]?.label ?? "the courier"} — on the way`, tone: "info" });
     // The rider's report reaches the customer first; Steadfast's later confirmation adds nothing new for them.
     const riderReport = events.find((e) => e.consignmentRowId === c.id && e.kind === "status" && e.status?.endsWith("_approval_pending"));
     const outcomeAt = c.deliveredAt ?? (riderReport?.status?.startsWith("delivered") || riderReport?.status?.startsWith("partial") ? riderReport.occurredAt : null);
@@ -169,7 +170,11 @@ export async function buildTracking(db: DB, token: string) {
 
   for (const e of events) {
     // Steadfast's own "created" step repeats our "Sent to Steadfast" entry.
-    if (e.kind === "tracking" && e.message && !/^consignment created/i.test(e.message)) {
+    const carrybeeStep = e.kind === "status" && cons.find((c) => c.id === e.consignmentRowId)?.courier === "carrybee" && e.message && !["picked", "delivered", "partial-delivery", "cancelled", "pickup-cancelled"].includes(e.status ?? "");
+    if (carrybeeStep) {
+      // Carrybee's steps arrive as status events; their text is the customer-friendly update.
+      timeline.push({ at: e.occurredAt, kind: e.status === "delivery-on-hold" ? "on_hold" : "courier_update", title: e.message!, tone: e.status === "delivery-on-hold" || e.status === "delivery-failed" ? "warn" : "info" });
+    } else if (e.kind === "tracking" && e.message && !/^consignment created/i.test(e.message) && !/^(created|updated) at carrybee|^COD changed at carrybee|^COD paid out/i.test(e.message)) {
       timeline.push({ at: e.occurredAt, kind: "courier_update", title: e.message, tone: "info" });
     } else if (e.kind === "status" && e.status === "hold") {
       timeline.push({ at: e.occurredAt, kind: "on_hold", title: "Delivery on hold", detail: e.message, tone: "warn" });
@@ -206,7 +211,7 @@ export async function buildTracking(db: DB, token: string) {
   else if (stage === "partial_delivered" || riderSays?.startsWith("partial")) status = { key: "delivered", title: "Partially delivered", tone: "good" };
   else if (riderSays?.startsWith("cancelled")) status = { key: "cancelled", title: "Delivery cancelled", tone: "bad" };
   else if (stage === "on_hold") status = { key: "on_hold", title: "Delivery on hold", tone: "warn" };
-  else if (pickedUp) status = { key: "shipped", title: "On the way with Steadfast", tone: "info" };
+  else if (pickedUp) status = { key: "shipped", title: `On the way with ${COURIERS[(active?.courier ?? "steadfast") as CourierId]?.label ?? "the courier"}`, tone: "info" };
   else if (order.sortedAt) status = { key: "packed", title: "Packed — waiting for courier pickup", tone: "info" };
   else if (booked) status = { key: "booked", title: "Sent to courier — being packed", tone: "info" };
   else if (order.confirmedAt || order.callingStatus === "confirmed") status = { key: "confirmed", title: "Confirmed — preparing your parcel", tone: "good" };
@@ -240,7 +245,7 @@ export async function buildTracking(db: DB, token: string) {
       address: [order.address1, order.address2].filter(Boolean).join(", ") || null,
       city: order.city,
     },
-    courier: active && booked ? { name: "Steadfast Courier", trackingCode: active.trackingCode, consignmentId: active.consignmentId } : null,
+    courier: active && booked ? { name: courierName(active.courier), trackingCode: active.trackingCode, consignmentId: active.consignmentId } : null,
     status,
     steps,
     timeline: timeline.reverse(),

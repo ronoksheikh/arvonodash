@@ -22,6 +22,7 @@ import { getImportState, reconcileShopify, recordRun, retryFailedWebhooks, runIm
 import { runAutoBookings } from "./services/autobook";
 import { shopifyConfigured } from "./services/shopify";
 import { steadfastConfigured } from "./services/steadfast";
+import { carrybeeConfigured } from "./services/carrybee";
 import { setValue } from "./services/settings";
 import { ensureMigrated } from "./db/migrate";
 import { hydrateEnv } from "./services/credentials";
@@ -107,7 +108,7 @@ async function scheduled(controller: ScheduledController, env: Env) {
     ["carry_over", () => rollOverMissedPickups(db, env.APP_TIMEZONE_OFFSET || "+06:00"), true],
     ["jobs", () => processJobs(env, db, { limit: 25 }), true],
     ["webhook_retry", () => retryFailedWebhooks(db, { limit: 20 }), true],
-    ["courier_poll", () => pollActiveConsignments(env, db, { limit: 40, staleMinutes: 30 }), steadfastConfigured(env)],
+    ["courier_poll", () => pollActiveConsignments(env, db, { limit: 40, staleMinutes: 30 }), steadfastConfigured(env) || carrybeeConfigured(env)],
   ];
   for (const [kind, fn, enabled] of steps) {
     if (!enabled) continue;

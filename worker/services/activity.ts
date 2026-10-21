@@ -3,7 +3,7 @@ import { activityLog } from "../db/schema";
 import { nowIso } from "../lib/util";
 import type { SessionUser } from "../env";
 
-export type Actor = SessionUser | "system" | "shopify" | "steadfast";
+export type Actor = SessionUser | "system" | "shopify" | "steadfast" | "carrybee";
 
 export async function logActivity(
   db: DB,

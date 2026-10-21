@@ -2,6 +2,7 @@ import { eq, inArray } from "drizzle-orm";
 import type { DB } from "../db";
 import { settings } from "../db/schema";
 import { nowIso } from "../lib/util";
+import { COURIER_IDS, type CourierId } from "../../shared/couriers";
 import { DEFAULT_SMS_TEMPLATES, SMS_TRIGGERS, type FulfillmentTrigger, type SmsTrigger } from "../../shared/constants";
 
 /** Workflow settings editable from the dashboard. Credentials never live here — they are Worker secrets. */
@@ -48,6 +49,13 @@ export type AppSettings = {
   fraudMaxPerMinute: number;
   /** Auto-booking sends a customer's confirmed orders as one parcel. */
   autoCombine: boolean;
+  /** Courier for new bookings. Parcels already booked keep updating through their own courier. */
+  courier: CourierId;
+  /** Carrybee: which environment the credentials belong to, the pickup store, and parcel defaults. */
+  carrybeeEnvironment: "sandbox" | "production";
+  carrybeeStoreId: string;
+  carrybeeDefaultWeightGrams: number;
+  carrybeeExpress: boolean;
   /** Customer SMS (provider key is a Worker secret). Off until switched on in Settings. */
   smsEnabled: boolean;
   /** Which moments send an automatic SMS. */
@@ -92,6 +100,11 @@ export const DEFAULT_SETTINGS: AppSettings = {
   fraudCacheHours: 24,
   fraudMaxPerMinute: 30,
   autoCombine: true,
+  courier: "steadfast",
+  carrybeeEnvironment: "sandbox",
+  carrybeeStoreId: "",
+  carrybeeDefaultWeightGrams: 500,
+  carrybeeExpress: false,
   smsEnabled: false,
   smsTriggers: { placed: true, confirmed: true, dispatched: true, delivered: false, on_hold: false, returned: false, cancelled: false },
   smsTemplates: DEFAULT_SMS_TEMPLATES,
@@ -123,6 +136,9 @@ export async function saveSettings(db: DB, patch: Partial<AppSettings>): Promise
       const expected = typeof DEFAULT_SETTINGS[key];
       if (typeof patch[key] !== expected) continue;
       if ((key === "cutoffTime" || key === "pickupTime") && !/^([01]\d|2[0-3]):[0-5]\d$/.test(String(patch[key]))) continue;
+      if (key === "courier" && !COURIER_IDS.includes(patch[key] as CourierId)) continue;
+      if (key === "carrybeeEnvironment" && !["sandbox", "production"].includes(String(patch[key]))) continue;
+      if (key === "carrybeeDefaultWeightGrams" && !(Number(patch[key]) >= 1 && Number(patch[key]) <= 25_000)) continue;
       if (key === "smsTriggers" || key === "smsTemplates") {
         (next as Record<string, unknown>)[key] = mergeSmsMap(next[key] as Record<SmsTrigger, unknown>, patch[key], key === "smsTriggers" ? "boolean" : "string");
         continue;

@@ -368,7 +368,7 @@ orderRoutes.get("/:id{[0-9]+}", async (c) => {
     otherOrders: duplicates,
     consignments: cons.map((x) => ({
       ...x,
-      trackingUrl: x.trackingCode ? trackingUrl(c.env, x.trackingCode) : null,
+      trackingUrl: x.trackingCode && x.courier === "steadfast" ? trackingUrl(c.env, x.trackingCode) : null,
       partialOutcome: x.stage === "partial_delivered" ? partialOutcome(x.collectedAmount, order.lineItems) : null,
     })),
     fraud: fraudSummary(await getFraudCheck(db, order.phone), appSettings),
