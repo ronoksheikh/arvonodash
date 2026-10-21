@@ -191,6 +191,10 @@ export function normalizeStatus(raw: string | null | undefined): string | null {
   return KNOWN.has(s) || CARRYBEE_INFO_EVENTS.has(s) ? s : null;
 }
 
+/** Settings key: the last Carrybee webhook we accepted or rejected, and why. */
+export const CARRYBEE_WEBHOOK_STATUS = "carrybee.webhookStatus";
+export type CarrybeeWebhookStatus = { ok: boolean; at: string; reason: "mismatch" | "missing" | null; receivedHint: string | null };
+
 /** Carrybee sends the shared secret in X-CB-Webhook-Integration-Header (no signature scheme is documented). */
 export function webhookSecretMatches(env: Env, header: string | undefined): boolean {
   return Boolean(env.CARRYBEE_WEBHOOK_SECRET && header && timingSafeEqual(header.trim(), env.CARRYBEE_WEBHOOK_SECRET));

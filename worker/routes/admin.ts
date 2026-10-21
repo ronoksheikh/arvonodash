@@ -12,7 +12,7 @@ import { getSmsBalance, renderTemplate, sendManualSms, smsLog, smsStatus, smsVar
 import { forgetTrackingHost, instanceId } from "../services/tracking";
 import { smsSegments } from "../../shared/constants";
 import { logActivity } from "../services/activity";
-import { getSettings, saveSettings, getValues } from "../services/settings";
+import { getSettings, saveSettings, getValue, getValues } from "../services/settings";
 import { diagnoseShopify, getShopInfo, listWebhookSubscriptions, registerWebhooks, resetShopifyToken, shopifyConfigured } from "../services/shopify";
 import { CREDENTIAL_KEYS, describeCredentials, loadCredentials, normalizeShopDomain, saveCredentials, type Credentials } from "../services/credentials";
 import { getBalance, steadfastConfigured } from "../services/steadfast";
@@ -54,6 +54,7 @@ settingsRoutes.get("/", async (c) => {
       carrybee: {
         configured: carrybeeConfigured(c.env),
         webhookUrl: `${origin}/webhooks/carrybee`,
+        lastWebhook: await getValue<carrybee.CarrybeeWebhookStatus>(db, carrybee.CARRYBEE_WEBHOOK_STATUS),
       },
       steadfast: {
         configured: steadfastConfigured(c.env),

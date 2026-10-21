@@ -60,7 +60,7 @@ type SettingsData = {
   connections: {
     shopify: { configured: boolean; shopDomain: string; apiVersion: string; authMode: string; webhookSecret: boolean; webhookUrl: string };
     steadfast: { configured: boolean; baseUrl: string; webhookToken: boolean; webhookUrl: string };
-    carrybee: { configured: boolean; webhookUrl: string };
+    carrybee: { configured: boolean; webhookUrl: string; lastWebhook: { ok: boolean; at: string; reason: "mismatch" | "missing" | null; receivedHint: string | null } | null };
   };
   sync: Record<string, unknown>;
   sms: SmsStatus;
@@ -298,6 +298,7 @@ function Connections({ d }: { d: SettingsData }) {
         configured={d.connections.carrybee.configured}
         webhookUrl={d.connections.carrybee.webhookUrl}
         webhookSecret={d.carrybeeWebhookSecret}
+        lastWebhook={d.connections.carrybee.lastWebhook}
         disabled={disabled}
       />
       <Card style={{ gridColumn: "1 / -1" }}>

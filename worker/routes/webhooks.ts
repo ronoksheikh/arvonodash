@@ -7,7 +7,8 @@ import { hmacSha256Base64, hmacSha256Hex, sha256Hex, timingSafeEqual } from "../
 import { nowIso } from "../lib/util";
 import { processShopifyEvent, processSteadfastEvent, STEADFAST_PARCEL_EVENTS, syncPayments, type SteadfastWebhook } from "../services/sync";
 import { processJobs } from "../services/jobs";
-import { webhookSecretMatches } from "../services/carrybee";
+import { CARRYBEE_WEBHOOK_STATUS, webhookSecretMatches } from "../services/carrybee";
+import { setValue } from "../services/settings";
 import { processCarrybeeEvent, type CarrybeeWebhook } from "../services/carrybeeEvents";
 
 export const webhookRoutes = new Hono<AppEnv>();
@@ -110,7 +111,20 @@ webhookRoutes.post("/steadfast", async (c) => {
 webhookRoutes.post("/carrybee", async (c) => {
   const secret = c.env.CARRYBEE_WEBHOOK_SECRET;
   if (!secret) return c.json({ error: "Webhook secret not configured" }, 503);
-  if (!webhookSecretMatches(c.env, c.req.header("X-CB-Webhook-Integration-Header"))) return c.json({ error: "Unauthorized" }, 401);
+  const received = c.req.header("X-CB-Webhook-Integration-Header");
+  const db = getDb(c.env.DB);
+  if (!webhookSecretMatches(c.env, received)) {
+    // Shown in Settings → Connections → Carrybee, so a wrong or missing secret is easy to spot.
+    // Only the last 4 characters of what arrived are kept.
+    await setValue(db, CARRYBEE_WEBHOOK_STATUS, {
+      ok: false,
+      at: nowIso(),
+      reason: received ? "mismatch" : "missing",
+      receivedHint: received ? `…${received.trim().slice(-4)}` : null,
+    });
+    return c.json({ error: "Unauthorized" }, 401);
+  }
+  await setValue(db, CARRYBEE_WEBHOOK_STATUS, { ok: true, at: nowIso(), reason: null, receivedHint: null });
   c.header("X-CB-Webhook-Integration-Header", secret);
   const raw = await c.req.text();
   let payload: CarrybeeWebhook;
