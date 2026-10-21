@@ -1305,6 +1305,8 @@ await step("Carrybee booking, webhooks from pickup to delivery and payout, out-o
 
   // Webhook security and handshake
   assert.equal((await carrybeeHook({ event: "order.picked", consignment_id: c.consignmentId }, "wrong-secret")).status, 401);
+  const rejected = (await call("GET", "/api/settings")).body.connections.carrybee.lastWebhook;
+  assert.deepEqual([rejected.ok, rejected.reason, rejected.receivedHint], [false, "mismatch", "…cret"], "Settings shows why it was rejected");
   const hello = await carrybeeHook({});
   assert.equal(hello.status, 202, "integration check is acknowledged");
   assert.equal(hello.headers.get("X-CB-Webhook-Integration-Header"), cbSecret, "the secret is echoed back as Carrybee requires");
@@ -1334,6 +1336,17 @@ await step("Carrybee booking, webhooks from pickup to delivery and payout, out-o
   const track = (await call("GET", `/api/public/track/${d.trackingPageUrl.split("/t/")[1]}`, undefined, { auth: false })).body;
   assert.equal(track.courier.name, "Carrybee");
   assert.ok(track.timeline.some((e) => e.title === "Sent to Carrybee"));
+});
+
+await step("Carrybee's own integration secret (a UUID from its dashboard) can be saved and passes its check", async () => {
+  const uuid = "40489fe0-9386-4fc9-8e92-2b2fcb9d451c";
+  assert.equal((await call("PUT", "/api/settings/connections", { CARRYBEE_WEBHOOK_SECRET: uuid })).status, 200);
+  assert.equal((await call("GET", "/api/settings")).body.carrybeeWebhookSecret, uuid);
+  const check = await carrybeeHook({}, uuid);
+  assert.equal(check.status, 202);
+  assert.equal(check.headers.get("X-CB-Webhook-Integration-Header"), uuid);
+  assert.equal((await call("GET", "/api/settings")).body.connections.carrybee.lastWebhook.ok, true);
+  cbSecret = uuid;
 });
 
 await step("Carrybee: cancel before pickup, polling fallback, and switching back to Steadfast", async () => {

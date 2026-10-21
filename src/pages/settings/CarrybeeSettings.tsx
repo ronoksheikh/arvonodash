@@ -5,6 +5,7 @@ import { modals } from "@mantine/modals";
 import { CheckCircle2, Plug, Truck } from "lucide-react";
 import { notifyError, notifySuccess, post, put } from "../../api";
 import { Copyable } from "../../components/ui";
+import { ago } from "../../format";
 import { COURIERS, type CourierId } from "../../../shared/couriers";
 
 type CredInfo = { set: boolean; source: "worker_secret" | "dashboard" | null; hint: string | null };
@@ -59,12 +60,13 @@ export function CourierSwitch({ settings, ready, disabled }: { settings: Courier
   );
 }
 
-export function CarrybeeCard({ settings, creds, configured, webhookUrl, webhookSecret, disabled }: {
+export function CarrybeeCard({ settings, creds, configured, webhookUrl, webhookSecret, lastWebhook, disabled }: {
   settings: CourierSettings;
   creds: Record<string, CredInfo> | null;
   configured: boolean;
   webhookUrl: string;
   webhookSecret: string | null;
+  lastWebhook: { ok: boolean; at: string; reason: "mismatch" | "missing" | null; receivedHint: string | null } | null;
   disabled: boolean;
 }) {
   const qc = useQueryClient();
@@ -170,25 +172,38 @@ export function CarrybeeCard({ settings, creds, configured, webhookUrl, webhookS
         </Group>
         {!disabled && <Group><Button size="xs" disabled={!settingsDirty} loading={saveSettings.isPending} onClick={() => saveSettings.mutate()}>Save Carrybee settings</Button></Group>}
 
-        <Text fw={500} size="sm" mt="sm">Webhook — paste both into Carrybee → Webhook Integration</Text>
-        <Text size="xs" c="dimmed">Webhook URL</Text>
+        <Text fw={500} size="sm" mt="sm">Webhook (Carrybee → Webhook Integration)</Text>
+        <Text size="xs" c="dimmed">1. Paste this URL at Carrybee</Text>
         <Copyable value={webhookUrl} />
-        <Text size="xs" c="dimmed">Integration secret (X-CB-Webhook-Integration-Header)</Text>
-        {webhookSecret ? <Copyable value={webhookSecret} /> : <Text size="sm" c="dimmed">Hidden</Text>}
+        <Text size="xs" c="dimmed" mt={4}>2. Copy the integration secret Carrybee shows there and save it here. Both sides must hold exactly the same value.</Text>
         {!disabled && creds?.CARRYBEE_WEBHOOK_SECRET?.source !== "worker_secret" && (
-          <>
-            <Group gap="xs" align="flex-end">
-              <TextInput size="xs" style={{ flex: 1 }} label="Use your own secret" description="At least 16 characters. The same value must be entered at Carrybee." value={form.CARRYBEE_WEBHOOK_SECRET ?? ""} onChange={(e) => setForm({ ...form, CARRYBEE_WEBHOOK_SECRET: e.currentTarget.value })} autoComplete="off" />
-              <Button size="xs" disabled={(form.CARRYBEE_WEBHOOK_SECRET?.trim().length ?? 0) < 16} loading={saveCreds.isPending} onClick={() => saveCreds.mutate({ CARRYBEE_WEBHOOK_SECRET: form.CARRYBEE_WEBHOOK_SECRET.trim() })}>Save secret</Button>
-            </Group>
-            <Button size="compact-xs" variant="subtle" color="red" w="fit-content" loading={regenerate.isPending} onClick={() => modals.openConfirmModal({
-              title: "Generate a new webhook secret?",
-              children: <Text size="sm">Carrybee webhooks are rejected until you paste the new secret on Carrybee's Webhook Integration page. Parcel statuses keep updating by polling meanwhile.</Text>,
-              labels: { confirm: "Generate", cancel: "Cancel" },
-              confirmProps: { color: "red" },
-              onConfirm: () => regenerate.mutate(),
-            })}>Generate new random secret</Button>
-          </>
+          <Group gap="xs" align="flex-end">
+            <TextInput size="xs" style={{ flex: 1 }} label="Carrybee's integration secret" placeholder="e.g. 40489fe0-9386-4fc9-8e92-…" value={form.CARRYBEE_WEBHOOK_SECRET ?? ""} onChange={(e) => setForm({ ...form, CARRYBEE_WEBHOOK_SECRET: e.currentTarget.value })} autoComplete="off" />
+            <Button size="xs" disabled={(form.CARRYBEE_WEBHOOK_SECRET?.trim().length ?? 0) < 16} loading={saveCreds.isPending} onClick={() => saveCreds.mutate({ CARRYBEE_WEBHOOK_SECRET: form.CARRYBEE_WEBHOOK_SECRET.trim() })}>Save secret</Button>
+          </Group>
+        )}
+        <Text size="xs" c="dimmed">3. Save the webhook at Carrybee. Its check is answered with 202 and this secret.</Text>
+        <Text size="xs" c="dimmed" mt={4}>Secret saved here now</Text>
+        {webhookSecret ? <Copyable value={webhookSecret} /> : <Text size="sm" c="dimmed">Hidden</Text>}
+        {lastWebhook && (
+          lastWebhook.ok ? (
+            <Alert color="teal" variant="light" p="xs">Last Carrybee webhook accepted {ago(lastWebhook.at)}.</Alert>
+          ) : (
+            <Alert color="red" variant="light" p="xs" title={`Last Carrybee webhook rejected ${ago(lastWebhook.at)}`}>
+              {lastWebhook.reason === "missing"
+                ? "It arrived without the X-CB-Webhook-Integration-Header secret."
+                : `The secret it carried (ending ${lastWebhook.receivedHint}) doesn't match the one saved here. Paste Carrybee's secret above and save, then try again at Carrybee.`}
+            </Alert>
+          )
+        )}
+        {!disabled && creds?.CARRYBEE_WEBHOOK_SECRET?.source !== "worker_secret" && (
+          <Button size="compact-xs" variant="subtle" color="red" w="fit-content" loading={regenerate.isPending} onClick={() => modals.openConfirmModal({
+            title: "Generate a new random secret?",
+            children: <Text size="sm">Only if Carrybee lets you type your own secret: paste the new one there too. Until both match, Carrybee webhooks are rejected (statuses keep updating by polling).</Text>,
+            labels: { confirm: "Generate", cancel: "Cancel" },
+            confirmProps: { color: "red" },
+            onConfirm: () => regenerate.mutate(),
+          })}>Generate a random secret instead</Button>
         )}
         <Text size="xs" c="dimmed">Carrybee sends every parcel update here (picked up, in transit, delivered, returned, paid…). Statuses are also checked every few minutes in case a webhook is missed.</Text>
       </Stack>
