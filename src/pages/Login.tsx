@@ -43,7 +43,7 @@ export function LoginPage() {
           </Box>
           <Title order={3} fw={600} mt="sm">{needsSetup ? "Set up ARVONO Fulfillment OS" : "Sign in to ARVONO"}</Title>
           <Text size="sm" c="dimmed" ta="center">
-            {needsSetup ? "Create the owner account. You can invite staff afterwards." : "Fulfillment operations for Shopify × Steadfast"}
+            {needsSetup ? "Create the owner account. You can invite staff afterwards." : "Fulfillment operations for Shopify and your couriers"}
           </Text>
         </Stack>
         <Paper withBorder p="xl" radius="lg" className="app-panel">

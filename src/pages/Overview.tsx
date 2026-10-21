@@ -118,7 +118,7 @@ export default function Overview() {
     <>
       <PageHeader
         title="Overview"
-        description="Live numbers from Shopify orders and Steadfast consignments"
+        description="Live numbers from Shopify orders and courier parcels"
         actions={<SegmentedControl size="xs" value={days} onChange={setDays} data={[{ value: "7", label: "7d" }, { value: "30", label: "30d" }, { value: "90", label: "90d" }]} />}
       />
       <SimpleGrid cols={{ base: 2, sm: 4, lg: 7 }} spacing="md">
@@ -168,7 +168,7 @@ export default function Overview() {
               { label: "Booked", value: d.cod.booked },
               { label: "Collected", value: d.cod.collected, color: "teal" },
               { label: "With courier", value: d.cod.inTransit, color: "indigo" },
-              { label: "Settled by Steadfast", value: d.cod.settled, color: "brand" },
+              { label: "Settled by courier", value: d.cod.settled, color: "brand" },
               { label: "Delivery charges", value: d.cod.deliveryCharges, color: "gray" },
             ].map((r) => (
               <div key={r.label}>

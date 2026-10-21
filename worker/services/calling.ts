@@ -26,7 +26,7 @@ export async function setCallingStatus(
   if (!order) throw new HttpError(404, "Order not found");
   if (order.cancelledAt && status === "confirmed") throw new HttpError(409, "Order is cancelled in Shopify");
   if (order.courierStage !== "unbooked" && status !== "confirmed" && order.callingStatus === "confirmed") {
-    throw new HttpError(409, "Order is already booked with Steadfast; its confirmation can no longer be changed");
+    throw new HttpError(409, "Order is already booked with the courier; its confirmation can no longer be changed");
   }
   const now = nowIso();
   const counted = status !== "not_called";

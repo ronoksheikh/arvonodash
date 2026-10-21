@@ -8,6 +8,7 @@ import { useCan } from "../auth";
 import { EmptyState, ErrorState, FulfillmentBadge, LoadingState, PageHeader, Panel, StageBadge, SteadfastStatusBadge, TableFooter } from "../components/ui";
 import { OrderDrawer } from "../components/OrderDrawer";
 import { ago, dateShort, money } from "../format";
+import { COURIERS, type CourierId } from "../../shared/couriers";
 import { COURIER_STAGES } from "../../shared/constants";
 import type { Consignment } from "../types";
 
@@ -50,7 +51,7 @@ export default function Consignments() {
     <>
       <PageHeader
         title="Consignments"
-        description="Every Steadfast parcel with live status from webhooks, polled every 30 minutes as a fallback"
+        description="Every courier parcel (Steadfast and Carrybee) with live status from webhooks, polled as a fallback"
         actions={can("courier.manage") && (
           <Button variant="default" leftSection={<RefreshCw size={15} />} disabled={!selected.size} loading={refresh.isPending} onClick={() => refresh.mutate([...selected])}>
             Refresh selected{selected.size ? ` (${selected.size})` : ""}
@@ -65,7 +66,7 @@ export default function Consignments() {
           <Switch label="Stuck > 5 days" checked={stale} onChange={(e) => { setStale(e.currentTarget.checked); setPage(1); }} />
         </Group>
         {q.isLoading ? <LoadingState /> : q.error ? <ErrorState error={q.error} onRetry={() => q.refetch()} /> : rows.length === 0 ? (
-          <EmptyState title="No consignments" description="Book orders from the Orders page to create Steadfast consignments." />
+          <EmptyState title="No consignments" description="Book orders from the Orders page to create courier parcels." />
         ) : (
           <>
             <ScrollArea>
@@ -77,7 +78,7 @@ export default function Consignments() {
                     <Table.Th>Tracking</Table.Th>
                     <Table.Th>Recipient</Table.Th>
                     <Table.Th ta="right">COD</Table.Th>
-                    <Table.Th>Steadfast status</Table.Th>
+                    <Table.Th>Courier status</Table.Th>
                     <Table.Th>Stage</Table.Th>
                     <Table.Th>Fulfillment</Table.Th>
                     <Table.Th pr="md">Updated</Table.Th>
@@ -104,7 +105,7 @@ export default function Consignments() {
                         {c.collectedAmount !== null && c.collectedAmount !== c.codAmount && <Text size="xs" c="dimmed">got {money(c.collectedAmount)}</Text>}
                       </Table.Td>
                       <Table.Td>
-                        <SteadfastStatusBadge status={c.status} />
+                        <Group gap={4} wrap="nowrap"><Badge size="xs" variant="outline" color={c.courier === "carrybee" ? "orange" : "gray"}>{COURIERS[c.courier as CourierId]?.label ?? c.courier}</Badge><SteadfastStatusBadge status={c.status} courier={c.courier} /></Group>
                         {c.lastMessage && <Text size="xs" c="dimmed" lineClamp={1} maw={220} mt={2}>{c.lastMessage}</Text>}
                       </Table.Td>
                       <Table.Td>

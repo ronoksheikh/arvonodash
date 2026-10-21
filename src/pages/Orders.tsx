@@ -197,7 +197,7 @@ export default function Orders() {
     <>
       <PageHeader
         title="Orders"
-        description="Shopify orders synced in real time. Confirmed orders are booked with Steadfast after a short timer (or manually)."
+        description="Shopify orders synced in real time. Confirmed orders are booked with the selected courier after a short timer (or manually)."
         actions={
           <>
             {can("export") && (

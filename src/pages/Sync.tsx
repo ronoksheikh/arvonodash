@@ -44,7 +44,7 @@ export default function Sync() {
 
   const actions = [
     { label: "Reconcile Shopify", desc: "Fetch orders updated since the last check (runs hourly)", icon: RefreshCw, path: "/sync/reconcile" },
-    { label: "Poll courier statuses", desc: "Check active consignments with Steadfast (runs every 5 min)", icon: Truck, path: "/sync/courier" },
+    { label: "Poll courier statuses", desc: "Check active parcels with the courier (runs every 5 min)", icon: Truck, path: "/sync/courier" },
     { label: "Sync settlements", desc: "Fetch Steadfast payments and match parcels (every 3 hours)", icon: Wallet, path: "/sync/payments" },
     { label: "Run background jobs", desc: "Shopify fulfillments and tags waiting to run", icon: Play, path: "/sync/jobs/run" },
     { label: "Retry failed webhooks", desc: `${failedHooks} failed in the last 2 days`, icon: RotateCcw, path: "/sync/webhooks/retry" },
@@ -91,9 +91,9 @@ export default function Sync() {
               {[null, "failed", "processed", "ignored"].map((s) => (
                 <Button key={s ?? "all"} size="compact-sm" variant={webhookStatus === s ? "filled" : "default"} onClick={() => setWebhookStatus(s)}>{s ? titleCase(s) : "All"}</Button>
               ))}
-              <Text size="xs" c="dimmed" ml="auto">Shopify: {count("shopify", "processed")} ok · Steadfast: {count("steadfast", "processed")} ok</Text>
+              <Text size="xs" c="dimmed" ml="auto">Shopify: {count("shopify", "processed")} ok · Steadfast: {count("steadfast", "processed")} ok · Carrybee: {count("carrybee", "processed")} ok</Text>
             </Group>
-            {d.events.length === 0 ? <EmptyState icon={<PackageSearch size={22} />} title="No webhook events" description="Register Shopify webhooks and set the Steadfast webhook URL in Settings." /> : (
+            {d.events.length === 0 ? <EmptyState icon={<PackageSearch size={22} />} title="No webhook events" description="Register Shopify webhooks and set the courier webhook URLs in Settings." /> : (
               <ScrollArea>
                 <Table className="app-table" verticalSpacing={8} miw={760}>
                   <Table.Thead><Table.Tr><Table.Th pl="md">Received</Table.Th><Table.Th>Source</Table.Th><Table.Th>Topic</Table.Th><Table.Th>Status</Table.Th><Table.Th>Error</Table.Th><Table.Th pr="md" /></Table.Tr></Table.Thead>
@@ -175,7 +175,7 @@ export default function Sync() {
         <Stack>
           <Text size="sm">Imports orders page by page (50 per page). Existing orders are updated, never duplicated. Large imports continue automatically in the background.</Text>
           <NumberInput label="Orders created in the last N days" description="Leave empty to import all orders (needs the read_all_orders scope beyond 60 days)" min={1} value={sinceDays} onChange={setSinceDays} />
-          <Alert variant="light" color="gray">Imported orders are not booked with Steadfast. Booking is always manual.</Alert>
+          <Alert variant="light" color="gray">Imported orders are never booked with a courier. Booking is always manual.</Alert>
           <Group justify="flex-end">
             <Button loading={run.isPending} onClick={() => run.mutate({ path: "/sync/import/start", body: { sinceDays: sinceDays === "" ? null : Number(sinceDays) } }, { onSuccess: () => setImportOpen(false) })}>Start import</Button>
           </Group>

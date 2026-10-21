@@ -170,6 +170,7 @@ function DrawerHeader({ d, onClose, refresh }: { d: OrderDetail; onClose: () => 
 function OverviewTab({ d, refresh, goBooking }: { d: OrderDetail; refresh: () => void; goBooking: () => void }) {
   const o = d.order;
   const can = useCan();
+  const parcelCourier = d.consignments.find((x) => x.id === o.activeConsignmentId)?.courier ?? "steadfast";
   const statuses = useStatuses();
   const update = useMutation({
     mutationFn: (body: Record<string, unknown>) => patch(`/orders/${o.id}`, body),
@@ -206,9 +207,17 @@ function OverviewTab({ d, refresh, goBooking }: { d: OrderDetail; refresh: () =>
       {o.cancelledAt && o.courierStage !== "unbooked" && !["returned", "cancelled", "delivered", "partial_delivered"].includes(o.courierStage) && (
         <Alert color="red" variant="light" icon={<AlertTriangle size={18} />} title={o.shopifyDeletedAt ? "Deleted in Shopify after booking" : "Cancelled in Shopify after booking"}>
           {o.courierStage === "booked" && o.dispatchStatus !== "dispatched" ? (
-            <>Keep this parcel here: don't hand it to the rider. Cancel it in the Steadfast portal (Steadfast has no cancel API); the dashboard updates by itself once Steadfast shows it cancelled.</>
+            parcelCourier === "carrybee" ? (
+              <>Keep this parcel here: don't hand it to the rider. Cancel it from the Courier tab (Cancel parcel at Carrybee).</>
+            ) : (
+              <>Keep this parcel here: don't hand it to the rider. Cancel it in the Steadfast portal (Steadfast has no cancel API); the dashboard updates by itself once Steadfast shows it cancelled.</>
+            )
           ) : (
-            <>Steadfast already has the parcel. Create a return request from the Courier tab so it comes back.</>
+            parcelCourier === "carrybee" ? (
+              <>Carrybee already has the parcel. Cancel it from the Courier tab (Cancel parcel at Carrybee) so it comes back.</>
+            ) : (
+              <>Steadfast already has the parcel. Create a return request from the Courier tab so it comes back.</>
+            )
           )}
           {!o.shopifyDeletedAt && <> Reason: {o.cancelReason ? titleCase(o.cancelReason) : "none given"}.</>}
         </Alert>
@@ -365,10 +374,10 @@ function BookingTab({ d, refresh, goCourier }: { d: OrderDetail; refresh: () => 
     onSuccess: (r) => {
       const res = r.results[0];
       if (res?.ok) {
-        notifySuccess(`Tracking code ${res.trackingCode}`, "Booked with Steadfast");
+        notifySuccess(`Tracking code ${res.trackingCode}`, `Booked with ${courier.label}`);
         refresh();
         goCourier();
-      } else notifyError(new Error(res?.error ?? "Booking failed"), "Steadfast booking failed");
+      } else notifyError(new Error(res?.error ?? "Booking failed"), `${courier.label} booking failed`);
       refresh();
     },
     onError: (e) => notifyError(e, "Booking failed"),
@@ -376,7 +385,7 @@ function BookingTab({ d, refresh, goCourier }: { d: OrderDetail; refresh: () => 
 
   const confirmBook = () =>
     modals.openConfirmModal({
-      title: `Book ${o.name} with Steadfast?`,
+      title: `Book ${o.name} with ${courier.label}?`,
       children: (
         <Stack gap={4}>
           <Text size="sm">{form.recipientName} · {form.recipientPhone}</Text>
@@ -417,7 +426,7 @@ function BookingTab({ d, refresh, goCourier }: { d: OrderDetail; refresh: () => 
     <Stack>
       {o.cancelledAt && <Alert color="red" variant="light">This order is cancelled in Shopify and cannot be booked.</Alert>}
       {!o.cancelledAt && o.callingStatus !== "confirmed" && (
-        <Alert color="yellow" variant="light" title="Not confirmed yet">Call the customer and mark the order Confirmed before booking with Steadfast.</Alert>
+        <Alert color="yellow" variant="light" title="Not confirmed yet">Call the customer and mark the order Confirmed before booking with {courier.label}.</Alert>
       )}
       {d.customer?.flag === "blocked" && <Alert color="red" variant="light" title="Blocked customer">Booking this order will override the block.</Alert>}
       <SimpleGrid cols={{ base: 1, sm: 2 }}>
@@ -559,7 +568,7 @@ function CourierTab({ d, refresh }: { d: OrderDetail; refresh: () => void }) {
         <Group justify="space-between">
           <div>
             <Text fw={600} size="sm">Label & dispatch</Text>
-            <Text size="xs" c="dimmed">Label printed → scanned &amp; sorted → dispatched when Steadfast picks it up</Text>
+            <Text size="xs" c="dimmed">Label printed → scanned &amp; sorted → dispatched when the courier picks it up</Text>
           </div>
           <Group gap="xs">
             <LabelBadge status={o.labelStatus} />
@@ -570,7 +579,7 @@ function CourierTab({ d, refresh }: { d: OrderDetail; refresh: () => void }) {
           <div><Text size="xs" c="dimmed">Booked</Text><Text size="sm">{o.bookedAt ? dateTime(o.bookedAt) : "—"}</Text></div>
           <div><Text size="xs" c="dimmed">Printed</Text><Text size="sm">{o.printedAt ? `${dateTime(o.printedAt)}${o.printCount > 1 ? ` (×${o.printCount})` : ""}` : "—"}</Text></div>
           <div><Text size="xs" c="dimmed">Sorted (scanned)</Text><Text size="sm">{o.sortedAt ? dateTime(o.sortedAt) : "—"}</Text>{o.sortedBy && <Text size="xs" c="dimmed">{o.sortedBy}</Text>}</div>
-          <div><Text size="xs" c="dimmed">Dispatched (Steadfast)</Text><Text size="sm">{o.dispatchedAt ? dateTime(o.dispatchedAt) : "—"}</Text></div>
+          <div><Text size="xs" c="dimmed">Dispatched (courier pickup)</Text><Text size="sm">{o.dispatchedAt ? dateTime(o.dispatchedAt) : "—"}</Text></div>
         </SimpleGrid>
         {d.dispatchHistory.length > 0 && (
           <Timeline bulletSize={12} lineWidth={2} mt="md">
@@ -750,7 +759,7 @@ function NotesTab({ d, refresh }: { d: OrderDetail; refresh: () => void }) {
             <Select data={Object.entries(NOTE_KINDS).map(([value, label]) => ({ value, label }))} value={kind} onChange={(v) => setKind(v ?? "internal")} allowDeselect={false} />
             <Textarea placeholder={kind === "rider_instruction" ? "e.g. Call before delivery, deliver after 5 PM" : "Write a note…"} autosize minRows={2} value={body} onChange={(e) => setBody(e.currentTarget.value)} />
             {kind === "customer_review" && <Rating value={rating} onChange={setRating} />}
-            {kind === "rider_instruction" && d.order.courierStage === "unbooked" && <Text size="xs" c="dimmed">Rider instructions are added to the Steadfast booking note.</Text>}
+            {kind === "rider_instruction" && d.order.courierStage === "unbooked" && <Text size="xs" c="dimmed">Rider instructions are added to the courier booking note.</Text>}
             <Group justify="flex-end"><Button size="xs" disabled={!body.trim()} loading={add.isPending} onClick={() => add.mutate()}>Add note</Button></Group>
           </Stack>
         </Card>
@@ -824,7 +833,7 @@ function AutoBookPanel({ orderId, at, note, onDone }: { orderId: number; at: str
     onSuccess: (r, action) => {
       if (action === "now") {
         const res = r.results?.[0];
-        res?.ok ? notifySuccess(`Tracking ${res.trackingCode}`, "Booked with Steadfast") : notifyError(new Error(res?.error ?? "Booking failed"));
+        res?.ok ? notifySuccess(`Tracking ${res.trackingCode}`, "Booked with the courier") : notifyError(new Error(res?.error ?? "Booking failed"));
       }
       onDone();
     },

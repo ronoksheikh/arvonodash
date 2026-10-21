@@ -21,6 +21,7 @@ type StuckParcel = {
   consignmentId: string | null;
   trackingCode: string | null;
   status: string;
+  courier: string;
   lastMessage: string | null;
   lastUpdate: string | null;
   pickedUpAt: string | null;
@@ -52,7 +53,7 @@ const QUICK_NOTES = [
   "Customer refused — will return",
   "Rider says out for delivery",
   "Rider not reachable",
-  "Asked Steadfast support",
+  "Asked courier support",
 ];
 
 export default function Stuck() {
@@ -70,7 +71,7 @@ export default function Stuck() {
   const refresh = useMutation({
     mutationFn: (rowId: number) => post("/consignments/refresh", { ids: [rowId] }),
     onSuccess: () => {
-      notifySuccess("Latest status fetched from Steadfast");
+      notifySuccess("Latest status fetched from the courier");
       qc.invalidateQueries({ queryKey: ["stuck"] });
     },
     onError: (e) => notifyError(e),
@@ -84,7 +85,7 @@ export default function Stuck() {
     <>
       <PageHeader
         title="Stuck parcels"
-        description="Parcels that need a call: the rider took them but Steadfast never confirmed, on hold, no Steadfast update for days, or slower than usual for the district. Usual delivery times are learned from your own past deliveries."
+        description="Parcels that need a call: the rider took them but the courier never confirmed, on hold, no courier update for days, or slower than usual for the district. Usual delivery times are learned from your own past deliveries."
         actions={<Switch label={`Show snoozed${q.data?.snoozed ? ` (${q.data.snoozed})` : ""}`} checked={showSnoozed} onChange={(e) => setShowSnoozed(e.currentTarget.checked)} />}
       />
       <SegmentedControl
@@ -111,7 +112,7 @@ export default function Stuck() {
                 <div style={{ minWidth: 0 }}>
                   <Group gap={6}>
                     <Text fw={700} style={{ cursor: "pointer" }} onClick={() => setOpenOrder(p.orderId)}>{p.orderName}</Text>
-                    <SteadfastStatusBadge status={p.status} />
+                    <SteadfastStatusBadge status={p.status} courier={p.courier} />
                     {p.snoozed && <Badge size="xs" color="gray">Snoozed</Badge>}
                   </Group>
                   <Text size="xs" c="dimmed" className="mono">CID {p.consignmentId} · {p.trackingCode}</Text>
@@ -159,7 +160,7 @@ export default function Stuck() {
                   </Button>
                 )}
               </Group>
-              {p.riderPhones.length === 0 && !p.pickupRiderPhone && <Text size="xs" c="dimmed" mt={6}>No rider number yet: Steadfast's updates don't include one and no rider phone was entered at handover.</Text>}
+              {p.riderPhones.length === 0 && !p.pickupRiderPhone && <Text size="xs" c="dimmed" mt={6}>No rider number yet: the courier's updates don't include one and no rider phone was entered at handover.</Text>}
             </Card>
           ))}
         </SimpleGrid>

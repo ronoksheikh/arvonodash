@@ -231,7 +231,7 @@ export function useCountdown(target: string | null | undefined) {
 export function AutoBookChip({ at }: { at: string }) {
   const left = useCountdown(at);
   return (
-    <Tooltip label="Auto-books with Steadfast when the timer ends. Open the order to cancel or book now.">
+    <Tooltip label="Auto-books with the courier when the timer ends. Open the order to cancel or book now.">
       <Badge size="sm" color="grape" variant="light" leftSection={<Timer size={11} />} style={{ fontVariantNumeric: "tabular-nums" }}>
         {left}
       </Badge>

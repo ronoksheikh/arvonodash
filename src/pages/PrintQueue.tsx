@@ -94,7 +94,7 @@ export default function PrintQueue() {
       { label: "Printed", value: s?.printed, color: "teal" },
       { label: "To sort", value: s?.awaitingSort, color: "indigo" },
       { label: "Sorted", value: s?.sorted },
-      { label: "Dispatched", value: s?.dispatched, color: "teal", hint: "Picked up by Steadfast" },
+      { label: "Dispatched", value: s?.dispatched, color: "teal", hint: "Picked up by the courier" },
     ],
     [s],
   );
@@ -155,7 +155,7 @@ export default function PrintQueue() {
           </Group>
         </Group>
         {list.isLoading ? <LoadingState /> : list.error ? <ErrorState error={list.error} onRetry={() => list.refetch()} /> : rows.length === 0 ? (
-          <EmptyState icon={<Printer size={22} />} title={tab === "unprinted" ? "Nothing waiting to print" : `No ${tab} labels`} description={tab === "unprinted" ? "Confirm orders and book them with Steadfast — they appear here for the label service." : undefined} />
+          <EmptyState icon={<Printer size={22} />} title={tab === "unprinted" ? "Nothing waiting to print" : `No ${tab} labels`} description={tab === "unprinted" ? "Confirm orders and book them with the courier — they appear here for the label service." : undefined} />
         ) : (
           <ScrollArea>
             <Table className="app-table" verticalSpacing={8} miw={980}>
