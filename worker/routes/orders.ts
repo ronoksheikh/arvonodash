@@ -240,7 +240,7 @@ orderRoutes.get("/export.csv", requirePerm("export"), async (c) => {
   const rows = await withActiveConsignment(db, await db.select().from(orders).where(where).orderBy(desc(orders.shopCreatedAt)).limit(10_000).all());
   const header = [
     "Order", "Created", "Calling", "Processing", "Customer", "Phone", "Address", "City", "Items", "Total", "COD due", "Payment", "Shopify fulfillment",
-    "Status", "Tags", "Courier stage", "Consignment ID", "Tracking code", "Steadfast status", "COD booked", "Collected", "Delivery charge",
+    "Status", "Tags", "Courier stage", "Consignment ID", "Tracking code", "Courier status", "COD booked", "Collected", "Delivery charge",
     "Fulfillment", "Label", "Dispatch", "Settled payment", "Risk flags", "Source", "UTM source", "UTM medium", "UTM campaign", "UTM content", "Referrer", "Landing page",
   ];
   const lines = [header.join(",")];
@@ -621,7 +621,9 @@ orderRoutes.post("/:id{[0-9]+}/cancel", requirePerm("orders.cancel"), async (c) 
   const body = await c.req.json<{ reason: string; restock?: boolean; notifyCustomer?: boolean; staffNote?: string }>();
   if (!CANCEL_REASONS.includes(body.reason as (typeof CANCEL_REASONS)[number])) return c.json({ error: "Invalid cancellation reason" }, 400);
   if (order.activeConsignmentId && !["cancelled", "returned", "unbooked"].includes(order.courierStage)) {
-    return c.json({ error: "This order has an active Steadfast consignment. Stop the parcel with Steadfast first (the API cannot cancel consignments), then cancel the order." }, 409);
+    const parcel = await db.select({ courier: consignments.courier }).from(consignments).where(eq(consignments.id, order.activeConsignmentId)).get();
+    const how = parcel?.courier === "carrybee" ? "cancel the parcel from the Courier tab (Cancel parcel at Carrybee)" : "stop the parcel in the Steadfast portal (Steadfast's API cannot cancel parcels)";
+    return c.json({ error: `This order has an active parcel. First ${how}, then cancel the order.` }, 409);
   }
   const job = await cancelOrder(c.env, db, order.shopifyId, {
     reason: body.reason as (typeof CANCEL_REASONS)[number],

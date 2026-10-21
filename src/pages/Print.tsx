@@ -36,7 +36,7 @@ function Slip({ o, business }: { o: PrintOrder; business: PrintData["business"] 
         <b>Ship to</b>
         <div>{b.recipientName} · {b.recipientPhone}</div>
         <div>{b.recipientAddress}</div>
-        {o.consignment?.trackingCode && <div style={{ marginTop: 4 }}>Steadfast tracking: <b>{o.consignment.trackingCode}</b></div>}
+        {o.consignment?.trackingCode && <div style={{ marginTop: 4 }}>Courier tracking: <b>{o.consignment.trackingCode}</b></div>}
       </div>
       <table style={{ width: "100%", marginTop: 16, borderCollapse: "collapse" }}>
         <thead><tr style={{ borderBottom: "2px solid #111", textAlign: "left" }}><th style={{ padding: 4 }}>✓</th><th>Item</th><th>SKU</th><th style={{ textAlign: "right" }}>Qty</th><th style={{ textAlign: "right" }}>Price</th></tr></thead>

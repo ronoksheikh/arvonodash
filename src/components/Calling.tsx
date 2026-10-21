@@ -133,7 +133,7 @@ export function CallingPanel({
           <Button size="xs" variant="light" color="red" leftSection={<PhoneOff size={14} />} onClick={() => setPending("rejected")}>Rejected</Button>
         </SimpleGrid>
       )}
-      {locked && <Text size="xs" c="dimmed">Booked with Steadfast — confirmation is locked.</Text>}
+      {locked && <Text size="xs" c="dimmed">Booked with the courier — confirmation is locked.</Text>}
       {calls.length > 0 && (
         <Timeline bulletSize={14} lineWidth={2} mt="md">
           {calls.map((c) => (

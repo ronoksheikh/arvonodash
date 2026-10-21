@@ -43,7 +43,7 @@ export default function Cod() {
     <>
       <PageHeader
         title="COD & Settlements"
-        description="Cash collected by Steadfast and matched against their payments"
+        description="Cash collected by the courier and matched against their payouts"
         actions={
           <>
             <SegmentedControl size="xs" value={days} onChange={setDays} data={[{ value: "30", label: "30d" }, { value: "90", label: "90d" }, { value: "365", label: "1y" }]} />
@@ -65,7 +65,7 @@ export default function Cod() {
           </Card>
         ))}
       </SimpleGrid>
-      <Text size="xs" c="dimmed" mt="xs">Delivery charges in period: {money(s.charges)} (reported by Steadfast webhooks)</Text>
+      <Text size="xs" c="dimmed" mt="xs">Delivery charges in period: {money(s.charges)} (reported by the couriers)</Text>
 
       <Panel>
         <Tabs defaultValue="unsettled" mt="lg" px="md" pt={6}>

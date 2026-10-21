@@ -46,8 +46,8 @@ const STAGES: { key: Stage; label: string; color: string; hint: string }[] = [
   { key: "needs_label", label: "Label not printed", color: "orange", hint: "Booked, label still to print" },
   { key: "needs_scan", label: "Not scanned", color: "orange", hint: "Printed, not scanned at packing" },
   { key: "ready", label: "Ready (scanned)", color: "teal", hint: "Scanned, waiting for the rider" },
-  { key: "handed_over", label: "Handed to rider", color: "indigo", hint: "Rider took it; Steadfast not confirmed yet" },
-  { key: "picked_up", label: "Picked up", color: "green", hint: "Steadfast confirmed pickup today" },
+  { key: "handed_over", label: "Handed to rider", color: "indigo", hint: "Rider took it; courier not confirmed yet" },
+  { key: "picked_up", label: "Picked up", color: "green", hint: "Courier confirmed pickup today" },
 ];
 const EXTRA: { key: Stage; label: string; color: string }[] = [
   { key: "pull_out", label: "Cancelled — pull out", color: "red" },
@@ -91,7 +91,7 @@ export default function Pickup() {
   const undo = useMutation({
     mutationFn: (id: number) => post<{ reverted: number[] }>("/ops/pickup/undo-handover", { orderIds: [id], reason: "Rider did not take it" }),
     onSuccess: (r) => {
-      notifySuccess(r.reverted.length ? "Back to ready — it goes with the next pickup" : "Nothing changed (Steadfast already has it)");
+      notifySuccess(r.reverted.length ? "Back to ready — it goes with the next pickup" : "Nothing changed (the courier already has it)");
       qc.invalidateQueries({ queryKey: ["pickup-plan"] });
     },
     onError: (e) => notifyError(e),
@@ -166,7 +166,7 @@ export default function Pickup() {
         </Alert>
       ) : null}
       {c.notCollected > 0 && (
-        <Alert color="red" variant="light" mb="md" icon={<Truck size={18} />} title={`${c.notCollected} parcel(s) were handed to a rider on an earlier day, but Steadfast still hasn't confirmed pickup`}>
+        <Alert color="red" variant="light" mb="md" icon={<Truck size={18} />} title={`${c.notCollected} parcel(s) were handed to a rider on an earlier day, but the courier still hasn't confirmed pickup`}>
           Call the rider. If a parcel is actually still here, open it below and press "Undo handover" so it goes with the next pickup.{" "}
           <UnstyledButton onClick={() => setFilter("not_collected")} style={{ textDecoration: "underline", fontSize: 14 }}>Show them</UnstyledButton>
         </Alert>
@@ -261,7 +261,7 @@ export default function Pickup() {
                 <Table.Th>Rider</Table.Th>
                 <Table.Th ta="right">Handed over</Table.Th>
                 <Table.Th ta="right">Left behind</Table.Th>
-                <Table.Th pr="md">Steadfast confirmed</Table.Th>
+                <Table.Th pr="md">Courier confirmed</Table.Th>
               </Table.Tr>
             </Table.Thead>
             <Table.Tbody>

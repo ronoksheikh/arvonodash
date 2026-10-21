@@ -33,7 +33,7 @@ const ACTIVITY_TITLES: Record<string, string> = {
   "order.cancelled_in_shopify": "Cancelled in Shopify",
   "order.cancelled_after_booking": "Cancelled in Shopify after booking",
   "order.deleted_in_shopify": "Deleted in Shopify",
-  "consignment.created": "Booked with Steadfast",
+  "consignment.created": "Booked with the courier",
   "consignment.deleted_in_steadfast": "Parcel deleted in Steadfast",
   "return.created": "Return opened",
   "fulfillment.created": "Fulfilled in Shopify",
@@ -70,7 +70,7 @@ export async function buildJourney(db: DB, order: typeof orders.$inferSelect) {
   }
   for (const c of cons) {
     if (c.consignmentId || c.trackingCode) {
-      push({ at: c.createdAt, source: "booking", title: c.orderId === order.id ? "Booked with Steadfast" : "Added to a combined parcel", detail: [c.consignmentId && `CID ${c.consignmentId}`, c.trackingCode, `invoice ${c.invoice}`, `COD ৳${c.codAmount}`].filter(Boolean).join(" · "), actor: null });
+      push({ at: c.createdAt, source: "booking", title: c.orderId === order.id ? `Booked with ${COURIERS[c.courier as CourierId]?.label ?? "the courier"}` : "Added to a combined parcel", detail: [c.consignmentId && `CID ${c.consignmentId}`, c.trackingCode, `invoice ${c.invoice}`, `COD ৳${c.codAmount}`].filter(Boolean).join(" · "), actor: null });
     }
     if (c.superseded) push({ at: c.updatedAt, source: "booking", title: "Consignment replaced by a rebooking", detail: c.invoice, actor: null, tone: "warn" });
     if (c.settledAt) push({ at: c.settledAt, source: "courier", title: `COD paid out by ${COURIERS[c.courier as CourierId]?.label ?? "the courier"}`, detail: c.paymentId ? `Payment ${c.paymentId}` : null, actor: null, tone: "good" });

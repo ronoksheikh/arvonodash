@@ -29,7 +29,7 @@ export default function Customers() {
   const rows = q.data?.rows ?? [];
   return (
     <>
-      <PageHeader title="Customers" description="Grouped by phone number — delivery history from your own Steadfast records" />
+      <PageHeader title="Customers" description="Grouped by phone number — delivery history from your own courier records" />
       <Panel>
         <Group p="md" gap="sm">
           <TextInput placeholder="Name, phone or email" leftSection={<Search size={15} />} value={search} onChange={(e) => { setSearch(e.currentTarget.value); setPage(1); }} style={{ flex: "1 1 240px" }} />

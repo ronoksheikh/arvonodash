@@ -89,7 +89,7 @@ export default function Dispatch() {
     <>
       <PageHeader
         title="Dispatch"
-        description="Scan each label at the packing table to mark it sorted. It becomes Dispatched automatically when Steadfast picks it up (status leaves in review), which also fulfills the order in Shopify."
+        description="Scan each label at the packing table to mark it sorted. It becomes Dispatched automatically when the courier confirms the pickup, which also fulfills the order in Shopify."
         actions={
           <Group gap="xs">
             {can("dispatch.manage") && <Button leftSection={<ScanLine size={15} />} onClick={() => navigate("/scan")}>Open scanner</Button>}
@@ -110,7 +110,7 @@ export default function Dispatch() {
         </Tabs>
         {selectable && (
           <Group p="md" justify="space-between">
-            <Text size="sm" c="dimmed">{view === "ready" ? "Scan labels with the phone scanner, or mark sorted here if a label can't be scanned." : "Waiting for Steadfast to pick up (status leaves in review)."}</Text>
+            <Text size="sm" c="dimmed">{view === "ready" ? "Scan labels with the phone scanner, or mark sorted here if a label can't be scanned." : "Waiting for the courier to pick up."}</Text>
             <Group gap="xs">
               {view === "ready" && can("dispatch.manage") && (
                 <Button size="xs" leftSection={<Truck size={14} />} disabled={!selected.size} loading={dispatch.isPending} onClick={() => dispatch.mutate()}>

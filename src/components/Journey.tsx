@@ -11,7 +11,7 @@ const SOURCES: Record<JourneySource, { label: string; color: string; icon: Lucid
   call: { label: "Calls", color: "grape", icon: Phone },
   booking: { label: "Booking", color: "blue", icon: Box },
   warehouse: { label: "Warehouse", color: "indigo", icon: Warehouse },
-  courier: { label: "Steadfast", color: "cyan", icon: Truck },
+  courier: { label: "Courier", color: "cyan", icon: Truck },
   sms: { label: "SMS", color: "orange", icon: MessageSquare },
   staff: { label: "Staff", color: "gray", icon: User },
   system: { label: "System", color: "gray", icon: Bot },
@@ -24,7 +24,7 @@ const STEPS: { key: keyof Journey["milestones"]; label: string }[] = [
   { key: "printed", label: "Label printed" },
   { key: "packed", label: "Packed (scanned)" },
   { key: "handedOver", label: "Handed to rider" },
-  { key: "pickedUp", label: "Picked up by Steadfast" },
+  { key: "pickedUp", label: "Picked up by courier" },
   { key: "outcome", label: "Delivered / returned" },
   { key: "paid", label: "COD paid out" },
 ];

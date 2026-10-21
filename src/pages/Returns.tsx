@@ -39,7 +39,7 @@ export default function Returns() {
           </Tabs.List>
         </Tabs>
         {q.isLoading ? <LoadingState /> : q.error ? <ErrorState error={q.error} onRetry={() => q.refetch()} /> : rows.length === 0 ? (
-          <EmptyState title="No returns here" description="Returns are created automatically when Steadfast marks a parcel cancelled after pickup or partially delivered." />
+          <EmptyState title="No returns here" description="Returns are created automatically when the courier marks a parcel returned or partially delivered." />
         ) : (
           <ScrollArea>
             <Table className="app-table" verticalSpacing={10} miw={980} mt="xs">

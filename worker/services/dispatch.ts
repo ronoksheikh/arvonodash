@@ -1,3 +1,4 @@
+import { COURIERS, type CourierId } from "../../shared/couriers";
 import { and, desc, eq, inArray, sql, type AnyColumn } from "drizzle-orm";
 import type { DB } from "../db";
 import { inList, pick } from "../db";
@@ -415,7 +416,7 @@ export async function scanParcel(db: DB, actor: Actor, code: string, batchId: st
   }
   if (o.dispatchStatus === "dispatched" || !["booked"].includes(o.courierStage)) {
     if (["in_transit", "on_hold", "awaiting_confirmation", "delivered", "partial_delivered", "returned"].includes(o.courierStage) || o.dispatchStatus === "dispatched") {
-      return { kind: "already_dispatched", ok: false, message: "Already picked up by Steadfast", order: info };
+      return { kind: "already_dispatched", ok: false, message: `Already picked up by ${COURIERS[c.courier as CourierId]?.label ?? "the courier"}`, order: info };
     }
     return { kind: "not_booked", ok: false, message: `Not bookable state (${o.courierStage})`, order: info };
   }
