@@ -1347,6 +1347,25 @@ await step("Carrybee's own integration secret (a UUID from its dashboard) can be
   assert.equal(check.headers.get("X-CB-Webhook-Integration-Header"), uuid);
   assert.equal((await call("GET", "/api/settings")).body.connections.carrybee.lastWebhook.ok, true);
   cbSecret = uuid;
+
+  // Carrybee's real "Add Webhook" check sends {"event":"webhook.integration"} WITHOUT the secret header.
+  const bare = (body) => call("POST", "/webhooks/carrybee", body, { auth: false });
+  const closed = await bare({ event: "webhook.integration" });
+  assert.equal(closed.status, 401, "without the setup window the secret is never handed out");
+  assert.equal(closed.headers.get("X-CB-Webhook-Integration-Header"), null);
+  let lw = (await call("GET", "/api/settings")).body.connections.carrybee.lastWebhook;
+  assert.deepEqual([lw.ok, lw.reason, lw.setupCheck], [false, "missing", true]);
+
+  const opened = await call("POST", "/api/settings/carrybee/webhook-setup");
+  assert.ok(opened.body.until);
+  const forged = await bare({ event: "order.delivered", consignment_id: "FX1" });
+  assert.equal(forged.status, 401, "real parcel events always need the secret, even while the window is open");
+  const passed = await bare({ event: "webhook.integration" });
+  assert.equal(passed.status, 202);
+  assert.equal(passed.headers.get("X-CB-Webhook-Integration-Header"), uuid, "Carrybee gets the secret it expects");
+  lw = (await call("GET", "/api/settings")).body.connections.carrybee.lastWebhook;
+  assert.deepEqual([lw.ok, lw.setupCheck], [true, true]);
+  assert.equal((await bare({ event: "webhook.integration" })).status, 401, "the window closes after one successful check");
 });
 
 await step("Carrybee: cancel before pickup, polling fallback, and switching back to Steadfast", async () => {
