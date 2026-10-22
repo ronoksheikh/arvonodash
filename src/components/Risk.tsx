@@ -1,7 +1,7 @@
 import { Anchor, Badge, Button, Card, Group, Progress, RingProgress, SimpleGrid, Stack, Table, Text, ThemeIcon, Tooltip } from "@mantine/core";
 import { useMutation } from "@tanstack/react-query";
 import { Link } from "react-router";
-import { ChevronRight, History, MapPin, Megaphone, RefreshCw, ShieldAlert, ShieldCheck, ShieldQuestion, Truck } from "lucide-react";
+import { History, MapPin, Megaphone, RefreshCw, ShieldAlert, ShieldCheck, ShieldQuestion, Truck } from "lucide-react";
 import { notifyError, post } from "../api";
 import { useCan } from "../auth";
 import { ago, dateShort, money } from "../format";
@@ -59,50 +59,6 @@ export function RiskPill({ risk }: { risk: RiskSummary | null }) {
         {risk.score} · {lv.label}
       </Badge>
     </Tooltip>
-  );
-}
-
-/** Always-visible summary under the drawer title: score, verdict, the strongest reasons. */
-export function RiskBanner({ risk, onOpen }: { risk: RiskSummary; onOpen: () => void }) {
-  const lv = RISK_LEVELS[risk.level];
-  const Icon = ICON[risk.level];
-  const top = risk.factors.slice(0, 3);
-  return (
-    <Card
-      withBorder
-      padding="xs"
-      mt="sm"
-      onClick={onOpen}
-      style={{ cursor: "pointer", borderLeft: `4px solid var(--mantine-color-${lv.color}-6)`, background: `var(--mantine-color-${lv.color}-light)` }}
-    >
-      <Group gap="sm" wrap="nowrap" align="center">
-        <RingProgress
-          size={52}
-          thickness={5}
-          roundCaps
-          sections={[{ value: Math.max(3, risk.score), color: lv.color }]}
-          label={<Text ta="center" fw={800} size="sm" style={{ fontVariantNumeric: "tabular-nums" }}>{risk.score}</Text>}
-        />
-        <div style={{ flex: 1, minWidth: 0 }}>
-          <Group gap={6} wrap="nowrap">
-            <Icon size={15} color={`var(--mantine-color-${lv.color}-7)`} />
-            <Text fw={700} size="sm" c={`${lv.color}.8`}>{lv.label}</Text>
-            <Text size="sm" fw={500} style={{ wordBreak: "break-word" }}>· {risk.headline}</Text>
-          </Group>
-          <Group gap={6} mt={4}>
-            {top.map((f) => (
-              <Badge key={f.key} size="xs" variant="white" color={f.points > 0 ? "red" : "teal"} style={{ textTransform: "none", fontWeight: 500, height: "auto", padding: "2px 6px", whiteSpace: "normal" }}>
-                {f.points > 0 ? "+" : "−"}{Math.abs(f.points)} {f.label}
-              </Badge>
-            ))}
-          </Group>
-        </div>
-        <Group gap={2} wrap="nowrap" style={{ flexShrink: 0 }}>
-          <Text size="xs" c="dimmed">Details</Text>
-          <ChevronRight size={14} color="var(--mantine-color-dimmed)" />
-        </Group>
-      </Group>
-    </Card>
   );
 }
 
