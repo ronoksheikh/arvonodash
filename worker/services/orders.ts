@@ -187,7 +187,7 @@ export async function customerHistory(db: DB, customerId: number) {
 }
 
 /** Detects duplicate, suspicious and risky orders. Flags are advisory; staff can dismiss them. */
-export async function refreshRiskFlags(db: DB, orderId: number, appSettings: AppSettings) {
+export async function refreshRiskFlags(db: DB, orderId: number, appSettings: AppSettings, opts: { siblings?: boolean } = {}) {
   const order = await db.select().from(orders).where(eq(orders.id, orderId)).get();
   if (!order) return;
   const flags: string[] = [];
@@ -264,7 +264,21 @@ export async function refreshRiskFlags(db: DB, orderId: number, appSettings: App
   if (order.bookedSource && !["delivered", "partial_delivered", "returned", "cancelled"].includes(order.courierStage) && order.bookedSource !== shopifyContactKey(order)) {
     flags.push("changed_after_booking");
   }
+  // Smart risk score: the customer's earlier orders on this number (even under another name), the
+  // courier record, ad/district return rates. It also adds the "returned/cancelled before" flags.
+  const { buildRiskReport, saveRisk, openSiblingIds } = await import("./riskScore");
+  const risk = await buildRiskReport(db, order, flags, appSettings);
+  if (risk.previous.some((p) => p.outcome === "returned")) flags.push("returned_before");
+  if (risk.previous.some((p) => (p.outcome === "cancelled" || p.outcome === "rejected" || p.outcome === "cancelled_at_courier") && !p.nearby)) flags.push("cancelled_before");
   await db.update(orders).set({ riskFlags: flags, duplicateOfOrderId: duplicateOf }).where(eq(orders.id, order.id));
+  await saveRisk(db, order.id, risk);
+
+  // This order finished or was cancelled: the customer's other open orders now have more history.
+  const finished = Boolean(order.cancelledAt) || order.callingStatus === "rejected" || ["delivered", "partial_delivered", "returned", "cancelled"].includes(order.courierStage);
+  if (opts.siblings !== false && finished && order.phone) {
+    for (const id of await openSiblingIds(db, order.phone, order.id)) await refreshRiskFlags(db, id, appSettings, { siblings: false });
+  }
+  return risk;
 }
 
 export function buildAddress(o: { address1: string | null; address2: string | null; city: string | null; province?: string | null; zip: string | null }): string {

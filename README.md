@@ -29,6 +29,7 @@ recorded, and how deleted or cancelled orders and parcels are handled. Customer 
 [docs/SMS.md](docs/SMS.md). Custom tracking domain: [docs/TRACKING_DOMAIN.md](docs/TRACKING_DOMAIN.md).
 Order source / UTM tracking: [docs/ORDER_SOURCE.md](docs/ORDER_SOURCE.md).
 Second courier (Carrybee, off by default, switchable in Settings): [docs/CARRYBEE.md](docs/CARRYBEE.md).
+Smart risk score per order (earlier orders on the same number, courier record, ad and district return rates): [docs/RISK_SCORE.md](docs/RISK_SCORE.md).
 
 Everything is synchronised automatically except the **calling confirmation** and **physical
 dispatch**. Booking happens automatically a few minutes after confirmation (default 10, set in

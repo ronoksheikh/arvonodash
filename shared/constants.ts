@@ -141,6 +141,8 @@ export const RISK_FLAGS: Record<string, string> = {
   cod_mismatch: "COD in Steadfast no longer matches the Shopify balance",
   combined_order_cancelled: "An order travelling in this parcel was cancelled — COD is now wrong",
   deleted_in_shopify: "Order was deleted in Shopify — stop the parcel",
+  returned_before: "This number returned an earlier parcel",
+  cancelled_before: "This number has cancelled or rejected earlier orders",
 };
 
 export const CALLING_STATUSES = {

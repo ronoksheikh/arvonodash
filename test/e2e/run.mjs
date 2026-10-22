@@ -1401,6 +1401,41 @@ await step("Carrybee: cancel before pickup, polling fallback, and switching back
   assert.equal((await orderDetail(o2.id)).order.courierStage, "delivered", "parcels already with Carrybee keep updating after switching back");
 });
 
+await step("smart risk score: same number with a cancelled order under another name", async () => {
+  const phone = "+880 1766-707070";
+  const old = new Date(Date.now() - 10 * 86_400_000).toISOString();
+  const addr = { address1: "House 9, Road 2, Mirpur", city: "Dhaka", zip: "1216", country: "Bangladesh", phone };
+  await shopifyWebhook("orders/create", restOrder(7101, { created_at: old, updated_at: old, customer: { id: 97101, first_name: "Sumon", last_name: "Ali" }, shipping_address: { name: "Sumon Ali", ...addr } }));
+  await shopifyWebhook("orders/cancelled", restOrder(7101, { created_at: old, cancelled_at: old, cancel_reason: "customer", updated_at: new Date().toISOString(), customer: { id: 97101, first_name: "Sumon", last_name: "Ali" }, shipping_address: { name: "Sumon Ali", ...addr } }));
+  const o = await newOrder(7102, phone);
+  const d = await orderDetail(o.id);
+  const p = d.risk.previous.find((x) => x.name === "#7101");
+  assert.ok(p, JSON.stringify(d.risk.previous));
+  assert.equal(p.outcome, "cancelled");
+  assert.equal(p.sameName, false, "Sumon vs Rafiq");
+  assert.equal(p.nearby, false);
+  const keys = d.risk.factors.map((f) => f.key);
+  assert.ok(keys.includes("cancelled_before") && keys.includes("other_name_bad"), keys.join(","));
+  assert.ok(d.order.riskFlags.includes("cancelled_before"));
+  assert.ok(d.risk.factors.find((f) => f.key === "other_name_bad").points > 0);
+  assert.equal(d.risk.score, Math.max(0, Math.min(100, 20 + d.risk.factors.reduce((n, f) => n + f.points, 0))), "score = 20 + factor points");
+
+  // The list shows the stored score, can filter and sort by it.
+  const row = (await call("GET", `/api/orders?search=%237102`)).body.rows[0];
+  assert.equal(row.risk.score, d.risk.score);
+  assert.equal(row.risk.level, d.risk.level);
+  const filtered = await call("GET", `/api/orders?risk=${d.risk.level}`);
+  assert.ok(filtered.body.rows.some((r) => r.id === o.id));
+  const sorted = await call("GET", "/api/orders?sort=risk&dir=desc");
+  assert.equal(sorted.status, 200);
+  const scores = sorted.body.rows.map((r) => r.risk?.score ?? -1);
+  assert.deepEqual(scores, [...scores].sort((a, b) => b - a), "sorted by score");
+
+  // Re-check returns the fresh report.
+  const re = await call("POST", `/api/orders/${o.id}/recheck-risk`);
+  assert.equal(re.body.risk.score, d.risk.score);
+});
+
 await step("activity log records actions", async () => {
   const a = await call("GET", "/api/logs/activity");
   const actions = new Set(a.body.rows.map((r) => r.action));

@@ -5,14 +5,15 @@ import { DatePickerInput } from "@mantine/dates";
 import { useDebouncedValue } from "@mantine/hooks";
 import { keepPreviousData, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useSearchParams } from "react-router";
-import { Package, PhoneCall, ArrowDownUp, Download, Filter, MoreHorizontal, Printer, Search, Send, Tag, X, CheckCircle2, XCircle, Archive, ShieldOff, ListChecks, Megaphone } from "lucide-react";
+import { Package, PhoneCall, ArrowDownUp, Download, Filter, MoreHorizontal, Printer, Search, Send, Tag, X, CheckCircle2, ShieldAlert, XCircle, Archive, ShieldOff, ListChecks, Megaphone } from "lucide-react";
 import { api, post, qs, notifyError, notifySuccess } from "../api";
 import { useCan } from "../auth";
 import { useBookingCourier } from "../courier";
-import { AutoBookChip, CustomerHistoryBadge, CustomStatusBadge, DispatchBadge, EmptyState, ErrorState, FulfillmentBadge, LabelBadge, LoadingState, PageHeader, Panel, RiskBadge, ShopifySyncBadge, StageBadge, TableFooter, useStatuses } from "../components/ui";
+import { AutoBookChip, CustomerHistoryBadge, CustomStatusBadge, EmptyState, ErrorState, LoadingState, PageHeader, Panel, RiskBadge, TableFooter, useStatuses } from "../components/ui";
 import { CallingMenu } from "../components/Calling";
 import { OrderDrawer } from "../components/OrderDrawer";
-import { FraudBadge } from "../components/Fraud";
+import { RiskPill } from "../components/Risk";
+import { OrderProgress } from "../components/Progress";
 import { channelInfo, SourceBadge } from "../components/Source";
 import { dateShort, money } from "../format";
 import { CALLING_STATUSES } from "../../shared/constants";
@@ -83,6 +84,7 @@ export default function Orders() {
     archived: params.get("archived"),
     channel: params.get("channel"),
     campaign: params.get("campaign"),
+    risk: params.get("risk"),
   };
   const sources = useQuery({
     queryKey: ["order-sources"],
@@ -269,6 +271,20 @@ export default function Orders() {
               w={210}
             />
           )}
+          <Select
+            placeholder="Any risk"
+            leftSection={<ShieldAlert size={14} />}
+            clearable
+            data={[
+              { value: "high", label: "Risky (60+)" },
+              { value: "medium,high", label: "Check or risky (35+)" },
+              { value: "medium", label: "Check (35–59)" },
+              { value: "low", label: "Safe (0–34)" },
+            ]}
+            value={filters.risk}
+            onChange={(v) => set({ risk: v, page: null })}
+            w={190}
+          />
           <DatePickerInput
             type="range"
             placeholder="Date range"
@@ -297,7 +313,7 @@ export default function Orders() {
         ) : rows.length === 0 ? (
           <EmptyState
             title="No orders found"
-            description={filters.search || filters.statusId || filters.flagged || filters.channel || filters.campaign ? "Try clearing filters." : "Orders arrive automatically from Shopify webhooks. Import historical orders from Sync & webhooks."}
+            description={filters.search || filters.statusId || filters.flagged || filters.channel || filters.campaign || filters.risk ? "Try clearing filters." : "Orders arrive automatically from Shopify webhooks. Import historical orders from Sync & webhooks."}
           />
         ) : (
           <>
@@ -310,12 +326,9 @@ export default function Orders() {
                     <Table.Th onClick={() => sortBy("created")} style={{ cursor: "pointer" }}>Date <ArrowDownUp size={11} /></Table.Th>
                     <Table.Th miw={130}>Source</Table.Th>
                     <Table.Th onClick={() => sortBy("customer")} style={{ cursor: "pointer" }}>Customer <ArrowDownUp size={11} /></Table.Th>
+                    <Table.Th onClick={() => sortBy("risk")} style={{ cursor: "pointer" }} miw={110}>Risk <ArrowDownUp size={11} /></Table.Th>
                     <Table.Th ta="right" onClick={() => sortBy("total")} style={{ cursor: "pointer" }}>Total <ArrowDownUp size={11} /></Table.Th>
-                    <Table.Th>Payment</Table.Th>
-                    <Table.Th>Calling</Table.Th>
-                    <Table.Th>Courier</Table.Th>
-                    <Table.Th>Label · Dispatch</Table.Th>
-                    <Table.Th>Fulfillment</Table.Th>
+                    <Table.Th miw={260}>Status</Table.Th>
                     <Table.Th pr="md">Flags</Table.Th>
                   </Table.Tr>
                 </Table.Thead>
@@ -343,20 +356,24 @@ export default function Orders() {
                             <Text size="xs" c="red" className="mono">{o.rawPhone ?? "No phone"}</Text>
                           )}
                           {o.city && <Text size="xs" c="dimmed">· {o.city}</Text>}
-                          <FraudBadge fraud={o.fraud} />
                         </Group>
                       </Table.Td>
+                      <Table.Td><RiskPill risk={o.risk} /></Table.Td>
                       <Table.Td ta="right">
-                        <Text size="sm" fw={500} style={{ fontVariantNumeric: "tabular-nums" }}>{money(o.total)}</Text>
-                        {o.outstanding > 0 && o.outstanding !== o.total && <Text size="xs" c="dimmed">COD {money(o.outstanding)}</Text>}
+                        <Text size="sm" fw={500} style={{ fontVariantNumeric: "tabular-nums", whiteSpace: "nowrap" }}>{money(o.total)}</Text>
+                        <Text size="xs" c={o.financialStatus === "paid" ? "teal.7" : "dimmed"} style={{ whiteSpace: "nowrap" }}>
+                          {o.financialStatus === "paid" ? "Prepaid" : o.outstanding > 0 ? (o.outstanding !== o.total ? `COD ${money(o.outstanding)}` : "COD") : (o.financialStatus ?? "")}
+                        </Text>
                       </Table.Td>
                       <Table.Td>
-                        {o.cancelledAt ? <Badge color="dark" size="sm">Cancelled</Badge> : <Badge color={o.financialStatus === "paid" ? "teal" : "gray"} size="sm" variant="outline">{o.financialStatus === "paid" ? "Prepaid" : o.outstanding > 0 ? "COD" : (o.financialStatus ?? "—")}</Badge>}
-                      </Table.Td>
-                      <Table.Td>
-                        <Group gap={4} wrap="nowrap">
-                          <CallingMenu orderId={o.id} status={o.callingStatus} locked={o.courierStage !== "unbooked" || Boolean(o.cancelledAt)} onDone={invalidate} />
-                          {tab === "to_call" && can("orders.call") && (
+                        <Group gap={6} wrap="nowrap" align="flex-start">
+                          <div style={{ minWidth: 0 }}>
+                            <OrderProgress
+                              order={o}
+                              first={o.courierStage === "unbooked" && !o.cancelledAt ? <CallingMenu orderId={o.id} status={o.callingStatus} onDone={invalidate} /> : undefined}
+                            />
+                          </div>
+                          {tab === "to_call" && can("orders.call") && o.courierStage === "unbooked" && !o.cancelledAt && (
                             <Tooltip label="Confirmed">
                               <ActionIcon size="sm" color="teal" variant="light" aria-label="Confirm" loading={quickConfirm.isPending && quickConfirm.variables === o.id} onClick={(e) => { e.stopPropagation(); quickConfirm.mutate(o.id); }}>
                                 <CheckCircle2 size={14} />
@@ -364,13 +381,12 @@ export default function Orders() {
                             </Tooltip>
                           )}
                         </Group>
-                        {o.callAttempts > 0 && <Text size="xs" c="dimmed" mt={2}>{o.callAttempts} call{o.callAttempts === 1 ? "" : "s"}{o.callbackAt ? ` · ${dateShort(o.callbackAt)}` : ""}</Text>}
-                      </Table.Td>
-                      <Table.Td>
-                        <StageBadge stage={o.courierStage} />
-                        {o.trackingCode && <Text size="xs" c="dimmed" className="mono" mt={2}>{o.trackingCode}</Text>}
+                        <Group gap={6} mt={2}>
+                          {o.callAttempts > 0 && o.courierStage === "unbooked" && <Text size="xs" c="dimmed">{o.callAttempts} call{o.callAttempts === 1 ? "" : "s"}{o.callbackAt ? ` · callback ${dateShort(o.callbackAt)}` : ""}</Text>}
+                          {o.trackingCode && <Text size="xs" c="dimmed" className="mono">{o.trackingCode}</Text>}
+                        </Group>
                         {o.autoBookAt && o.courierStage === "unbooked" && <div style={{ marginTop: 4 }}><AutoBookChip at={o.autoBookAt} /></div>}
-                        {!o.autoBookAt && o.autoBookNote && o.courierStage === "unbooked" && <Text size="xs" c="orange" lineClamp={2} maw={180}>{o.autoBookNote}</Text>}
+                        {!o.autoBookAt && o.autoBookNote && o.courierStage === "unbooked" && <Text size="xs" c="orange.7" maw={280}>{o.autoBookNote}</Text>}
                         {o.combinableWith && o.courierStage === "unbooked" && o.callingStatus === "confirmed" && !o.cancelledAt && (
                           <Tooltip label="Same customer has other confirmed orders. Book them together to send one parcel (one delivery charge).">
                             <Badge size="xs" variant="light" color="grape" mt={4} leftSection={<Package size={10} />}>One parcel with {o.combinableWith}</Badge>
@@ -378,24 +394,9 @@ export default function Orders() {
                         )}
                         {o.combinedIntoOrderId && <Badge size="xs" variant="outline" color="grape" mt={4}>Combined parcel</Badge>}
                       </Table.Td>
-                      <Table.Td>
-                        {o.labelStatus === "not_ready" ? <Text size="xs" c="dimmed">—</Text> : (
-                          <Stack gap={4} align="flex-start">
-                            <LabelBadge status={o.labelStatus} />
-                            {o.dispatchStatus !== "pending" && <DispatchBadge status={o.dispatchStatus} />}
-                          </Stack>
-                        )}
-                      </Table.Td>
-                      <Table.Td>
-                        <Stack gap={4} align="flex-start">
-                          <FulfillmentBadge state={o.fulfillmentState} error={o.fulfillmentError} />
-                          {o.shopifySyncStatus === "failed" && <ShopifySyncBadge status={o.shopifySyncStatus} />}
-                        </Stack>
-                      </Table.Td>
                       <Table.Td pr="md">
                         <Group gap={4}>
                           {o.statusId && <CustomStatusBadge statusId={o.statusId} statuses={statuses.data} />}
-                          {o.cancelRequestedAt && !o.cancelledAt && <Badge size="sm" color="dark" variant="outline">Cancelling…</Badge>}
                           <RiskBadge flags={o.riskFlags} dismissed={o.riskDismissed} />
                           {(o.internalTags ?? []).slice(0, 2).map((t) => (
                             <Badge key={t} size="sm" color="gray" variant="outline" onClick={(e) => { e.stopPropagation(); set({ tag: t }); }} style={{ cursor: "pointer" }}>{t}</Badge>

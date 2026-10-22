@@ -14,6 +14,7 @@ import { normalizeRestOrder } from "../worker/services/shopify";
 import { buildAddress } from "../worker/services/orders";
 import { validateBooking } from "../worker/services/courier";
 import { collectConsignmentIds } from "../worker/services/sync";
+import { riskLevel, sameAddress, sameName, scoreRisk, type PreviousOrder, type PreviousOutcome } from "../shared/risk";
 
 describe("normalizeBdPhone", () => {
   it.each([
@@ -272,5 +273,64 @@ describe("Carrybee statuses", () => {
     expect(carrybeeRules.stageFor(status)).toBe(stage);
     expect(carrybeeRules.isPickedUp(status)).toBe(picked);
     expect(carrybeeRules.isFinal(status)).toBe(final);
+  });
+});
+
+describe("smart risk score", () => {
+  const prev = (outcome: PreviousOutcome, extra: Partial<PreviousOrder> = {}): PreviousOrder => ({
+    id: Math.floor(Math.random() * 1e6), name: "#1", shopCreatedAt: "2026-01-01T00:00:00Z", total: 1000, customerName: "Rahim", address: "Mirpur 10, Dhaka",
+    sameName: true, sameAddress: true, outcome, cancelReason: null, channel: null, nearby: false, ...extra,
+  });
+  const base = { flags: [], previous: [], fraud: null, customerFlag: null, channel: null, campaign: null, district: null };
+
+  it("a first order with nothing unusual is safe", () => {
+    const r = scoreRisk(base);
+    expect(r.score).toBe(25);
+    expect(r.level).toBe("low");
+    expect(r.factors.map((f) => f.key)).toEqual(["first_order"]);
+  });
+
+  it("customers who received earlier orders score lower", () => {
+    const r = scoreRisk({ ...base, previous: [prev("delivered"), prev("delivered")], fraud: { verdict: "good", deliveryRatio: 95, totalReports: 0, reasons: [] } });
+    expect(r.score).toBe(0);
+    expect(r.headline).toBe("Received 2 earlier orders");
+  });
+
+  it("earlier returns and cancels under another name make the order risky", () => {
+    const r = scoreRisk({ ...base, previous: [prev("returned", { sameName: false, customerName: "Karim" }), prev("cancelled", { sameName: false, customerName: "Karim" })] });
+    expect(r.level).toBe("high");
+    expect(r.factors.find((f) => f.key === "returned_before")?.detail).toContain("as Karim");
+    expect(r.factors.some((f) => f.key === "cancelled_before")).toBe(true);
+    expect(r.factors.find((f) => f.key === "other_name_bad")?.detail).toBe("#1 as Karim, #1 as Karim");
+  });
+
+  it("a cancel placed right before this order counts as a likely re-order", () => {
+    const r = scoreRisk({ ...base, previous: [prev("cancelled", { nearby: true })] });
+    expect(r.factors.find((f) => f.key === "recent_cancel")?.points).toBe(3);
+    expect(r.factors.some((f) => f.key === "cancelled_before")).toBe(false);
+  });
+
+  it("ad channel and district return rates above the shop average add points", () => {
+    const r = scoreRisk({
+      ...base,
+      previous: [prev("delivered")],
+      channel: { key: "facebook_ads", label: "Facebook Ads", finished: 100, returned: 35, rate: 0.35, shopRate: 0.15 },
+      district: { key: "Sylhet", finished: 40, returned: 4, rate: 0.1, shopRate: 0.2 },
+    });
+    expect(r.factors.find((f) => f.key === "channel_rate")?.points).toBe(12);
+    expect(r.factors.find((f) => f.key === "district_rate")?.points).toBe(-3);
+  });
+
+  it("blocked customers are always risky; levels follow the score", () => {
+    expect(scoreRisk({ ...base, customerFlag: "blocked" }).level).toBe("high");
+    expect([riskLevel(34), riskLevel(35), riskLevel(59), riskLevel(60)]).toEqual(["low", "medium", "medium", "high"]);
+  });
+
+  it("matches names loosely and addresses ignoring punctuation", () => {
+    expect(sameName("Md. Rahim Uddin", "rahim")).toBe(true);
+    expect(sameName("Rahim", "Karim Hossain")).toBe(false);
+    expect(sameName(null, "Karim")).toBe(true);
+    expect(sameAddress("House 12, Road 3, Mirpur", "house 12 road 3 mirpur")).toBe(true);
+    expect(sameAddress("Uttara Sector 7", "Mirpur 10")).toBe(false);
   });
 });

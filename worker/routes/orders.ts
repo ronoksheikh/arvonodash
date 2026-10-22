@@ -22,6 +22,7 @@ import { buildJourney } from "../services/journey";
 import { sendManualSms, smsLog } from "../services/sms";
 import { ensureFraudCheck, fraudSummary, getFraudCheck, RISKY_FRAUD_SQL, type FraudRow } from "../services/fraud";
 import { openSiblings } from "../services/autobook";
+import { buildRiskReport, RISK_SCORE_SQL, riskLevelSql, risksFor, saveRisk } from "../services/riskScore";
 
 export const orderRoutes = new Hono<AppEnv>();
 
@@ -34,8 +35,8 @@ const NOT_FULFILLED = sql`coalesce(${orders.shopifyFulfillmentStatus}, '') not i
 
 function tabCondition(tab: string): SQL | undefined {
   switch (tab) {
-    case "call_first": // Steadfast fraud check says risky: call before anything is booked
-      return and(eq(orders.courierStage, "unbooked"), isNull(orders.cancelledAt), eq(orders.riskDismissed, false), NOT_FULFILLED, RISKY_FRAUD_SQL);
+    case "call_first": // Steadfast fraud check or our own risk score says risky: call before anything is booked
+      return and(eq(orders.courierStage, "unbooked"), isNull(orders.cancelledAt), eq(orders.riskDismissed, false), NOT_FULFILLED, or(RISKY_FRAUD_SQL, riskLevelSql(["high"])));
     case "to_call":
       return and(inArray(orders.callingStatus, ["not_called", "no_answer", "call_again"]), eq(orders.courierStage, "unbooked"), isNull(orders.cancelledAt), NOT_FULFILLED);
     case "ready":
@@ -92,6 +93,7 @@ function filterConditions(q: Record<string, string | undefined>): SQL[] {
     // Orders not read yet have no channel; they count as unknown.
     conds.push(list.includes("unknown") ? or(inArray(orders.channel, list), isNull(orders.channel))! : inArray(orders.channel, list));
   }
+  if (q.risk) conds.push(riskLevelSql(q.risk.split(",").filter((l) => ["low", "medium", "high"].includes(l))));
   if (q.campaign) conds.push(q.campaign === "none" ? isNull(orders.utmCampaign) : eq(orders.utmCampaign, q.campaign));
   if (q.ids) conds.push(inList(orders.id, q.ids.split(",").map(Number).filter(Boolean)));
   return conds;
@@ -103,6 +105,7 @@ const SORTS = {
   name: orders.orderNumber,
   customer: orders.customerName,
   updated: orders.updatedAt,
+  risk: RISK_SCORE_SQL,
 } as const;
 
 const listColumns = {
@@ -154,7 +157,9 @@ const listColumns = {
   customerReturned: sql<number>`(select count(*) from orders o2 where o2.customer_id = ${orders.customerId} and o2.id != ${orders.id} and o2.courier_stage = 'returned')`,
   customerFlag: sql<string | null>`(select flag from customers c2 where c2.id = ${orders.customerId})`,
   itemCount: sql<number>`(select coalesce(sum(json_extract(value, '$.quantity')), 0) from json_each(${orders.lineItems}))`,
+  handedOverAt: orders.handedOverAt,
   trackingCode: consignments.trackingCode,
+  courier: consignments.courier,
   consignmentStatus: consignments.status,
   consignmentCod: consignments.codAmount,
 };
@@ -186,9 +191,9 @@ orderRoutes.get("/", async (c) => {
     ),
   ]);
   const appSettings = await getSettings(db);
-  const fraud = await fraudByPhone(db, rows.map((r) => r.phone));
+  const [fraud, risk] = await Promise.all([fraudByPhone(db, rows.map((r) => r.phone)), risksFor(db, rows.map((r) => r.id))]);
   return c.json({
-    rows: rows.map((r) => ({ ...r, fraud: r.phone ? fraudSummary(fraud.get(r.phone) ?? null, appSettings) : null })),
+    rows: rows.map((r) => ({ ...r, fraud: r.phone ? fraudSummary(fraud.get(r.phone) ?? null, appSettings) : null, risk: risk.get(r.id) ?? null })),
     total: total?.n ?? 0,
     page,
     pageSize,
@@ -320,6 +325,9 @@ orderRoutes.get("/:id{[0-9]+}", async (c) => {
   const order = await loadOrder(db, Number(c.req.param("id")));
   if (!order) return c.json({ error: "Order not found" }, 404);
   const appSettings = await getSettings(db);
+  // Always fresh in the drawer (stored too, so the list shows the same number).
+  const risk = await buildRiskReport(db, order, order.riskFlags ?? [], appSettings);
+  c.executionCtx.waitUntil(saveRisk(db, order.id, risk));
   const [calls, dispatchHistory] = await Promise.all([
     db.select().from(callLogs).where(eq(callLogs.orderId, order.id)).orderBy(desc(callLogs.createdAt), desc(callLogs.id)).all(),
     orderHistory(db, order.id),
@@ -394,6 +402,7 @@ orderRoutes.get("/:id{[0-9]+}", async (c) => {
     trackingPageUrl: await ensureTrackingToken(db, order.id).then((t) => (t ? publicTrackingUrl(db, appSettings, t, new URL(c.req.url).origin) : null)),
     journey: await buildJourney(db, order),
     sms: await smsLog(db, { orderId: order.id, limit: 50 }),
+    risk,
   });
 });
 
@@ -576,9 +585,9 @@ orderRoutes.post("/:id{[0-9]+}/refresh", requirePerm("orders.edit"), async (c) =
 orderRoutes.post("/:id{[0-9]+}/recheck-risk", requirePerm("orders.edit"), async (c) => {
   const db = getDb(c.env.DB);
   const id = Number(c.req.param("id"));
-  await refreshRiskFlags(db, id, await getSettings(db));
+  const risk = await refreshRiskFlags(db, id, await getSettings(db));
   await db.update(orders).set({ riskDismissed: false }).where(eq(orders.id, id));
-  return c.json({ ok: true });
+  return c.json({ ok: true, risk: risk ?? null });
 });
 
 // ---------------------------------------------------------------------------
