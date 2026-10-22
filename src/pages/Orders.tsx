@@ -218,9 +218,10 @@ export default function Orders() {
               <Tabs.Tab
                 key={t.value}
                 value={t.value}
+                style={{ flexShrink: 0 }}
                 rightSection={
                   query.data?.tabCounts[t.value] !== undefined ? (
-                    <Badge size="xs" variant={tab === t.value ? "filled" : "light"} color={t.value === "attention" && query.data.tabCounts[t.value] ? "orange" : t.value === "call_first" && query.data.tabCounts[t.value] ? "red" : tab === t.value ? "brand" : "gray"}>
+                    <Badge size="xs" variant={tab === t.value ? "filled" : "light"} color={t.value === "attention" && query.data.tabCounts[t.value] ? "orange" : t.value === "call_first" && query.data.tabCounts[t.value] ? "red" : tab === t.value ? "brand" : "gray"} style={{ flexShrink: 0, minWidth: 22, overflow: "visible", fontVariantNumeric: "tabular-nums" }}>
                       {query.data.tabCounts[t.value]}
                     </Badge>
                   ) : null

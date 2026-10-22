@@ -94,6 +94,8 @@ export function OrderProgress({ order, first, size = "sm" }: { order: ProgressOr
       <Group gap={2} wrap="wrap" align="center" style={{ rowGap: 2 }}>
         {steps.map((s, i) => {
           const last = i === steps.length - 1;
+          // Grey/dark steps use the normal text colour so they stay readable in dark mode.
+          const neutral = s.color === "gray" || s.color === "dark";
           const node =
             i === 0 && first ? (
               first
@@ -101,8 +103,8 @@ export function OrderProgress({ order, first, size = "sm" }: { order: ProgressOr
               <Text
                 size={fs}
                 fw={last ? 600 : 400}
-                c={last ? `${s.color === "gray" ? "dark" : s.color}.7` : "dimmed"}
-                style={{ whiteSpace: "nowrap", ...(last ? { background: `var(--mantine-color-${s.color}-light)`, padding: "1px 7px", borderRadius: 6 } : {}) }}
+                c={!last ? "dimmed" : neutral ? undefined : `var(--mantine-color-${s.color}-light-color)`}
+                style={{ whiteSpace: "nowrap", ...(last ? { background: neutral ? "var(--app-muted-bg)" : `var(--mantine-color-${s.color}-light)`, padding: "1px 7px", borderRadius: 6 } : {}) }}
               >
                 {s.label}
               </Text>

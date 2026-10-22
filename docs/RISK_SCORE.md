@@ -14,8 +14,7 @@ holds an order by itself.
 
 - **Orders list** — a *Risk* column with the score chip; hover for the reasons. Sort by risk, or filter
   with *Any risk*. Risky orders that aren't booked yet also appear in the **Call first** tab.
-- **Order drawer** — a banner under the order number (score, verdict, the three strongest reasons) on
-  every tab, and a **Risk** tab with the full breakdown:
+- **Order drawer** — the **Risk** tab (its label shows the score in colour) with the full breakdown:
   - *Why this score*: every reason with its points (+ raises the risk, − lowers it), grouped.
   - *This number's order history*: every other order placed with the same phone number — what happened
     to it (received, returned, cancelled, rejected on call, cancelled at the courier, on the way), and

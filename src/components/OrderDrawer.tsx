@@ -12,7 +12,7 @@ import { useCan } from "../auth";
 import { useBookingCourier } from "../courier";
 import { useCountdown, Copyable, CustomStatusBadge, DispatchBadge, ErrorState, FulfillmentBadge, KeyValue, LabelBadge, LoadingState, RiskBadge, SteadfastStatusBadge, useStatuses, ReturnStatusBadge } from "./ui";
 import { CallingPanel } from "./Calling";
-import { RiskBanner, RiskTab } from "./Risk";
+import { RiskTab } from "./Risk";
 import { OrderProgress } from "./Progress";
 import { RISK_LEVELS } from "../../shared/risk";
 import { JourneyTab } from "./Journey";
@@ -56,7 +56,7 @@ export function OrderDrawer({ orderId, onClose, onChanged }: { orderId: number |
         <div style={{ padding: 20 }}><ErrorState error={q.error} onRetry={() => q.refetch()} /></div>
       ) : d ? (
         <>
-          <DrawerHeader d={d} onClose={onClose} refresh={refresh} openRisk={() => setTab("risk")} />
+          <DrawerHeader d={d} onClose={onClose} refresh={refresh} />
           <Tabs value={tab} onChange={setTab} px="lg" keepMounted={false}>
             <Tabs.List>
               <Tabs.Tab value="overview">Overview</Tabs.Tab>
@@ -81,7 +81,7 @@ export function OrderDrawer({ orderId, onClose, onChanged }: { orderId: number |
   );
 }
 
-function DrawerHeader({ d, onClose, refresh, openRisk }: { d: OrderDetail; onClose: () => void; refresh: () => void; openRisk: () => void }) {
+function DrawerHeader({ d, onClose, refresh }: { d: OrderDetail; onClose: () => void; refresh: () => void }) {
   const o = d.order;
   const can = useCan();
   const [cancelOpen, setCancelOpen] = useState(false);
@@ -160,7 +160,6 @@ function DrawerHeader({ d, onClose, refresh, openRisk }: { d: OrderDetail; onClo
           <ActionIcon variant="subtle" size="lg" color="gray" onClick={onClose} aria-label="Close">✕</ActionIcon>
         </Group>
       </Group>
-      {!o.archived && <RiskBanner risk={d.risk} onOpen={openRisk} />}
       {o.cancelRequestedAt && !o.cancelledAt && <Alert color="gray" variant="light" mt="sm" py={6}>Cancellation sent to Shopify {ago(o.cancelRequestedAt)} — waiting for confirmation.</Alert>}
       <CancelOrderModal orderId={o.id} name={o.name} opened={cancelOpen} onClose={() => setCancelOpen(false)} onDone={refresh} />
     </div>
