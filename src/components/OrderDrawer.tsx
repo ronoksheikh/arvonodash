@@ -10,9 +10,11 @@ import {
 import { api, del, notifyError, notifySuccess, patch, post, put } from "../api";
 import { useCan } from "../auth";
 import { useBookingCourier } from "../courier";
-import { useCountdown, CallingBadge, Copyable, CustomStatusBadge, DispatchBadge, ErrorState, FulfillmentBadge, KeyValue, LabelBadge, LoadingState, RiskBadge, ShopifySyncBadge, StageBadge, SteadfastStatusBadge, useStatuses, ReturnStatusBadge } from "./ui";
+import { useCountdown, Copyable, CustomStatusBadge, DispatchBadge, ErrorState, FulfillmentBadge, KeyValue, LabelBadge, LoadingState, RiskBadge, SteadfastStatusBadge, useStatuses, ReturnStatusBadge } from "./ui";
 import { CallingPanel } from "./Calling";
-import { FraudCard } from "./Fraud";
+import { RiskBanner, RiskTab } from "./Risk";
+import { OrderProgress } from "./Progress";
+import { RISK_LEVELS } from "../../shared/risk";
 import { JourneyTab } from "./Journey";
 import { SmsTab } from "./Sms";
 import { SourceCard } from "./Source";
@@ -54,17 +56,19 @@ export function OrderDrawer({ orderId, onClose, onChanged }: { orderId: number |
         <div style={{ padding: 20 }}><ErrorState error={q.error} onRetry={() => q.refetch()} /></div>
       ) : d ? (
         <>
-          <DrawerHeader d={d} onClose={onClose} refresh={refresh} />
+          <DrawerHeader d={d} onClose={onClose} refresh={refresh} openRisk={() => setTab("risk")} />
           <Tabs value={tab} onChange={setTab} px="lg" keepMounted={false}>
             <Tabs.List>
               <Tabs.Tab value="overview">Overview</Tabs.Tab>
+              <Tabs.Tab value="risk" rightSection={<Badge size="xs" variant={d.risk.level === "high" ? "filled" : "light"} color={RISK_LEVELS[d.risk.level].color}>{d.risk.score}</Badge>}>Risk</Tabs.Tab>
               <Tabs.Tab value="booking">Booking</Tabs.Tab>
               <Tabs.Tab value="courier" rightSection={d.consignments.length ? <Badge size="xs" variant="light">{d.consignments.length}</Badge> : null}>Courier</Tabs.Tab>
               <Tabs.Tab value="notes" rightSection={d.notes.length ? <Badge size="xs" variant="light">{d.notes.length}</Badge> : null}>Notes</Tabs.Tab>
               <Tabs.Tab value="sms" rightSection={d.sms.length ? <Badge size="xs" variant="light">{d.sms.length}</Badge> : null}>SMS</Tabs.Tab>
               <Tabs.Tab value="journey">Journey</Tabs.Tab>
             </Tabs.List>
-            <Tabs.Panel value="overview" py="lg"><OverviewTab d={d} refresh={refresh} goBooking={() => setTab("booking")} /></Tabs.Panel>
+            <Tabs.Panel value="overview" py="lg"><OverviewTab d={d} refresh={refresh} goBooking={() => setTab("booking")} goRisk={() => setTab("risk")} /></Tabs.Panel>
+            <Tabs.Panel value="risk" py="lg"><RiskTab d={d} refresh={refresh} /></Tabs.Panel>
             <Tabs.Panel value="booking" py="lg"><BookingTab d={d} refresh={refresh} goCourier={() => setTab("courier")} /></Tabs.Panel>
             <Tabs.Panel value="courier" py="lg"><CourierTab d={d} refresh={refresh} /></Tabs.Panel>
             <Tabs.Panel value="notes" py="lg"><NotesTab d={d} refresh={refresh} /></Tabs.Panel>
@@ -77,7 +81,7 @@ export function OrderDrawer({ orderId, onClose, onChanged }: { orderId: number |
   );
 }
 
-function DrawerHeader({ d, onClose, refresh }: { d: OrderDetail; onClose: () => void; refresh: () => void }) {
+function DrawerHeader({ d, onClose, refresh, openRisk }: { d: OrderDetail; onClose: () => void; refresh: () => void; openRisk: () => void }) {
   const o = d.order;
   const can = useCan();
   const [cancelOpen, setCancelOpen] = useState(false);
@@ -116,14 +120,9 @@ function DrawerHeader({ d, onClose, refresh }: { d: OrderDetail; onClose: () => 
           <Text size="sm" c="dimmed" mt={2}>
             {dateTime(o.shopCreatedAt)} · {o.sourceName ? titleCase(o.sourceName) : "Shopify"} · {money(o.total)}
           </Text>
-          <Group gap={6} mt="sm">
-            <CallingBadge status={o.callingStatus} size="md" />
-            <StageBadge stage={o.courierStage} size="md" />
-            {o.labelStatus !== "not_ready" && <LabelBadge status={o.labelStatus} />}
-            {o.dispatchStatus !== "pending" && <DispatchBadge status={o.dispatchStatus} />}
-            <FulfillmentBadge state={o.fulfillmentState} error={o.fulfillmentError} />
-            <ShopifySyncBadge status={o.shopifySyncStatus} error={o.shopifySyncError} />
-            <Badge size="sm" variant="outline" color={o.financialStatus === "paid" ? "teal" : "gray"}>{titleCase(o.financialStatus)}</Badge>
+          <Group gap="xs" mt="sm" align="center">
+            <OrderProgress order={{ ...o, courier: d.consignments.find((x) => x.id === o.activeConsignmentId)?.courier ?? null }} size="md" />
+            <Badge size="sm" variant="outline" color={o.financialStatus === "paid" ? "teal" : "gray"}>{o.financialStatus === "paid" ? "Prepaid" : o.outstanding > 0 ? `COD ${money(o.outstanding)}` : titleCase(o.financialStatus)}</Badge>
             <RiskBadge flags={o.riskFlags} dismissed={o.riskDismissed} />
           </Group>
         </div>
@@ -161,13 +160,14 @@ function DrawerHeader({ d, onClose, refresh }: { d: OrderDetail; onClose: () => 
           <ActionIcon variant="subtle" size="lg" color="gray" onClick={onClose} aria-label="Close">✕</ActionIcon>
         </Group>
       </Group>
+      {!o.archived && <RiskBanner risk={d.risk} onOpen={openRisk} />}
       {o.cancelRequestedAt && !o.cancelledAt && <Alert color="gray" variant="light" mt="sm" py={6}>Cancellation sent to Shopify {ago(o.cancelRequestedAt)} — waiting for confirmation.</Alert>}
       <CancelOrderModal orderId={o.id} name={o.name} opened={cancelOpen} onClose={() => setCancelOpen(false)} onDone={refresh} />
     </div>
   );
 }
 
-function OverviewTab({ d, refresh, goBooking }: { d: OrderDetail; refresh: () => void; goBooking: () => void }) {
+function OverviewTab({ d, refresh, goBooking, goRisk }: { d: OrderDetail; refresh: () => void; goBooking: () => void; goRisk: () => void }) {
   const o = d.order;
   const can = useCan();
   const parcelCourier = d.consignments.find((x) => x.id === o.activeConsignmentId)?.courier ?? "steadfast";
@@ -184,7 +184,6 @@ function OverviewTab({ d, refresh, goBooking }: { d: OrderDetail; refresh: () =>
 
   return (
     <Stack gap="lg">
-      {o.courierStage === "unbooked" && !o.cancelledAt && <FraudCard orderId={o.id} fraud={d.fraud} onChecked={refresh} />}
       {!o.cancelledAt && (
         <CallingPanel orderId={o.id} status={o.callingStatus} attempts={o.callAttempts} callbackAt={o.callbackAt} locked={o.courierStage !== "unbooked"} calls={d.calls} onDone={refresh} />
       )}
@@ -321,21 +320,15 @@ function OverviewTab({ d, refresh, goBooking }: { d: OrderDetail; refresh: () =>
         </Stack>
       </Card>
 
-      {d.otherOrders.length > 0 && (
-        <Card padding={0}>
-          <Text fw={600} size="sm" p="md" pb="xs">Other orders from this phone</Text>
-          <Table className="app-table" verticalSpacing={6}>
-            <Table.Tbody>
-              {d.otherOrders.map((x) => (
-                <Table.Tr key={x.id} style={{ cursor: "default" }}>
-                  <Table.Td pl="md"><Group gap={6}><Text size="sm" fw={500}>{x.name}</Text>{x.id === o.duplicateOfOrderId && <Badge size="xs" color="red">possible duplicate</Badge>}</Group></Table.Td>
-                  <Table.Td><Text size="xs" c="dimmed">{ago(x.shopCreatedAt)}</Text></Table.Td>
-                  <Table.Td>{x.cancelledAt ? <Badge size="xs" color="dark">Cancelled</Badge> : <StageBadge stage={x.courierStage} size="xs" />}</Table.Td>
-                  <Table.Td ta="right" pr="md"><Text size="sm">{money(x.total)}</Text></Table.Td>
-                </Table.Tr>
-              ))}
-            </Table.Tbody>
-          </Table>
+      {d.risk.previous.length > 0 && (
+        <Card padding="sm" withBorder style={{ cursor: "pointer" }} onClick={goRisk}>
+          <Group justify="space-between" wrap="nowrap">
+            <Text size="sm">
+              <b>{d.risk.previous.length}</b> other order{d.risk.previous.length === 1 ? "" : "s"} from this number
+              {o.duplicateOfOrderId && <Badge size="xs" color="red" ml={6}>possible duplicate</Badge>}
+            </Text>
+            <Text size="xs" c="blue">See history in Risk →</Text>
+          </Group>
         </Card>
       )}
     </Stack>

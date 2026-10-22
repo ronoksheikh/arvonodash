@@ -561,3 +561,21 @@ export const smsMessages = sqliteTable(
   },
   (t) => [index("sms_order_idx").on(t.orderId), index("sms_created_idx").on(t.createdAt)],
 );
+
+/**
+ * Smart risk score of an order (0 = safe, 100 = very risky), recomputed whenever anything that feeds
+ * it changes: the customer's earlier orders, the Steadfast fraud check, the ad/district return rates.
+ * Kept out of `orders` (D1's 100-column limit) and read next to the order list.
+ */
+export const orderRisk = sqliteTable(
+  "order_risk",
+  {
+    orderId: integer("order_id").primaryKey(),
+    score: integer("score").notNull(),
+    level: text("level").notNull(), // low | medium | high
+    headline: text("headline").notNull(),
+    factors: text("factors", { mode: "json" }).$type<{ key: string; label: string; points: number }[]>().notNull(),
+    computedAt: text("computed_at").notNull(),
+  },
+  (t) => [index("order_risk_level_idx").on(t.level)],
+);

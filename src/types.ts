@@ -1,3 +1,4 @@
+import type { GroupStat, PreviousOrder, RiskLevel, RiskResult } from "../shared/risk";
 import type { Attribution } from "../shared/attribution";
 // API response shapes used by the dashboard.
 
@@ -77,6 +78,22 @@ export type OrderListRow = {
   /** Same customer's other confirmed orders still waiting for a parcel ("#1002, #1003"). */
   combinableWith: string | null;
   fraud: FraudSummary | null;
+  handedOverAt: string | null;
+  /** Courier of the active parcel (steadfast | carrybee). */
+  courier: string | null;
+  risk: RiskSummary | null;
+};
+
+/** Stored smart risk score (list rows). */
+export type RiskSummary = { score: number; level: RiskLevel; headline: string; factors: { key: string; label: string; points: number }[] };
+
+/** Full risk report (order drawer). */
+export type RiskReport = RiskResult & {
+  previous: PreviousOrder[];
+  channel: (GroupStat & { label: string }) | null;
+  campaign: GroupStat | null;
+  district: GroupStat | null;
+  computedAt: string;
 };
 
 /** Steadfast fraud check: the customer's delivery record across all merchants. */
@@ -95,7 +112,7 @@ export type FraudSummary = {
   checkedAt: string;
 };
 
-export type Order = Omit<OrderListRow, "itemCount" | "trackingCode" | "consignmentStatus" | "consignmentCod" | "customerOrders" | "customerDelivered" | "customerReturned" | "customerFlag" | "combinableWith" | "fraud"> & {
+export type Order = Omit<OrderListRow, "itemCount" | "trackingCode" | "consignmentStatus" | "consignmentCod" | "customerOrders" | "customerDelivered" | "customerReturned" | "customerFlag" | "combinableWith" | "fraud" | "courier" | "risk"> & {
   orderNumber: number | null;
   shopUpdatedAt: string;
   cancelReason: string | null;
@@ -252,6 +269,7 @@ export type OrderDetail = {
   trackingPageUrl: string | null;
   journey: Journey;
   sms: SmsMessage[];
+  risk: RiskReport;
 };
 
 export type JourneySource = "shopify" | "call" | "booking" | "warehouse" | "courier" | "sms" | "staff" | "system";

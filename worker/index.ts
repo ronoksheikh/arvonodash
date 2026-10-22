@@ -11,6 +11,7 @@ import { dispatchRoutes } from "./routes/dispatch";
 import { expireReservations } from "./services/dispatch";
 import { rollOverMissedPickups } from "./services/pickup";
 import { syncAttribution } from "./services/attribution";
+import { backfillRisk } from "./services/riskScore";
 import { orderRoutes } from "./routes/orders";
 import { opsRoutes } from "./routes/ops";
 import { consignmentRoutes } from "./routes/consignments";
@@ -23,7 +24,7 @@ import { runAutoBookings } from "./services/autobook";
 import { shopifyConfigured } from "./services/shopify";
 import { steadfastConfigured } from "./services/steadfast";
 import { carrybeeConfigured } from "./services/carrybee";
-import { setValue } from "./services/settings";
+import { getSettings, setValue } from "./services/settings";
 import { ensureMigrated } from "./db/migrate";
 import { hydrateEnv } from "./services/credentials";
 import { buildTracking, instanceId, trackingHost } from "./services/tracking";
@@ -108,6 +109,7 @@ async function scheduled(controller: ScheduledController, env: Env) {
     ["carry_over", () => rollOverMissedPickups(db, env.APP_TIMEZONE_OFFSET || "+06:00"), true],
     ["jobs", () => processJobs(env, db, { limit: 25 }), true],
     ["webhook_retry", () => retryFailedWebhooks(db, { limit: 20 }), true],
+    ["risk_scores", async () => backfillRisk(db, await getSettings(db)), true],
     ["courier_poll", () => pollActiveConsignments(env, db, { limit: 40, staleMinutes: 30 }), steadfastConfigured(env) || carrybeeConfigured(env)],
   ];
   for (const [kind, fn, enabled] of steps) {
